@@ -72,6 +72,27 @@ deps:
 clean:
 	rm -rf bin/
 
+## Clean everything (kind cluster, VMs, processes, network)
+clean-all:
+	@echo "Stopping simulator processes..."
+	-pkill -f "bin/simulator" 2>/dev/null || true
+	-sudo pkill -f "bin/simulator" 2>/dev/null || true
+	@echo "Killing QEMU VMs..."
+	-sudo pkill -f "qemu-system-x86_64.*sim-worker" 2>/dev/null || true
+	@echo "Deleting kind cluster..."
+	-kind delete cluster --name stargate-demo 2>/dev/null || true
+	@echo "Cleaning up VM storage..."
+	-sudo rm -rf /var/lib/stargate/vms/ 2>/dev/null || true
+	@echo "Cleaning up tap devices..."
+	-sudo ip link delete tap-sim-worker- 2>/dev/null || true
+	@echo "Cleaning up bridge..."
+	-sudo ip link set stargate-br0 down 2>/dev/null || true
+	-sudo ip link delete stargate-br0 2>/dev/null || true
+	@echo "Cleaning up demo files..."
+	-rm -rf /tmp/stargate-demo 2>/dev/null || true
+	-rm -f /tmp/kind-config.yaml /tmp/stargate-kubeconfig 2>/dev/null || true
+	@echo "Cleanup complete!"
+
 ## Help
 
 help:
@@ -91,3 +112,4 @@ help:
 	@echo "  test            - Run tests"
 	@echo "  deps            - Download and tidy dependencies"
 	@echo "  clean           - Remove built binaries"
+	@echo "  clean-all       - Delete kind cluster, VMs, network, and temp files"

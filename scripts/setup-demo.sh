@@ -156,6 +156,19 @@ kubectl get cm kubelet-config -n kube-system -o json 2>/dev/null | \
     jq '.data.kubelet |= sub("cgroupRoot: /kubelet\n"; "")' | \
     kubectl apply -f - 2>/dev/null || true
 
+# Fix kube-proxy configmap to use bridge IP instead of internal hostname
+# (kube-proxy on VMs can't resolve stargate-demo-control-plane)
+echo "Patching kube-proxy configmap..."
+kubectl get cm kube-proxy -n kube-system -o json 2>/dev/null | \
+    jq 'del(.metadata.managedFields, .metadata.annotations, .metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp)' | \
+    jq ".data[\"kubeconfig.conf\"] |= gsub(\"${KIND_CLUSTER_NAME}-control-plane:6443\"; \"${BRIDGE_IP}:${API_PORT}\")" | \
+    kubectl apply -f - 2>/dev/null || true
+
+# Add route from kind container to VM bridge network
+# This is needed for kindnet to add routes to worker node pod CIDRs
+echo "Adding route from kind container to VM network..."
+docker exec ${KIND_CLUSTER_NAME}-control-plane ip route add ${BRIDGE_SUBNET} via $(docker network inspect kind -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}') 2>/dev/null || true
+
 # Generate kubeadm join command
 echo -e "\n${YELLOW}Generating kubeadm join command...${NC}"
 
@@ -222,6 +235,11 @@ spec:
     
     ssh_pwauth: true
     
+    # Add /etc/hosts entry for kind control-plane so kube-proxy/kindnet can resolve it
+    manage_etc_hosts: false
+    bootcmd:
+      - echo "${BRIDGE_IP} stargate-demo-control-plane" >> /etc/hosts
+    
     package_update: true
     package_upgrade: false
     
@@ -243,6 +261,33 @@ spec:
           net.bridge.bridge-nf-call-iptables  = 1
           net.bridge.bridge-nf-call-ip6tables = 1
           net.ipv4.ip_forward                 = 1
+      
+      # CNI config for kindnet - newer kindnet versions don't auto-create this
+      # because the VM uses enp0s2 instead of eth0
+      - path: /etc/cni/net.d/10-kindnet.conflist
+        permissions: '0644'
+        content: |
+          {
+            "cniVersion": "0.3.1",
+            "name": "kindnet",
+            "plugins": [
+              {
+                "type": "ptp",
+                "mtu": 1500,
+                "ipMasq": false,
+                "ipam": {
+                  "type": "host-local",
+                  "dataDir": "/run/cni-ipam-state",
+                  "routes": [{ "dst": "0.0.0.0/0" }],
+                  "ranges": [[{ "subnet": "10.244.0.0/16" }]]
+                }
+              },
+              {
+                "type": "portmap",
+                "capabilities": { "portMappings": true }
+              }
+            ]
+          }
       
       - path: /tmp/install-k8s.sh
         permissions: '0755'
@@ -357,4 +402,5 @@ echo "   kubectl apply -f ${DEMO_DIR}/job.yaml"
 echo ""
 echo "6. Watch progress:"
 echo "   kubectl get jobs.stargate.io -n dc-simulator -w"
+echo "   sudo tail -f /var/lib/stargate/vms/sim-worker-001/serial.log"
 echo "   kubectl get nodes -w"
