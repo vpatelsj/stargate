@@ -1,4 +1,4 @@
-.PHONY: all build run test clean install-crds uninstall-crds mockapi controller
+.PHONY: all build run test clean install-crds uninstall-crds mockapi controller simulator
 
 # Go parameters
 GOCMD=go
@@ -9,18 +9,22 @@ GOMOD=$(GOCMD) mod
 # Binary names
 CONTROLLER_BIN=bin/controller
 MOCKAPI_BIN=bin/mockapi
+SIMULATOR_BIN=bin/simulator
 
 all: build
 
 ## Build targets
 
-build: controller mockapi
+build: controller mockapi simulator
 
 controller:
 	$(GOBUILD) -o $(CONTROLLER_BIN) ./main.go
 
 mockapi:
 	$(GOBUILD) -o $(MOCKAPI_BIN) ./mockapi/main.go
+
+simulator:
+	$(GOBUILD) -o $(SIMULATOR_BIN) ./cmd/simulator/main.go
 
 ## Run targets
 
@@ -32,6 +36,9 @@ run-mockapi-east:
 
 run-controller:
 	$(CONTROLLER_BIN) --dc-api-url=http://localhost:8080
+
+run-simulator:
+	sudo $(SIMULATOR_BIN)
 
 ## Kubernetes targets
 
@@ -72,9 +79,11 @@ help:
 	@echo "  build           - Build all binaries"
 	@echo "  controller      - Build the controller"
 	@echo "  mockapi         - Build the mock DC API"
+	@echo "  simulator       - Build the QEMU simulator controller"
 	@echo "  run-mockapi-west - Run mock DC API for dc-west (port 8080)"
 	@echo "  run-mockapi-east - Run mock DC API for dc-east (port 8081)"
 	@echo "  run-controller  - Run the controller"
+	@echo "  run-simulator   - Run the simulator (requires root)"
 	@echo "  install-crds    - Install CRDs to cluster"
 	@echo "  uninstall-crds  - Remove CRDs from cluster"
 	@echo "  create-samples  - Create sample resources"

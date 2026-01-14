@@ -122,6 +122,9 @@ server-002                   10.0.1.6
 │   ├── template_types.go
 │   ├── job_types.go
 │   └── groupversion_info.go
+├── cmd/
+│   └── simulator/          # QEMU simulator controller
+│       └── main.go
 ├── controller/
 │   └── job_controller.go   # Job reconciliation logic
 ├── dcclient/
@@ -129,6 +132,14 @@ server-002                   10.0.1.6
 │   └── http_client.go      # HTTP implementation
 ├── mockapi/
 │   └── main.go             # Mock DC API server
+├── pkg/
+│   └── qemu/               # QEMU VM management
+│       ├── vm.go           # VM create, start, stop
+│       ├── cloudinit.go    # Cloud-init ISO generation
+│       ├── network.go      # Bridge/tap networking
+│       └── image.go        # Image download/cache
+├── scripts/
+│   └── setup-demo.sh       # Demo environment setup
 ├── config/
 │   ├── crd/bases/          # CRD YAML manifests
 │   └── samples/            # Sample resources
@@ -208,11 +219,92 @@ For now, each controller instance watches all namespaces and connects to one DC 
 - Use namespace selectors to scope each controller to specific namespaces
 - Configure each controller with its corresponding DC API URL
 
+## Simulator Mode
+
+The simulator controller creates real QEMU VMs instead of simulating operations via the mock API. This allows you to test the full provisioning flow including cloud-init and Kubernetes node join.
+
+### Prerequisites
+
+- QEMU with KVM support
+- ISO generation tool (genisoimage, mkisofs, or xorrisofs)
+- kind cluster
+- Root access (for networking)
+
+### Simulator Quick Start
+
+```bash
+# 1. Setup (creates kind cluster, generates manifests with join command)
+sudo ./scripts/setup-demo.sh
+
+# 2. Build
+make build
+
+# 3. Install CRDs
+kubectl apply -f config/crd/bases/
+
+# 4. Apply demo resources
+kubectl apply -f /tmp/stargate-demo/namespace.yaml
+kubectl apply -f /tmp/stargate-demo/hardware.yaml
+kubectl apply -f /tmp/stargate-demo/template-k8s-worker.yaml
+
+# 5. Start simulator controller (requires root for networking)
+sudo ./bin/simulator
+
+# 6. Trigger repave (in another terminal)
+kubectl apply -f /tmp/stargate-demo/job.yaml
+
+# 7. Watch job progress
+kubectl get jobs.stargate.io -n dc-simulator -w
+
+# 8. Watch node join cluster
+kubectl get nodes -w
+```
+
+### Simulator Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Kind Cluster (runs on host)                                │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  - Stargate CRDs (Hardware, Template, Job)          │    │
+│  │  - API server exposed on host IP                    │    │
+│  └─────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+       │
+       │ watches Job CRs
+       ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Simulator Controller (runs on host, outside cluster)       │
+│  - Watches Job CRs                                          │
+│  - On repave: creates QEMU VM with cloud-init from Template │
+│  - Updates Hardware status with VM IP                       │
+│  - Updates Job status (Pending → Running → Succeeded)       │
+└─────────────────────────────────────────────────────────────┘
+       │
+       │ creates
+       ▼
+┌─────────────────────────────────────────────────────────────┐
+│  QEMU VM (bridge network: 192.168.100.0/24)                 │
+│  - Boots Ubuntu cloud image                                 │
+│  - Runs cloud-init from Template                            │
+│  - Installs containerd, kubelet, kubeadm                    │
+│  - Executes kubeadm join to join kind cluster               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Technical Details
+
+- **VM Specs**: 2 CPU, 4GB RAM, 20GB disk
+- **Base Image**: Ubuntu 22.04 cloud image (auto-downloaded)
+- **Networking**: Bridge `stargate-br0` with NAT (192.168.100.0/24)
+- **Storage**: `/var/lib/stargate/` (images and VM disks)
+
 ## Next Steps
 
 - [ ] Add namespace-scoped controller configuration
-- [ ] Add cloud-init support for cluster join
+- [x] Add cloud-init support for cluster join
 - [ ] Add reboot operation
 - [ ] Add job TTL / garbage collection
 - [ ] Add metrics and observability
 - [ ] Add webhook validation
+- [ ] Add VM health monitoring and auto-recovery
