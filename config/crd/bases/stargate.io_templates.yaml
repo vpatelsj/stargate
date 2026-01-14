@@ -1,0 +1,66 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: templates.stargate.io
+spec:
+  group: stargate.io
+  names:
+    kind: Template
+    listKind: TemplateList
+    plural: templates
+    singular: template
+    shortNames:
+      - tpl
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - osVersion
+              properties:
+                osVersion:
+                  type: string
+                  description: OS version to install
+                osImage:
+                  type: string
+                  description: URL of the OS image
+                cloudInit:
+                  type: string
+                  description: Cloud-init configuration
+                cloudInitSecretRef:
+                  type: string
+                  description: Reference to Secret containing cloud-init data
+            status:
+              type: object
+              properties:
+                ready:
+                  type: boolean
+                  description: Whether the template is ready for use
+                message:
+                  type: string
+                  description: Additional status information
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: OSVersion
+          type: string
+          jsonPath: .spec.osVersion
+        - name: Ready
+          type: boolean
+          jsonPath: .status.ready

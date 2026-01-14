@@ -1,0 +1,98 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: jobs.stargate.io
+spec:
+  group: stargate.io
+  names:
+    kind: Job
+    listKind: JobList
+    plural: jobs
+    singular: job
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - hardwareRef
+                - templateRef
+                - operation
+              properties:
+                hardwareRef:
+                  type: object
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                      description: Name of the Hardware resource
+                templateRef:
+                  type: object
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                      description: Name of the Template resource
+                operation:
+                  type: string
+                  enum:
+                    - repave
+                    - reboot
+                  description: Operation to perform
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Running
+                    - Succeeded
+                    - Failed
+                  description: Current phase of the job
+                startTime:
+                  type: string
+                  format: date-time
+                  description: When the job started
+                completionTime:
+                  type: string
+                  format: date-time
+                  description: When the job completed
+                message:
+                  type: string
+                  description: Additional status information
+                dcJobID:
+                  type: string
+                  description: Job ID from the datacenter API
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Hardware
+          type: string
+          jsonPath: .spec.hardwareRef.name
+        - name: Operation
+          type: string
+          jsonPath: .spec.operation
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

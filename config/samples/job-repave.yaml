@@ -1,0 +1,12 @@
+---
+apiVersion: stargate.io/v1alpha1
+kind: Job
+metadata:
+  name: repave-server-001
+  namespace: dc-west
+spec:
+  hardwareRef:
+    name: server-001
+  templateRef:
+    name: os-2-0-0
+  operation: repave

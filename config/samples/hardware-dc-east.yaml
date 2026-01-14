@@ -1,0 +1,18 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dc-east
+---
+apiVersion: stargate.io/v1alpha1
+kind: Hardware
+metadata:
+  name: server-001
+  namespace: dc-east
+spec:
+  mac: "aa:bb:cc:dd:ff:01"
+  ipv4: "10.0.2.5"
+  inventory:
+    sku: "GPU-4xA100"
+    location: "rack-1-slot-1"
+    serialNumber: "SN-001-EAST"

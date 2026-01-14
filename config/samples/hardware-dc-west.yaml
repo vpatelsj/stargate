@@ -1,0 +1,31 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dc-west
+---
+apiVersion: stargate.io/v1alpha1
+kind: Hardware
+metadata:
+  name: server-001
+  namespace: dc-west
+spec:
+  mac: "aa:bb:cc:dd:ee:01"
+  ipv4: "10.0.1.5"
+  inventory:
+    sku: "GPU-8xH100"
+    location: "rack-5-slot-12"
+    serialNumber: "SN-001-WEST"
+---
+apiVersion: stargate.io/v1alpha1
+kind: Hardware
+metadata:
+  name: server-002
+  namespace: dc-west
+spec:
+  mac: "aa:bb:cc:dd:ee:02"
+  ipv4: "10.0.1.6"
+  inventory:
+    sku: "GPU-8xH100"
+    location: "rack-5-slot-13"
+    serialNumber: "SN-002-WEST"

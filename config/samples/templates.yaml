@@ -1,0 +1,18 @@
+---
+apiVersion: stargate.io/v1alpha1
+kind: Template
+metadata:
+  name: os-2-0-0
+  namespace: dc-west
+spec:
+  osVersion: "2.0.0"
+  osImage: "https://images.example.com/ubuntu-22-aks-2.0.0.img"
+---
+apiVersion: stargate.io/v1alpha1
+kind: Template
+metadata:
+  name: os-2-0-0
+  namespace: dc-east
+spec:
+  osVersion: "2.0.0"
+  osImage: "https://images.example.com/ubuntu-22-aks-2.0.0.img"
