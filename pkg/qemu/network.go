@@ -99,6 +99,14 @@ func (nm *NetworkManager) CreateTap(ctx context.Context, vmName string) (string,
 	// Check if tap already exists
 	if nm.tapExists(tapName) {
 		nm.Logger.Info("Tap device already exists", "name", tapName)
+		// Ensure it's attached to bridge (may have been detached)
+		if err := nm.runIP(ctx, "link", "set", tapName, "master", nm.BridgeName); err != nil {
+			nm.Logger.Info("Note: could not attach existing tap to bridge", "error", err)
+		}
+		// Ensure it's up
+		if err := nm.runIP(ctx, "link", "set", tapName, "up"); err != nil {
+			nm.Logger.Info("Note: could not bring up existing tap", "error", err)
+		}
 		return tapName, nil
 	}
 
@@ -210,8 +218,17 @@ func (nm *NetworkManager) TeardownBridge(ctx context.Context) error {
 }
 
 func (nm *NetworkManager) getTapName(vmName string) string {
-	// Truncate if necessary (interface names max 15 chars)
-	name := fmt.Sprintf("tap-%s", vmName)
+	// Interface names max 15 chars, use hash suffix for uniqueness
+	// e.g., "sim-worker-001" -> "tap-001" or use last part of name
+	name := vmName
+	// If name has dashes, use the last segment (e.g., "sim-worker-001" -> "001")
+	parts := strings.Split(vmName, "-")
+	if len(parts) > 1 {
+		// Use "tap-" prefix + last part, e.g., "tap-001"
+		name = fmt.Sprintf("tap-%s", parts[len(parts)-1])
+	} else {
+		name = fmt.Sprintf("tap-%s", vmName)
+	}
 	if len(name) > 15 {
 		name = name[:15]
 	}
