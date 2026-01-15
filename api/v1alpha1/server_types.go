@@ -4,8 +4,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// HardwareSpec defines the desired state of Hardware
-type HardwareSpec struct {
+// ServerSpec defines the desired state of Server
+type ServerSpec struct {
 	// MAC address of the server's primary NIC
 	MAC string `json:"mac"`
 
@@ -16,7 +16,7 @@ type HardwareSpec struct {
 	BMC *BMCConfig `json:"bmc,omitempty"`
 
 	// Inventory metadata
-	Inventory HardwareInventory `json:"inventory,omitempty"`
+	Inventory ServerInventory `json:"inventory,omitempty"`
 }
 
 // BMCConfig holds BMC connection details
@@ -28,8 +28,8 @@ type BMCConfig struct {
 	CredentialSecretRef string `json:"credentialSecretRef,omitempty"`
 }
 
-// HardwareInventory holds inventory metadata for the hardware
-type HardwareInventory struct {
+// ServerInventory holds inventory metadata for the server
+type ServerInventory struct {
 	// SKU of the hardware (e.g., "GPU-8xH100")
 	SKU string `json:"sku,omitempty"`
 
@@ -40,8 +40,8 @@ type HardwareInventory struct {
 	SerialNumber string `json:"serialNumber,omitempty"`
 }
 
-// HardwareStatus defines the observed state of Hardware
-type HardwareStatus struct {
+// ServerStatus defines the observed state of Server
+type ServerStatus struct {
 	// State of the hardware: ready, provisioning, error
 	State string `json:"state,omitempty"`
 
@@ -61,24 +61,24 @@ type HardwareStatus struct {
 // +kubebuilder:printcolumn:name="OS",type="string",JSONPath=".status.currentOS"
 // +kubebuilder:printcolumn:name="IPv4",type="string",JSONPath=".spec.ipv4"
 
-// Hardware represents a bare-metal server in a datacenter
-type Hardware struct {
+// Server represents a bare-metal server in a datacenter
+type Server struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   HardwareSpec   `json:"spec,omitempty"`
-	Status HardwareStatus `json:"status,omitempty"`
+	Spec   ServerSpec   `json:"spec,omitempty"`
+	Status ServerStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 
-// HardwareList contains a list of Hardware
-type HardwareList struct {
+// ServerList contains a list of Server
+type ServerList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []Hardware `json:"items"`
+	Items           []Server `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(&Hardware{}, &HardwareList{})
+	SchemeBuilder.Register(&Server{}, &ServerList{})
 }

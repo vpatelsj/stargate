@@ -49,9 +49,9 @@ uninstall-crds:
 	kubectl delete -f config/crd/bases/ --ignore-not-found
 
 create-samples:
-	kubectl apply -f config/samples/hardware-dc-west.yaml
-	kubectl apply -f config/samples/hardware-dc-east.yaml
-	kubectl apply -f config/samples/templates.yaml
+	kubectl apply -f config/samples/server-dc-west.yaml
+	kubectl apply -f config/samples/server-dc-east.yaml
+	kubectl apply -f config/samples/provisioningprofiles.yaml
 
 delete-samples:
 	kubectl delete -f config/samples/ --ignore-not-found

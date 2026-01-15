@@ -2,15 +2,15 @@
 
 ## Goal
 
-Add a simulator datacenter controller that creates real QEMU VMs when a `Job` CR with `operation: repave` is created. The VM should boot an OS, run cloud-init (defined in the Template CR), install kubelet, and join a kind cluster as a worker node.
+Add a simulator datacenter controller that creates real QEMU VMs when an `Operation` CR with `operation: repave` is created. The VM should boot an OS, run cloud-init (defined in the ProvisioningProfile CR), install kubelet, and join a kind cluster as a worker node.
 
 ## Context
 
 Stargate is a system for managing bare-metal server lifecycle across multiple datacenters from a central Kubernetes management cluster. We have three CRDs:
 
-- **Hardware** — represents a bare-metal server (or VM slot in simulator)
-- **Template** — defines provisioning config including cloud-init
-- **Job** — triggers an operation (repave) on a Hardware using a Template
+- **Server** — represents a bare-metal server (or VM slot in simulator)
+- **ProvisioningProfile** — defines provisioning config including cloud-init
+- **Operation** — triggers an operation (repave) on a Server using a ProvisioningProfile
 
 Currently there's a mock controller that simulates operations via a fake HTTP API. We want a real simulator that actually creates QEMU VMs.
 
@@ -20,19 +20,19 @@ Currently there's a mock controller that simulates operations via a fake HTTP AP
 ┌─────────────────────────────────────────────────────────────┐
 │  Kind Cluster (runs on host)                                │
 │  ┌─────────────────────────────────────────────────────┐    │
-│  │  - Stargate CRDs (Hardware, Template, Job)          │    │
+│  │  - Stargate CRDs (Server, ProvisioningProfile, Operation)          │    │
 │  │  - API server exposed on host IP                    │    │
 │  └─────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────┘
        │
-       │ watches Job CRs
+       │ watches Operation CRs
        ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  Simulator Controller (runs on host, outside cluster)       │
-│  - Watches Job CRs                                          │
-│  - On repave: creates QEMU VM with cloud-init from Template │
-│  - Updates Hardware status with VM IP                       │
-│  - Updates Job status (Pending → Running → Succeeded)       │
+│  - Watches Operation CRs                                          │
+│  - On repave: creates QEMU VM with cloud-init from ProvisioningProfile │
+│  - Updates Server status with VM IP                       │
+│  - Updates Operation status (Pending → Running → Succeeded)       │
 └─────────────────────────────────────────────────────────────┘
        │
        │ creates
@@ -40,7 +40,7 @@ Currently there's a mock controller that simulates operations via a fake HTTP AP
 ┌─────────────────────────────────────────────────────────────┐
 │  QEMU VM (bridge network: 192.168.100.0/24)                 │
 │  - Boots Ubuntu cloud image                                 │
-│  - Runs cloud-init from Template                            │
+│  - Runs cloud-init from ProvisioningProfile                            │
 │  - Installs containerd, kubelet, kubeadm                    │
 │  - Executes kubeadm join to join kind cluster               │
 └─────────────────────────────────────────────────────────────┘
@@ -58,7 +58,7 @@ Currently there's a mock controller that simulates operations via a fake HTTP AP
 
 ### 2. Cloud-Init ISO Generation (`pkg/qemu/cloudinit.go`)
 
-- Generate NoCloud datasource ISO from Template's `spec.cloudInit`
+- Generate NoCloud datasource ISO from ProvisioningProfile's `spec.cloudInit`
 - Include meta-data with hostname and instance-id
 - Use `genisoimage`, `mkisofs`, or `xorrisofs`
 
@@ -72,17 +72,17 @@ Currently there's a mock controller that simulates operations via a fake HTTP AP
 ### 4. Simulator Controller (`cmd/simulator/main.go`)
 
 - Kubernetes controller using controller-runtime
-- Watches `Job` CRs in all namespaces
-- On new Job with `operation: repave`:
-  1. Fetch referenced Hardware and Template
+- Watches `Operation` CRs in all namespaces
+- On new Operation with `operation: repave`:
+  1. Fetch referenced Server and ProvisioningProfile
   2. Download base image if not cached
-  3. Generate cloud-init ISO from Template's cloudInit
+  3. Generate cloud-init ISO from ProvisioningProfile's cloudInit
   4. Create tap device and attach to bridge
   5. Create and start QEMU VM
-  6. Update Job status: Pending → Running
+  6. Update Operation status: Pending → Running
   7. Poll/wait for VM to be running
-  8. Update Job status: Running → Succeeded
-  9. Update Hardware status with IP and state=ready
+  8. Update Operation status: Running → Succeeded
+  9. Update Server status with IP and state=ready
 - Runs outside the cluster (on host) with kubeconfig
 
 ### 5. Setup Script (`scripts/setup-demo.sh`)
@@ -92,13 +92,13 @@ Currently there's a mock controller that simulates operations via a fake HTTP AP
 - Create kind cluster with API server exposed on host IP
 - Generate kubeadm join command
 - Create ready-to-use manifests:
-  - Hardware CR
-  - Template CR with cloud-init that installs k8s and runs join command
-  - Job CR to trigger repave
+  - Server CR
+  - ProvisioningProfile CR with cloud-init that installs k8s and runs join command
+  - Operation CR to trigger repave
 
-## Cloud-Init Template
+## Cloud-Init ProvisioningProfile
 
-The Template CR should contain cloud-init that:
+The ProvisioningProfile CR should contain cloud-init that:
 
 1. Updates packages
 2. Installs containerd
@@ -120,17 +120,17 @@ make build
 kubectl apply -f config/crd/bases/
 
 # 4. Apply demo resources
-kubectl apply -f /tmp/stargate-demo/hardware.yaml
-kubectl apply -f /tmp/stargate-demo/template-k8s-worker.yaml
+kubectl apply -f /tmp/stargate-demo/server.yaml
+kubectl apply -f /tmp/stargate-demo/provisioningprofile-k8s-worker.yaml
 
 # 5. Start simulator controller (requires root for networking)
 sudo ./bin/simulator
 
 # 6. Trigger repave
-kubectl apply -f /tmp/stargate-demo/job.yaml
+kubectl apply -f /tmp/stargate-demo/operation.yaml
 
-# 7. Watch job progress
-kubectl get jobs.stargate.io -n dc-simulator -w
+# 7. Watch operation progress
+kubectl get operations.stargate.io -n dc-simulator -w
 
 # 8. Watch node join cluster
 kubectl get nodes -w
@@ -162,15 +162,15 @@ stargate/
 │   └── setup-demo.sh         # NEW: Demo setup script
 ├── config/
 │   └── samples/
-│       └── template-k8s-worker.yaml  # NEW: K8s worker template
+│       └── provisioningprofile-k8s-worker.yaml  # NEW: K8s worker profile
 ├── Makefile                  # MODIFY: Add simulator target
 └── README.md                 # MODIFY: Add simulator docs
 ```
 
 ## Success Criteria
 
-1. Running `kubectl apply -f job.yaml` creates a QEMU VM
+1. Running `kubectl apply -f operation.yaml` creates a QEMU VM
 2. VM boots Ubuntu and runs cloud-init
 3. After ~3-5 minutes, `kubectl get nodes` shows a new worker node
-4. Job status shows Succeeded
-5. Hardware status shows state=ready with VM's IP
+4. Operation status shows Succeeded
+5. Server status shows state=ready with VM's IP

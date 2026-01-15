@@ -4,8 +4,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// TemplateSpec defines the desired state of Template
-type TemplateSpec struct {
+// ProvisioningProfileSpec defines the desired state of ProvisioningProfile
+type ProvisioningProfileSpec struct {
 	// OSVersion to install (e.g., "2.0.0")
 	OSVersion string `json:"osVersion"`
 
@@ -19,8 +19,8 @@ type TemplateSpec struct {
 	CloudInitSecretRef string `json:"cloudInitSecretRef,omitempty"`
 }
 
-// TemplateStatus defines the observed state of Template
-type TemplateStatus struct {
+// ProvisioningProfileStatus defines the observed state of ProvisioningProfile
+type ProvisioningProfileStatus struct {
 	// Ready indicates if the template is valid and ready for use
 	Ready bool `json:"ready,omitempty"`
 
@@ -33,24 +33,24 @@ type TemplateStatus struct {
 // +kubebuilder:printcolumn:name="OSVersion",type="string",JSONPath=".spec.osVersion"
 // +kubebuilder:printcolumn:name="Ready",type="boolean",JSONPath=".status.ready"
 
-// Template defines a provisioning configuration that can be applied to Hardware
-type Template struct {
+// ProvisioningProfile defines a provisioning configuration that can be applied to Server
+type ProvisioningProfile struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   TemplateSpec   `json:"spec,omitempty"`
-	Status TemplateStatus `json:"status,omitempty"`
+	Spec   ProvisioningProfileSpec   `json:"spec,omitempty"`
+	Status ProvisioningProfileStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 
-// TemplateList contains a list of Template
-type TemplateList struct {
+// ProvisioningProfileList contains a list of ProvisioningProfile
+type ProvisioningProfileList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []Template `json:"items"`
+	Items           []ProvisioningProfile `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(&Template{}, &TemplateList{})
+	SchemeBuilder.Register(&ProvisioningProfile{}, &ProvisioningProfileList{})
 }

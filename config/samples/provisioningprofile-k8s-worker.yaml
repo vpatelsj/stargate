@@ -1,5 +1,5 @@
 apiVersion: stargate.io/v1alpha1
-kind: Template
+kind: ProvisioningProfile
 metadata:
   name: k8s-worker
   namespace: dc-simulator
@@ -8,7 +8,7 @@ spec:
   osImage: "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
   cloudInit: |
     #cloud-config
-    # Kubernetes Worker Node Cloud-Init Template
+    # Kubernetes Worker Node Cloud-Init Provisioning Profile
     # This template provisions a VM to join a Kubernetes cluster as a worker node
     
     hostname: ${HOSTNAME}

@@ -187,10 +187,10 @@ echo -e "${GREEN}Join command: ${JOIN_CMD}${NC}"
 echo -e "\n${YELLOW}Creating demo manifests...${NC}"
 mkdir -p "${DEMO_DIR}"
 
-# Create Hardware CRs
-cat > "${DEMO_DIR}/hardware.yaml" <<EOF
+# Create Server CRs
+cat > "${DEMO_DIR}/server.yaml" <<EOF
 apiVersion: stargate.io/v1alpha1
-kind: Hardware
+kind: Server
 metadata:
   name: sim-worker-001
   namespace: dc-simulator
@@ -201,7 +201,7 @@ spec:
     location: "simulator"
 ---
 apiVersion: stargate.io/v1alpha1
-kind: Hardware
+kind: Server
 metadata:
   name: sim-worker-002
   namespace: dc-simulator
@@ -212,10 +212,10 @@ spec:
     location: "simulator"
 EOF
 
-# Create Template CR with cloud-init
-cat > "${DEMO_DIR}/template-k8s-worker.yaml" <<EOF
+# Create ProvisioningProfile CR with cloud-init
+cat > "${DEMO_DIR}/provisioningprofile-k8s-worker.yaml" <<EOF
 apiVersion: stargate.io/v1alpha1
-kind: Template
+kind: ProvisioningProfile
 metadata:
   name: k8s-worker
   namespace: dc-simulator
@@ -333,31 +333,31 @@ spec:
     final_message: "Kubernetes worker node setup complete after \$UPTIME seconds"
 EOF
 
-# Create Job CRs
-cat > "${DEMO_DIR}/job.yaml" <<EOF
+# Create Operation CRs
+cat > "${DEMO_DIR}/operation.yaml" <<EOF
 apiVersion: stargate.io/v1alpha1
-kind: Job
+kind: Operation
 metadata:
   name: repave-sim-worker-001
   namespace: dc-simulator
 spec:
-  hardwareRef:
+  serverRef:
     name: sim-worker-001
-  templateRef:
+  provisioningProfileRef:
     name: k8s-worker
   operation: repave
 EOF
 
-cat > "${DEMO_DIR}/job-002.yaml" <<EOF
+cat > "${DEMO_DIR}/operation-002.yaml" <<EOF
 apiVersion: stargate.io/v1alpha1
-kind: Job
+kind: Operation
 metadata:
   name: repave-sim-worker-002
   namespace: dc-simulator
 spec:
-  hardwareRef:
+  serverRef:
     name: sim-worker-002
-  templateRef:
+  provisioningProfileRef:
     name: k8s-worker
   operation: repave
 EOF
@@ -377,9 +377,9 @@ echo -e "\n${GREEN}=== Setup Complete ===${NC}"
 echo ""
 echo "Demo files created:"
 echo "  ${DEMO_DIR}/namespace.yaml"
-echo "  ${DEMO_DIR}/hardware.yaml"
-echo "  ${DEMO_DIR}/template-k8s-worker.yaml"
-echo "  ${DEMO_DIR}/job.yaml"
+echo "  ${DEMO_DIR}/server.yaml"
+echo "  ${DEMO_DIR}/provisioningprofile-k8s-worker.yaml"
+echo "  ${DEMO_DIR}/operation.yaml"
 echo ""
 echo "Next steps:"
 echo ""
@@ -391,16 +391,16 @@ echo "   kubectl apply -f config/crd/bases/"
 echo ""
 echo "3. Create namespace and resources:"
 echo "   kubectl apply -f ${DEMO_DIR}/namespace.yaml"
-echo "   kubectl apply -f ${DEMO_DIR}/hardware.yaml"
-echo "   kubectl apply -f ${DEMO_DIR}/template-k8s-worker.yaml"
+echo "   kubectl apply -f ${DEMO_DIR}/server.yaml"
+echo "   kubectl apply -f ${DEMO_DIR}/provisioningprofile-k8s-worker.yaml"
 echo ""
 echo "4. Start the simulator controller (as root):"
 echo "   sudo ./bin/simulator"
 echo ""
-echo "5. Trigger a repave job:"
-echo "   kubectl apply -f ${DEMO_DIR}/job.yaml"
+echo "5. Trigger a repave operation:"
+echo "   kubectl apply -f ${DEMO_DIR}/operation.yaml"
 echo ""
 echo "6. Watch progress:"
-echo "   kubectl get jobs.stargate.io -n dc-simulator -w"
+echo "   kubectl get operations.stargate.io -n dc-simulator -w"
 echo "   sudo tail -f /var/lib/stargate/vms/sim-worker-001/serial.log"
 echo "   kubectl get nodes -w"

@@ -79,7 +79,7 @@ func main() {
 	}
 
 	if err := ctrl.NewControllerManagedBy(mgr).
-		For(&api.Job{}).
+		For(&api.Operation{}).
 		Complete(reconciler); err != nil {
 		setupLog.Error(err, "unable to create controller")
 		os.Exit(1)
@@ -92,7 +92,7 @@ func main() {
 	}
 }
 
-// SimulatorReconciler reconciles Job objects and creates QEMU VMs
+// SimulatorReconciler reconciles Operation objects and creates QEMU VMs
 type SimulatorReconciler struct {
 	client.Client
 	Scheme       *runtime.Scheme
@@ -106,63 +106,63 @@ type SimulatorReconciler struct {
 func (r *SimulatorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
 
-	// Fetch the Job
-	var job api.Job
-	if err := r.Get(ctx, req.NamespacedName, &job); err != nil {
+	// Fetch the Operation
+	var operation api.Operation
+	if err := r.Get(ctx, req.NamespacedName, &operation); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	// Skip if not a repave operation
-	if job.Spec.Operation != api.JobOperationRepave {
-		log.V(1).Info("Skipping non-repave job", "operation", job.Spec.Operation)
+	if operation.Spec.Operation != api.OperationTypeRepave {
+		log.V(1).Info("Skipping non-repave operation", "operation", operation.Spec.Operation)
 		return ctrl.Result{}, nil
 	}
 
 	// Skip if already completed or failed
-	if job.Status.Phase == api.JobPhaseSucceeded || job.Status.Phase == api.JobPhaseFailed {
+	if operation.Status.Phase == api.OperationPhaseSucceeded || operation.Status.Phase == api.OperationPhaseFailed {
 		return ctrl.Result{}, nil
 	}
 
-	// Fetch referenced Hardware
-	var hardware api.Hardware
-	hardwareKey := client.ObjectKey{
-		Name:      job.Spec.HardwareRef.Name,
+	// Fetch referenced Server
+	var server api.Server
+	serverKey := client.ObjectKey{
+		Name:      operation.Spec.ServerRef.Name,
 		Namespace: req.Namespace,
 	}
-	if err := r.Get(ctx, hardwareKey, &hardware); err != nil {
-		log.Error(err, "Failed to fetch Hardware")
-		return r.setJobFailed(ctx, &job, "Failed to fetch Hardware: "+err.Error())
+	if err := r.Get(ctx, serverKey, &server); err != nil {
+		log.Error(err, "Failed to fetch Server")
+		return r.setOperationFailed(ctx, &operation, "Failed to fetch Server: "+err.Error())
 	}
 
-	// Fetch referenced Template
-	var template api.Template
-	templateKey := client.ObjectKey{
-		Name:      job.Spec.TemplateRef.Name,
+	// Fetch referenced ProvisioningProfile
+	var profile api.ProvisioningProfile
+	profileKey := client.ObjectKey{
+		Name:      operation.Spec.ProvisioningProfileRef.Name,
 		Namespace: req.Namespace,
 	}
-	if err := r.Get(ctx, templateKey, &template); err != nil {
-		log.Error(err, "Failed to fetch Template")
-		return r.setJobFailed(ctx, &job, "Failed to fetch Template: "+err.Error())
+	if err := r.Get(ctx, profileKey, &profile); err != nil {
+		log.Error(err, "Failed to fetch ProvisioningProfile")
+		return r.setOperationFailed(ctx, &operation, "Failed to fetch ProvisioningProfile: "+err.Error())
 	}
 
-	vmName := hardware.Name
+	vmName := server.Name
 
-	switch job.Status.Phase {
-	case "", api.JobPhasePending:
-		return r.handlePending(ctx, &job, &hardware, &template, vmName)
-	case api.JobPhaseRunning:
-		return r.handleRunning(ctx, &job, &hardware, vmName)
+	switch operation.Status.Phase {
+	case "", api.OperationPhasePending:
+		return r.handlePending(ctx, &operation, &server, &profile, vmName)
+	case api.OperationPhaseRunning:
+		return r.handleRunning(ctx, &operation, &server, vmName)
 	}
 
 	return ctrl.Result{}, nil
 }
 
-func (r *SimulatorReconciler) handlePending(ctx context.Context, job *api.Job, hardware *api.Hardware, template *api.Template, vmName string) (ctrl.Result, error) {
+func (r *SimulatorReconciler) handlePending(ctx context.Context, operation *api.Operation, server *api.Server, profile *api.ProvisioningProfile, vmName string) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
-	log.Info("Starting repave operation", "hardware", hardware.Name, "template", template.Name)
+	log.Info("Starting repave operation", "server", server.Name, "provisioningProfile", profile.Name)
 
 	// Download base image if needed
-	imageURL := template.Spec.OSImage
+	imageURL := profile.Spec.OSImage
 	if imageURL == "" {
 		imageURL = qemu.UbuntuCloudImageURL
 	}
@@ -170,14 +170,14 @@ func (r *SimulatorReconciler) handlePending(ctx context.Context, job *api.Job, h
 	basePath, err := r.ImageMgr.EnsureImage(ctx, imageURL)
 	if err != nil {
 		log.Error(err, "Failed to download base image")
-		return r.setJobFailed(ctx, job, "Failed to download base image: "+err.Error())
+		return r.setOperationFailed(ctx, operation, "Failed to download base image: "+err.Error())
 	}
 
 	// Create tap device first to allocate IP
 	tapDevice, err := r.NetworkMgr.CreateTap(ctx, vmName)
 	if err != nil {
 		log.Error(err, "Failed to create tap device")
-		return r.setJobFailed(ctx, job, "Failed to create tap device: "+err.Error())
+		return r.setOperationFailed(ctx, operation, "Failed to create tap device: "+err.Error())
 	}
 
 	// Allocate IP and generate MAC
@@ -188,14 +188,14 @@ func (r *SimulatorReconciler) handlePending(ctx context.Context, job *api.Job, h
 	cloudInitConfig := qemu.CloudInitConfig{
 		InstanceID: vmName,
 		Hostname:   vmName,
-		UserData:   template.Spec.CloudInit,
+		UserData:   profile.Spec.CloudInit,
 		IPAddress:  vmIP,
 		Gateway:    qemu.DefaultBridgeIP,
 	}
 	isoPath, err := r.CloudInitGen.GenerateISO(ctx, cloudInitConfig)
 	if err != nil {
 		log.Error(err, "Failed to generate cloud-init ISO")
-		return r.setJobFailed(ctx, job, "Failed to generate cloud-init ISO: "+err.Error())
+		return r.setOperationFailed(ctx, operation, "Failed to generate cloud-init ISO: "+err.Error())
 	}
 
 	// Create VM
@@ -214,44 +214,44 @@ func (r *SimulatorReconciler) handlePending(ctx context.Context, job *api.Job, h
 	// Create VM disk
 	if err := vm.Create(ctx); err != nil {
 		log.Error(err, "Failed to create VM disk")
-		return r.setJobFailed(ctx, job, "Failed to create VM: "+err.Error())
+		return r.setOperationFailed(ctx, operation, "Failed to create VM: "+err.Error())
 	}
 
 	// Start VM
 	if err := vm.Start(ctx); err != nil {
 		log.Error(err, "Failed to start VM")
-		return r.setJobFailed(ctx, job, "Failed to start VM: "+err.Error())
+		return r.setOperationFailed(ctx, operation, "Failed to start VM: "+err.Error())
 	}
 
-	// Update job status to Running
+	// Update operation status to Running
 	now := metav1.Now()
-	job.Status.Phase = api.JobPhaseRunning
-	job.Status.StartTime = &now
-	job.Status.Message = "VM started, waiting for provisioning"
-	if err := r.Status().Update(ctx, job); err != nil {
-		log.Error(err, "Failed to update Job status")
+	operation.Status.Phase = api.OperationPhaseRunning
+	operation.Status.StartTime = &now
+	operation.Status.Message = "VM started, waiting for provisioning"
+	if err := r.Status().Update(ctx, operation); err != nil {
+		log.Error(err, "Failed to update Operation status")
 		return ctrl.Result{}, err
 	}
 
-	// Update hardware status
-	hardware.Status.State = "provisioning"
-	hardware.Status.Message = "VM started at " + vmIP
-	hardware.Status.LastUpdated = now
-	if err := r.Status().Update(ctx, hardware); err != nil {
-		log.Error(err, "Failed to update Hardware status")
+	// Update server status
+	server.Status.State = "provisioning"
+	server.Status.Message = "VM started at " + vmIP
+	server.Status.LastUpdated = now
+	if err := r.Status().Update(ctx, server); err != nil {
+		log.Error(err, "Failed to update Server status")
 	}
 
 	// Requeue to check completion
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
-func (r *SimulatorReconciler) handleRunning(ctx context.Context, job *api.Job, hardware *api.Hardware, vmName string) (ctrl.Result, error) {
+func (r *SimulatorReconciler) handleRunning(ctx context.Context, operation *api.Operation, server *api.Server, vmName string) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
 
 	vm, ok := r.VMs[vmName]
 	if !ok {
 		log.Info("VM not tracked, assuming completed from previous run")
-		return r.setJobSucceeded(ctx, job, hardware, vmName)
+		return r.setOperationSucceeded(ctx, operation, server, vmName)
 	}
 
 	status, err := vm.Status()
@@ -262,17 +262,17 @@ func (r *SimulatorReconciler) handleRunning(ctx context.Context, job *api.Job, h
 
 	if !status.Running {
 		log.Info("VM is no longer running, marking as failed")
-		return r.setJobFailed(ctx, job, "VM stopped unexpectedly")
+		return r.setOperationFailed(ctx, operation, "VM stopped unexpectedly")
 	}
 
 	// Check if enough time has passed for provisioning (simplified check)
-	if job.Status.StartTime != nil {
-		elapsed := time.Since(job.Status.StartTime.Time)
+	if operation.Status.StartTime != nil {
+		elapsed := time.Since(operation.Status.StartTime.Time)
 		// After 3 minutes, assume provisioning is complete
 		// In a real implementation, we would check if the node has joined the cluster
 		if elapsed > 3*time.Minute {
 			log.Info("Provisioning timeout reached, marking as succeeded")
-			return r.setJobSucceeded(ctx, job, hardware, vmName)
+			return r.setOperationSucceeded(ctx, operation, server, vmName)
 		}
 	}
 
@@ -280,41 +280,41 @@ func (r *SimulatorReconciler) handleRunning(ctx context.Context, job *api.Job, h
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
-func (r *SimulatorReconciler) setJobFailed(ctx context.Context, job *api.Job, message string) (ctrl.Result, error) {
+func (r *SimulatorReconciler) setOperationFailed(ctx context.Context, operation *api.Operation, message string) (ctrl.Result, error) {
 	now := metav1.Now()
-	job.Status.Phase = api.JobPhaseFailed
-	job.Status.CompletionTime = &now
-	job.Status.Message = message
-	if err := r.Status().Update(ctx, job); err != nil {
+	operation.Status.Phase = api.OperationPhaseFailed
+	operation.Status.CompletionTime = &now
+	operation.Status.Message = message
+	if err := r.Status().Update(ctx, operation); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
 }
 
-func (r *SimulatorReconciler) setJobSucceeded(ctx context.Context, job *api.Job, hardware *api.Hardware, vmName string) (ctrl.Result, error) {
+func (r *SimulatorReconciler) setOperationSucceeded(ctx context.Context, operation *api.Operation, server *api.Server, vmName string) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
 	now := metav1.Now()
 
-	// Update job
-	job.Status.Phase = api.JobPhaseSucceeded
-	job.Status.CompletionTime = &now
-	job.Status.Message = "VM provisioning complete"
-	if err := r.Status().Update(ctx, job); err != nil {
-		log.Error(err, "Failed to update Job status")
+	// Update operation
+	operation.Status.Phase = api.OperationPhaseSucceeded
+	operation.Status.CompletionTime = &now
+	operation.Status.Message = "VM provisioning complete"
+	if err := r.Status().Update(ctx, operation); err != nil {
+		log.Error(err, "Failed to update Operation status")
 		return ctrl.Result{}, err
 	}
 
-	// Update hardware
+	// Update server
 	vmIP, _ := r.NetworkMgr.GetIP(vmName)
-	hardware.Status.State = "ready"
-	hardware.Status.Message = "Provisioned successfully"
-	hardware.Status.LastUpdated = now
-	hardware.Spec.IPv4 = vmIP
-	if err := r.Update(ctx, hardware); err != nil {
-		log.Error(err, "Failed to update Hardware")
+	server.Status.State = "ready"
+	server.Status.Message = "Provisioned successfully"
+	server.Status.LastUpdated = now
+	server.Spec.IPv4 = vmIP
+	if err := r.Update(ctx, server); err != nil {
+		log.Error(err, "Failed to update Server")
 	}
-	if err := r.Status().Update(ctx, hardware); err != nil {
-		log.Error(err, "Failed to update Hardware status")
+	if err := r.Status().Update(ctx, server); err != nil {
+		log.Error(err, "Failed to update Server status")
 	}
 
 	return ctrl.Result{}, nil
