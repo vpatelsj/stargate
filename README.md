@@ -10,14 +10,14 @@ A proof-of-concept for managing bare-metal server lifecycle across multiple data
 │                                                             │
 │  ┌─────────────────────────────────────────────────────┐    │
 │  │  CRDs                                               │    │
-│  │  - Hardware (inventory)                             │    │
-│  │  - Template (provisioning config)                   │    │
-│  │  - Job (operations)                                 │    │
+│  │  - Server (inventory)                               │    │
+│  │  - ProvisioningProfile (provisioning config)        │    │
+│  │  - Operation (operations)                           │    │
 │  └─────────────────────────────────────────────────────┘    │
 │                                                             │
 │  ┌─────────────────────────────────────────────────────┐    │
-│  │  Job Controller                                     │    │
-│  │  - Watches Job CRs                                  │    │
+│  │  Operation Controller                               │    │
+│  │  - Watches Operation CRs                            │    │
 │  │  - Calls DC API to execute operations               │    │
 │  │  - Updates status                                   │    │
 │  └─────────────────────────────────────────────────────┘    │
@@ -79,31 +79,31 @@ make run-controller
 make create-samples
 ```
 
-### 7. Trigger a repave job
+### 7. Trigger a repave operation
 
 ```bash
-kubectl apply -f config/samples/job-repave.yaml
+kubectl apply -f config/samples/operation-repave.yaml
 ```
 
-### 8. Watch the job progress
+### 8. Watch the operation progress
 
 ```bash
-kubectl get jobs.stargate.io -n dc-west -w
+kubectl get operations.stargate.io -n dc-west -w
 ```
 
 You should see:
 
 ```
-NAME                HARDWARE     OPERATION   PHASE       AGE
+NAME                SERVER       OPERATION   PHASE       AGE
 repave-server-001   server-001   repave      Pending     0s
 repave-server-001   server-001   repave      Running     1s
 repave-server-001   server-001   repave      Succeeded   32s
 ```
 
-### 9. Check hardware status
+### 9. Check server status
 
 ```bash
-kubectl get hardwares -n dc-west
+kubectl get servers -n dc-west
 ```
 
 You should see:
@@ -118,15 +118,15 @@ server-002                   10.0.1.6
 
 ```
 ├── api/v1alpha1/           # CRD type definitions
-│   ├── hardware_types.go
-│   ├── template_types.go
-│   ├── job_types.go
+│   ├── server_types.go
+│   ├── provisioningprofile_types.go
+│   ├── operation_types.go
 │   └── groupversion_info.go
 ├── cmd/
 │   └── simulator/          # QEMU simulator controller
 │       └── main.go
 ├── controller/
-│   └── job_controller.go   # Job reconciliation logic
+│   └── operation_controller.go   # Operation reconciliation logic
 ├── dcclient/
 │   ├── client.go           # DC API interface
 │   └── http_client.go      # HTTP implementation
@@ -150,13 +150,13 @@ server-002                   10.0.1.6
 
 ## CRDs
 
-### Hardware
+### Server
 
 Represents a bare-metal server in a datacenter.
 
 ```yaml
 apiVersion: stargate.io/v1alpha1
-kind: Hardware
+kind: Server
 metadata:
   name: server-001
   namespace: dc-west
@@ -171,13 +171,13 @@ status:
   currentOS: "2.0.0"
 ```
 
-### Template
+### ProvisioningProfile
 
 Defines provisioning configuration.
 
 ```yaml
 apiVersion: stargate.io/v1alpha1
-kind: Template
+kind: ProvisioningProfile
 metadata:
   name: os-2-0-0
   namespace: dc-west
@@ -186,20 +186,20 @@ spec:
   osImage: "https://images.example.com/ubuntu-22-aks-2.0.0.img"
 ```
 
-### Job
+### Operation
 
-Triggers an operation on hardware.
+Triggers an operation on a server.
 
 ```yaml
 apiVersion: stargate.io/v1alpha1
-kind: Job
+kind: Operation
 metadata:
   name: repave-server-001
   namespace: dc-west
 spec:
-  hardwareRef:
+  serverRef:
     name: server-001
-  templateRef:
+  provisioningProfileRef:
     name: os-2-0-0
   operation: repave
 status:
@@ -244,17 +244,17 @@ kubectl apply -f config/crd/bases/
 
 # 4. Apply demo resources
 kubectl apply -f /tmp/stargate-demo/namespace.yaml
-kubectl apply -f /tmp/stargate-demo/hardware.yaml
-kubectl apply -f /tmp/stargate-demo/template-k8s-worker.yaml
+kubectl apply -f /tmp/stargate-demo/server.yaml
+kubectl apply -f /tmp/stargate-demo/provisioningprofile-k8s-worker.yaml
 
 # 5. Start simulator controller (requires root for networking)
 sudo ./bin/simulator
 
 # 6. Trigger repave (in another terminal)
-kubectl apply -f /tmp/stargate-demo/job.yaml
+kubectl apply -f /tmp/stargate-demo/operation.yaml
 
-# 7. Watch job progress
-kubectl get jobs.stargate.io -n dc-simulator -w
+# 7. Watch operation progress
+kubectl get operations.stargate.io -n dc-simulator -w
 
 # 8. Watch node join cluster
 kubectl get nodes -w
@@ -266,19 +266,19 @@ kubectl get nodes -w
 ┌─────────────────────────────────────────────────────────────┐
 │  Kind Cluster (runs on host)                                │
 │  ┌─────────────────────────────────────────────────────┐    │
-│  │  - Stargate CRDs (Hardware, Template, Job)          │    │
+│  │  - Stargate CRDs (Server, ProvisioningProfile, Operation) │    │
 │  │  - API server exposed on host IP                    │    │
 │  └─────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────┘
        │
-       │ watches Job CRs
+       │ watches Operation CRs
        ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  Simulator Controller (runs on host, outside cluster)       │
-│  - Watches Job CRs                                          │
-│  - On repave: creates QEMU VM with cloud-init from Template │
-│  - Updates Hardware status with VM IP                       │
-│  - Updates Job status (Pending → Running → Succeeded)       │
+│  Simulator Controller (runs on host, outside cluster)      │
+│  - Watches Operation CRs                                   │
+│  - On repave: creates QEMU VM with cloud-init from ProvisioningProfile │
+│  - Updates Server status with VM IP                        │
+│  - Updates Operation status (Pending → Running → Succeeded)│
 └─────────────────────────────────────────────────────────────┘
        │
        │ creates
@@ -286,7 +286,7 @@ kubectl get nodes -w
 ┌─────────────────────────────────────────────────────────────┐
 │  QEMU VM (bridge network: 192.168.100.0/24)                 │
 │  - Boots Ubuntu cloud image                                 │
-│  - Runs cloud-init from Template                            │
+│  - Runs cloud-init from ProvisioningProfile                 │
 │  - Installs containerd, kubelet, kubeadm                    │
 │  - Executes kubeadm join to join kind cluster               │
 └─────────────────────────────────────────────────────────────┘
@@ -304,7 +304,7 @@ kubectl get nodes -w
 - [ ] Add namespace-scoped controller configuration
 - [x] Add cloud-init support for cluster join
 - [ ] Add reboot operation
-- [ ] Add job TTL / garbage collection
+- [ ] Add operation TTL / garbage collection
 - [ ] Add metrics and observability
 - [ ] Add webhook validation
 - [ ] Add VM health monitoring and auto-recovery

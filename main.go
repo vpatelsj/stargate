@@ -57,13 +57,13 @@ func main() {
 	// Create DC client
 	dcClient := dcclient.NewHTTPClient(dcAPIURL)
 
-	// Set up Job controller
-	if err = (&controller.JobReconciler{
+	// Set up Operation controller
+	if err = (&controller.OperationReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		DCClient: dcClient,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Job")
+		setupLog.Error(err, "unable to create controller", "controller", "Operation")
 		os.Exit(1)
 	}
 

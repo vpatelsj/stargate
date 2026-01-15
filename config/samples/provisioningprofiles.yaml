@@ -1,6 +1,6 @@
 ---
 apiVersion: stargate.io/v1alpha1
-kind: Template
+kind: ProvisioningProfile
 metadata:
   name: os-2-0-0
   namespace: dc-west
@@ -9,7 +9,7 @@ spec:
   osImage: "https://images.example.com/ubuntu-22-aks-2.0.0.img"
 ---
 apiVersion: stargate.io/v1alpha1
-kind: Template
+kind: ProvisioningProfile
 metadata:
   name: os-2-0-0
   namespace: dc-east

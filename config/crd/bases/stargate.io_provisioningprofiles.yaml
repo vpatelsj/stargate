@@ -2,16 +2,16 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: templates.stargate.io
+  name: provisioningprofiles.stargate.io
 spec:
   group: stargate.io
   names:
-    kind: Template
-    listKind: TemplateList
-    plural: templates
-    singular: template
+    kind: ProvisioningProfile
+    listKind: ProvisioningProfileList
+    plural: provisioningprofiles
+    singular: provisioningprofile
     shortNames:
-      - tpl
+      - pp
   scope: Namespaced
   versions:
     - name: v1alpha1
@@ -51,7 +51,7 @@ spec:
               properties:
                 ready:
                   type: boolean
-                  description: Whether the template is ready for use
+                  description: Whether the provisioning profile is ready for use
                 message:
                   type: string
                   description: Additional status information

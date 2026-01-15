@@ -5,7 +5,7 @@ metadata:
   name: dc-west
 ---
 apiVersion: stargate.io/v1alpha1
-kind: Hardware
+kind: Server
 metadata:
   name: server-001
   namespace: dc-west
@@ -18,7 +18,7 @@ spec:
     serialNumber: "SN-001-WEST"
 ---
 apiVersion: stargate.io/v1alpha1
-kind: Hardware
+kind: Server
 metadata:
   name: server-002
   namespace: dc-west
