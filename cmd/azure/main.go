@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -23,24 +25,26 @@ import (
 )
 
 type config struct {
-	subscriptionID       string
-	location             string
-	zone                 string
-	resourceGroup        string
-	vnetName             string
-	vnetCIDR             string
-	subnetName           string
-	subnetCIDR           string
-	vmName               string
-	vmSize               string
-	adminUsername        string
-	sshPublicKeyPath     string
-	publicIPName         string
-	nicName              string
-	cloudInitPath        string
-	tailscaleAuthKey     string
-	kindJoinCommand      string
-	controlPlaneHostname string
+	subscriptionID          string
+	location                string
+	zone                    string
+	resourceGroup           string
+	vnetName                string
+	vnetCIDR                string
+	subnetName              string
+	subnetCIDR              string
+	vmName                  string
+	vmSize                  string
+	adminUsername           string
+	sshPublicKeyPath        string
+	publicIPName            string
+	nicName                 string
+	cloudInitPath           string
+	tailscaleAuthKey        string
+	kindJoinCommand         string
+	controlPlaneHostname    string
+	kindContainerName       string
+	controlPlaneTailscaleIP string
 }
 
 func main() {
@@ -62,8 +66,10 @@ func main() {
 	flag.StringVar(&cfg.nicName, "nic-name", "stargate-nic", "Network interface resource name.")
 	flag.StringVar(&cfg.cloudInitPath, "cloud-init", "", "Path to custom cloud-init user-data (optional).")
 	flag.StringVar(&cfg.tailscaleAuthKey, "tailscale-auth-key", "", "Tailscale auth key for tailnet join.")
-	flag.StringVar(&cfg.kindJoinCommand, "kind-join-command", "", "kubeadm join command for your kind cluster.")
+	flag.StringVar(&cfg.kindJoinCommand, "kind-join-command", "", "kubeadm join command (optional, auto-generated if not provided).")
 	flag.StringVar(&cfg.controlPlaneHostname, "control-plane-hostname", "stargate-demo-control-plane", "Hostname of the Kind control plane (for /etc/hosts entry).")
+	flag.StringVar(&cfg.kindContainerName, "kind-container", "stargate-demo-control-plane", "Name of the Kind control plane Docker container.")
+	flag.StringVar(&cfg.controlPlaneTailscaleIP, "control-plane-ip", "", "Tailscale IP of the Kind control plane (auto-detected if not provided).")
 	flag.Parse()
 
 	if cfg.subscriptionID == "" {
@@ -78,8 +84,15 @@ func main() {
 		exitf("missing --tailscale-auth-key for tailnet connectivity")
 	}
 
+	// Auto-generate kubeadm join command if not provided
 	if cfg.kindJoinCommand == "" {
-		exitf("missing --kind-join-command (kubeadm join ...)")
+		fmt.Println("Generating kubeadm join token from Kind cluster...")
+		joinCmd, err := generateKubeadmJoinCommand(cfg.kindContainerName, cfg.controlPlaneTailscaleIP)
+		if err != nil {
+			exitf("failed to generate kubeadm join command: %v", err)
+		}
+		cfg.kindJoinCommand = joinCmd
+		fmt.Printf("Generated join command: %s\n", joinCmd)
 	}
 
 	sshPublicKey, err := os.ReadFile(cfg.sshPublicKeyPath)
@@ -318,6 +331,73 @@ func extractControlPlaneIP(joinCommand string) string {
 	if len(matches) >= 2 {
 		return matches[1]
 	}
+	return ""
+}
+
+// generateKubeadmJoinCommand generates a fresh kubeadm join command by executing
+// kubeadm token create inside the Kind control plane container.
+func generateKubeadmJoinCommand(containerName, controlPlaneIP string) (string, error) {
+	// Generate a new token using docker exec
+	cmd := exec.Command("docker", "exec", containerName, "kubeadm", "token", "create", "--print-join-command")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("docker exec failed: %v, stderr: %s", err, stderr.String())
+	}
+
+	joinCmd := strings.TrimSpace(stdout.String())
+	if joinCmd == "" {
+		return "", fmt.Errorf("empty join command returned")
+	}
+
+	// If control plane IP is provided, replace the hostname with the IP
+	if controlPlaneIP == "" {
+		// Auto-detect Tailscale IP of the control plane
+		controlPlaneIP = detectControlPlaneTailscaleIP(containerName)
+	}
+
+	if controlPlaneIP != "" {
+		// Replace "kubeadm join <hostname>:6443" with "kubeadm join <tailscale-ip>:6443"
+		re := regexp.MustCompile(`kubeadm join [^:]+:(\d+)`)
+		joinCmd = re.ReplaceAllString(joinCmd, fmt.Sprintf("kubeadm join %s:$1", controlPlaneIP))
+	}
+
+	return joinCmd, nil
+}
+
+// detectControlPlaneTailscaleIP tries to get the Tailscale IP of the control plane
+// by running tailscale status and finding the hostname.
+func detectControlPlaneTailscaleIP(containerName string) string {
+	cmd := exec.Command("tailscale", "status", "--json")
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+
+	if err := cmd.Run(); err != nil {
+		return ""
+	}
+
+	// Simple grep for the container name in tailscale status output
+	// The container name is usually the Tailscale hostname
+	output := stdout.String()
+
+	// Look for the IP associated with the container name
+	// Format in tailscale status: "100.x.x.x  hostname  ..."
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		if strings.Contains(line, containerName) {
+			fields := strings.Fields(line)
+			if len(fields) > 0 {
+				// First field should be the IP
+				ip := fields[0]
+				if regexp.MustCompile(`^100\.`).MatchString(ip) {
+					return ip
+				}
+			}
+		}
+	}
+
 	return ""
 }
 
