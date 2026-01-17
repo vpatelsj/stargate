@@ -84,6 +84,14 @@ func main() {
 		exitf("missing --tailscale-auth-key for tailnet connectivity")
 	}
 
+	// Auto-detect control plane Tailscale IP if not provided
+	if cfg.controlPlaneTailscaleIP == "" {
+		cfg.controlPlaneTailscaleIP = detectControlPlaneTailscaleIP(cfg.kindContainerName)
+		if cfg.controlPlaneTailscaleIP == "" {
+			exitf("failed to detect control plane Tailscale IP; provide --control-plane-ip or ensure Tailscale is running")
+		}
+	}
+
 	// Auto-generate kubeadm join command if not provided
 	if cfg.kindJoinCommand == "" {
 		fmt.Println("Generating kubeadm join token from Kind cluster...")
@@ -221,6 +229,22 @@ write_files:
       # Add host entry for control plane (Kind uses internal hostname)
       echo '%s %s' >> /etc/hosts
       
+      # Wait for Tailscale to be ready and get our Tailscale IP
+      echo "Waiting for Tailscale IP..."
+      for i in {1..30}; do
+        TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || true)
+        if [[ -n "$TAILSCALE_IP" ]]; then
+          echo "Tailscale IP: $TAILSCALE_IP"
+          break
+        fi
+        sleep 2
+      done
+      
+      if [[ -z "$TAILSCALE_IP" ]]; then
+        echo "ERROR: Could not get Tailscale IP"
+        exit 1
+      fi
+      
       # Extract join parameters from the command
       JOIN_CMD='%s'
       
@@ -229,7 +253,9 @@ write_files:
       TOKEN=$(echo "$JOIN_CMD" | grep -oP -- '--token \K[^\s]+')
       CA_CERT_HASH=$(echo "$JOIN_CMD" | grep -oP -- '--discovery-token-ca-cert-hash \K[^\s]+')
       
-      # Create kubeadm config with correct cgroupRoot for real VMs (not Kind's /kubelet)
+      # Create kubeadm config with:
+      # - cgroupRoot: / (for real VMs, not Kind's /kubelet)
+      # - node-ip: Tailscale IP (so control plane can reach us via Tailscale)
       cat > /tmp/kubeadm-join-config.yaml <<EOF
       apiVersion: kubeadm.k8s.io/v1beta3
       kind: JoinConfiguration
@@ -242,6 +268,7 @@ write_files:
       nodeRegistration:
         kubeletExtraArgs:
           cgroup-root: "/"
+          node-ip: "$TAILSCALE_IP"
       ---
       apiVersion: kubelet.config.k8s.io/v1beta1
       kind: KubeletConfiguration
@@ -256,7 +283,74 @@ write_files:
         exit 1
       }
       
-      echo "Node joined successfully!"
+      echo "Node joined successfully with Tailscale IP: $TAILSCALE_IP"
+      
+      # Fix kube-proxy service routing: The Kubernetes API endpoint (10.96.0.1:443)
+      # points to the control plane's internal IP which is not reachable from Azure.
+      # We need NAT rules to redirect this traffic to the control plane's Tailscale IP.
+      CONTROL_PLANE_TAILSCALE_IP=$(grep stargate-demo-control-plane /etc/hosts | awk '{print $1}')
+      
+      if [[ -n "$CONTROL_PLANE_TAILSCALE_IP" ]]; then
+        echo "Setting up NAT rules for Kubernetes API access via Tailscale..."
+        
+        # Get the Docker bridge IP that kube-proxy will try to reach
+        DOCKER_IP=$(kubectl --kubeconfig /etc/kubernetes/kubelet.conf get endpoints kubernetes -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null || echo "")
+        
+        # NAT rule 1: Redirect ClusterIP (10.96.0.1:443) to Tailscale IP
+        echo "Adding NAT: 10.96.0.1:443 -> $CONTROL_PLANE_TAILSCALE_IP:6443"
+        iptables -t nat -I OUTPUT -d 10.96.0.1 -p tcp --dport 443 -j DNAT --to-destination "$CONTROL_PLANE_TAILSCALE_IP:6443"
+        iptables -t nat -I PREROUTING -d 10.96.0.1 -p tcp --dport 443 -j DNAT --to-destination "$CONTROL_PLANE_TAILSCALE_IP:6443"
+        
+        # NAT rule 2: If Docker bridge IP is different, redirect that too
+        if [[ -n "$DOCKER_IP" && "$DOCKER_IP" != "$CONTROL_PLANE_TAILSCALE_IP" ]]; then
+          echo "Adding NAT: $DOCKER_IP:6443 -> $CONTROL_PLANE_TAILSCALE_IP:6443"
+          iptables -t nat -I OUTPUT -d "$DOCKER_IP" -p tcp --dport 6443 -j DNAT --to-destination "$CONTROL_PLANE_TAILSCALE_IP:6443"
+          iptables -t nat -I PREROUTING -d "$DOCKER_IP" -p tcp --dport 6443 -j DNAT --to-destination "$CONTROL_PLANE_TAILSCALE_IP:6443"
+        fi
+        
+        # MASQUERADE rule: Ensure return traffic works correctly
+        echo "Adding MASQUERADE for API server traffic"
+        iptables -t nat -A POSTROUTING -d "$CONTROL_PLANE_TAILSCALE_IP" -p tcp --dport 6443 -j MASQUERADE
+        
+        # Make rules persistent across reboots
+        mkdir -p /etc/iptables
+        iptables-save > /etc/iptables/rules.v4
+        
+        # Install iptables-persistent if not present
+        DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent 2>/dev/null || true
+        
+        echo "NAT rules configured successfully"
+      else
+        echo "WARNING: Could not find control plane Tailscale IP in /etc/hosts"
+      fi
+      
+      # Configure Tailscale subnet routing for pod network
+      echo "Configuring Tailscale subnet routing..."
+      
+      # Wait for kubelet to register and get pod CIDR assigned
+      for i in {1..60}; do
+        POD_CIDR=$(cat /etc/kubernetes/kubelet.conf 2>/dev/null && \
+          kubectl --kubeconfig /etc/kubernetes/kubelet.conf get node $(hostname) -o jsonpath='{.spec.podCIDR}' 2>/dev/null || true)
+        if [[ -n "$POD_CIDR" && "$POD_CIDR" != "<no value>" ]]; then
+          echo "Pod CIDR assigned: $POD_CIDR"
+          break
+        fi
+        echo "Waiting for pod CIDR assignment... ($i/60)"
+        sleep 5
+      done
+      
+      if [[ -n "$POD_CIDR" && "$POD_CIDR" != "<no value>" ]]; then
+        # Advertise pod CIDR via Tailscale and accept routes from other nodes
+        echo "Advertising pod CIDR $POD_CIDR via Tailscale..."
+        tailscale set --advertise-routes="$POD_CIDR" --accept-routes || {
+          echo "WARNING: Failed to configure Tailscale subnet routing"
+          echo "You may need to manually approve routes in Tailscale admin console"
+        }
+        echo "Tailscale subnet routing configured for $POD_CIDR"
+      else
+        echo "WARNING: Could not determine pod CIDR, skipping Tailscale subnet routing"
+        echo "You can manually configure with: tailscale set --advertise-routes=<POD_CIDR> --accept-routes"
+      fi
 
   - path: /tmp/install-k8s.sh
     permissions: '0755'
@@ -296,9 +390,9 @@ write_files:
       systemctl restart containerd
       systemctl enable containerd
 
-      # Install Kubernetes components (v1.29)
-      curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-      echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /' > /etc/apt/sources.list.d/kubernetes.list
+      # Install Kubernetes components (v1.34)
+      curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /' > /etc/apt/sources.list.d/kubernetes.list
       apt-get update
       apt-get install -y kubelet kubeadm kubectl
       apt-mark hold kubelet kubeadm kubectl
@@ -315,7 +409,7 @@ runcmd:
 		sshPublicKey,
 		cfg.tailscaleAuthKey,
 		cfg.vmName,
-		extractControlPlaneIP(cfg.kindJoinCommand),
+		cfg.controlPlaneTailscaleIP, // Use pre-detected Tailscale IP
 		cfg.controlPlaneHostname,
 		cfg.kindJoinCommand,
 	)
@@ -367,38 +461,94 @@ func generateKubeadmJoinCommand(containerName, controlPlaneIP string) (string, e
 	return joinCmd, nil
 }
 
-// detectControlPlaneTailscaleIP tries to get the Tailscale IP of the control plane
-// by running tailscale status and finding the hostname.
+// detectControlPlaneTailscaleIP gets the local host's Tailscale IP.
+// The Kind control plane runs in Docker on this host, and since the API server
+// is bound to 0.0.0.0:6443, it's accessible via the host's Tailscale IP.
 func detectControlPlaneTailscaleIP(containerName string) string {
-	cmd := exec.Command("tailscale", "status", "--json")
+	cmd := exec.Command("tailscale", "ip", "-4")
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 
 	if err := cmd.Run(); err != nil {
+		fmt.Printf("Warning: failed to get Tailscale IP: %v\n", err)
 		return ""
 	}
 
-	// Simple grep for the container name in tailscale status output
-	// The container name is usually the Tailscale hostname
-	output := stdout.String()
-
-	// Look for the IP associated with the container name
-	// Format in tailscale status: "100.x.x.x  hostname  ..."
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		if strings.Contains(line, containerName) {
-			fields := strings.Fields(line)
-			if len(fields) > 0 {
-				// First field should be the IP
-				ip := fields[0]
-				if regexp.MustCompile(`^100\.`).MatchString(ip) {
-					return ip
-				}
-			}
-		}
+	ip := strings.TrimSpace(stdout.String())
+	if regexp.MustCompile(`^100\.`).MatchString(ip) {
+		fmt.Printf("Detected local Tailscale IP: %s\n", ip)
+		return ip
 	}
 
 	return ""
+}
+
+// fixKindControlPlaneNodeIP updates the Kind control plane kubelet to advertise
+// the Tailscale IP instead of the Docker bridge IP. This is needed for kindnet
+// to route pod traffic correctly to/from Azure VMs via Tailscale.
+func fixKindControlPlaneNodeIP(containerName, tailscaleIP string) error {
+	// Check current node-ip setting
+	cmd := exec.Command("docker", "exec", containerName, "cat", "/var/lib/kubelet/kubeadm-flags.env")
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to read kubelet flags: %w", err)
+	}
+
+	currentFlags := stdout.String()
+
+	// Check if already configured with the correct IP
+	if strings.Contains(currentFlags, fmt.Sprintf("--node-ip=%s", tailscaleIP)) {
+		fmt.Println("Control plane already configured with Tailscale IP")
+		return nil
+	}
+
+	// Update node-ip in kubelet flags
+	var newFlags string
+	if strings.Contains(currentFlags, "--node-ip=") {
+		// Replace existing node-ip
+		re := regexp.MustCompile(`--node-ip=[0-9.]+`)
+		newFlags = re.ReplaceAllString(currentFlags, fmt.Sprintf("--node-ip=%s", tailscaleIP))
+	} else {
+		// Add node-ip flag
+		newFlags = strings.Replace(currentFlags, `KUBELET_KUBEADM_ARGS="`, fmt.Sprintf(`KUBELET_KUBEADM_ARGS="--node-ip=%s `, tailscaleIP), 1)
+	}
+
+	// Write updated flags
+	cmd = exec.Command("docker", "exec", containerName, "sh", "-c", fmt.Sprintf("echo '%s' > /var/lib/kubelet/kubeadm-flags.env", strings.TrimSpace(newFlags)))
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to update kubelet flags: %w", err)
+	}
+
+	// Restart kubelet
+	fmt.Println("Restarting kubelet on control plane...")
+	cmd = exec.Command("docker", "exec", containerName, "systemctl", "restart", "kubelet")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to restart kubelet: %w", err)
+	}
+
+	// Wait for kubelet to be ready
+	time.Sleep(5 * time.Second)
+
+	// Patch the node status to update the advertised IP
+	fmt.Println("Patching control plane node status...")
+	patchJSON := fmt.Sprintf(`[{"op": "replace", "path": "/status/addresses/0/address", "value": "%s"}]`, tailscaleIP)
+	cmd = exec.Command("kubectl", "patch", "node", containerName, "--subresource=status", "--type=json", "-p", patchJSON)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to patch node status: %w, stderr: %s", err, stderr.String())
+	}
+
+	// Restart kindnet to pick up new routes
+	fmt.Println("Restarting kindnet daemonset...")
+	cmd = exec.Command("kubectl", "rollout", "restart", "daemonset", "kindnet", "-n", "kube-system")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to restart kindnet: %w", err)
+	}
+
+	fmt.Println("Control plane configured to use Tailscale IP")
+	return nil
 }
 
 func ensureResourceGroup(ctx context.Context, client *armresources.ResourceGroupsClient, cfg config) error {
