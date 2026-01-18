@@ -70,6 +70,7 @@ create_cluster() {
     log_info "Creating Kind cluster '$CLUSTER_NAME'..."
     
     # Create Kind config that binds API server to all interfaces
+    # Disable default CNI (kindnet) since we'll use Flannel
     cat > /tmp/kind-config.yaml <<EOF
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
@@ -81,6 +82,8 @@ networking:
   # Use default pod/service subnets
   podSubnet: "10.244.0.0/16"
   serviceSubnet: "10.96.0.0/16"
+  # Disable kindnet - we'll use Flannel instead
+  disableDefaultCNI: true
 nodes:
 - role: control-plane
 EOF
@@ -111,26 +114,87 @@ install_cni() {
     kubectl wait --for=condition=Ready pod -l app=flannel -n kube-flannel --timeout=120s || true
 }
 
-# Configure API server to advertise Tailscale IP
-configure_apiserver_advertise() {
-    log_info "Configuring API server to advertise Tailscale IP..."
+# Configure API server to advertise Tailscale IP and regenerate certs
+configure_apiserver_for_tailscale() {
+    log_info "Configuring API server for Tailscale connectivity..."
     
-    # Update the API server manifest to use Tailscale IP
+    # Step 1: Update the API server manifest to use Tailscale IP
+    log_info "Updating --advertise-address to ${TAILSCALE_IP}..."
     docker exec ${CLUSTER_NAME}-control-plane sed -i \
         "s/--advertise-address=[0-9.]*$/--advertise-address=${TAILSCALE_IP}/" \
         /etc/kubernetes/manifests/kube-apiserver.yaml
     
-    log_info "Waiting for API server to restart..."
-    sleep 30
+    # Step 2: Regenerate API server certificates with Tailscale IP as SAN
+    log_info "Regenerating API server certificate with Tailscale IP as SAN..."
+
+    # Include the container's docker IP in the SAN so controller-manager can talk to the API server
+    INTERNAL_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ${CLUSTER_NAME}-control-plane 2>/dev/null || true)
+    if [[ -n "$INTERNAL_IP" ]]; then
+        log_info "Control-plane container IP: $INTERNAL_IP"
+    else
+        log_warn "Could not determine control-plane container IP; proceeding without it"
+    fi
+
+    SAN_LIST="${TAILSCALE_IP},127.0.0.1,localhost,${CLUSTER_NAME}-control-plane,0.0.0.0,10.96.0.1"
+    if [[ -n "$INTERNAL_IP" ]]; then
+        SAN_LIST+=",$INTERNAL_IP"
+    fi
+    
+    # Backup existing certs
+    docker exec ${CLUSTER_NAME}-control-plane sh -c \
+        'mv /etc/kubernetes/pki/apiserver.crt /etc/kubernetes/pki/apiserver.crt.bak && \
+         mv /etc/kubernetes/pki/apiserver.key /etc/kubernetes/pki/apiserver.key.bak'
+    
+    # Regenerate API server cert with Tailscale IP as additional SAN
+    docker exec ${CLUSTER_NAME}-control-plane kubeadm init phase certs apiserver \
+        --apiserver-advertise-address="${TAILSCALE_IP}" \
+        --apiserver-cert-extra-sans="$SAN_LIST"
+    
+    log_info "Waiting for API server to restart with new certificate..."
+    sleep 10
+    
+    # Force API server restart by modifying the manifest slightly
+    docker exec ${CLUSTER_NAME}-control-plane sh -c \
+        'echo "# Updated: $(date)" >> /etc/kubernetes/manifests/kube-apiserver.yaml'
+    
+    sleep 15
     
     # Wait for API server to be ready again
-    for i in {1..30}; do
+    log_info "Waiting for API server to come back online..."
+    for i in {1..60}; do
         if kubectl get nodes &>/dev/null; then
             log_info "API server is ready"
             break
         fi
+        if [[ $i -eq 60 ]]; then
+            log_error "API server did not come back online"
+            exit 1
+        fi
         sleep 2
     done
+    
+    # Verify the new certificate includes Tailscale IP
+    log_info "Verifying certificate SANs..."
+    docker exec ${CLUSTER_NAME}-control-plane openssl x509 -in /etc/kubernetes/pki/apiserver.crt -noout -text 2>/dev/null | grep -A1 "Subject Alternative Name" || true
+    
+    # Step 3: Update kubeadm-config and cluster-info to use Tailscale IP
+    log_info "Updating kubeadm-config with Tailscale IP as controlPlaneEndpoint..."
+    
+    # Update kubeadm-config ConfigMap to add controlPlaneEndpoint
+    kubectl get cm kubeadm-config -n kube-system -o json | \
+        jq --arg ip "${TAILSCALE_IP}" '.data.ClusterConfiguration |= sub("clusterName: kubernetes"; "clusterName: kubernetes\n    controlPlaneEndpoint: \($ip):6443")' | \
+        kubectl apply -f -
+    
+    # Delete old cluster-info so bootstrap-token will recreate it with new endpoint
+    kubectl delete cm cluster-info -n kube-public 2>/dev/null || true
+    
+    # Regenerate cluster-info with the updated kubeadm-config
+    log_info "Regenerating cluster-info with Tailscale endpoint..."
+    docker exec ${CLUSTER_NAME}-control-plane kubeadm init phase bootstrap-token
+    
+    # Verify the cluster-info has the correct server
+    CLUSTER_INFO_SERVER=$(kubectl get cm cluster-info -n kube-public -o jsonpath='{.data.kubeconfig}' | grep "server:" | awk '{print $2}')
+    log_info "Cluster-info server: $CLUSTER_INFO_SERVER"
 }
 
 # Verify the configuration
@@ -180,7 +244,7 @@ main() {
     delete_existing_cluster
     create_cluster
     install_cni
-    configure_apiserver_advertise
+    configure_apiserver_for_tailscale
     verify_cluster
 }
 

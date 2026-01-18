@@ -256,8 +256,9 @@ write_files:
       # Create kubeadm config with:
       # - cgroupRoot: / (for real VMs, not Kind's /kubelet)
       # - node-ip: Tailscale IP (so control plane can reach us via Tailscale)
+      # NOTE: Using v1beta4 API for Kubernetes 1.34+ which has array format for kubeletExtraArgs
       cat > /tmp/kubeadm-join-config.yaml <<EOF
-      apiVersion: kubeadm.k8s.io/v1beta3
+      apiVersion: kubeadm.k8s.io/v1beta4
       kind: JoinConfiguration
       discovery:
         bootstrapToken:
@@ -267,8 +268,10 @@ write_files:
             - $CA_CERT_HASH
       nodeRegistration:
         kubeletExtraArgs:
-          cgroup-root: "/"
-          node-ip: "$TAILSCALE_IP"
+          - name: cgroup-root
+            value: /
+          - name: node-ip
+            value: "$TAILSCALE_IP"
       ---
       apiVersion: kubelet.config.k8s.io/v1beta1
       kind: KubeletConfiguration
