@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,9 +35,12 @@ type config struct {
 	subnetName              string
 	subnetCIDR              string
 	vmName                  string
+	vmNames                 []string
 	vmSize                  string
 	adminUsername           string
 	sshPublicKeyPath        string
+	sshPrivateKeyPath       string
+	sshPort                 int
 	publicIPName            string
 	nicName                 string
 	cloudInitPath           string
@@ -45,10 +49,23 @@ type config struct {
 	controlPlaneHostname    string
 	kindContainerName       string
 	controlPlaneTailscaleIP string
+	bootstrapExisting       bool
+}
+
+type stringSliceFlag []string
+
+func (s *stringSliceFlag) String() string {
+	return strings.Join(*s, ",")
+}
+
+func (s *stringSliceFlag) Set(value string) error {
+	*s = append(*s, value)
+	return nil
 }
 
 func main() {
 	var cfg config
+	var vmNames stringSliceFlag
 
 	flag.StringVar(&cfg.subscriptionID, "subscription-id", os.Getenv("AZURE_SUBSCRIPTION_ID"), "Azure subscription ID (or AZURE_SUBSCRIPTION_ID env var).")
 	flag.StringVar(&cfg.location, "location", "canadacentral", "Azure region.")
@@ -59,32 +76,41 @@ func main() {
 	flag.StringVar(&cfg.subnetName, "subnet-name", "stargate-subnet", "Subnet name.")
 	flag.StringVar(&cfg.subnetCIDR, "subnet-cidr", "10.50.1.0/24", "Subnet CIDR.")
 	flag.StringVar(&cfg.vmName, "vm-name", "stargate-azure-vm", "Virtual machine name.")
+	flag.Var(&vmNames, "vm", "Existing VM hostname or IP to bootstrap (repeatable).")
 	flag.StringVar(&cfg.vmSize, "vm-size", "Standard_D2s_v5", "Virtual machine size.")
 	flag.StringVar(&cfg.adminUsername, "admin-username", "ubuntu", "Admin username.")
 	flag.StringVar(&cfg.sshPublicKeyPath, "ssh-public-key", filepath.Join(os.Getenv("HOME"), ".ssh", "id_rsa.pub"), "Path to SSH public key.")
+	flag.StringVar(&cfg.sshPrivateKeyPath, "ssh-private-key", filepath.Join(os.Getenv("HOME"), ".ssh", "id_rsa"), "Path to SSH private key for existing VMs.")
+	flag.IntVar(&cfg.sshPort, "ssh-port", 22, "SSH port for existing VMs.")
 	flag.StringVar(&cfg.publicIPName, "public-ip-name", "stargate-pip", "Public IP resource name.")
 	flag.StringVar(&cfg.nicName, "nic-name", "stargate-nic", "Network interface resource name.")
 	flag.StringVar(&cfg.cloudInitPath, "cloud-init", "", "Path to custom cloud-init user-data (optional).")
-	flag.StringVar(&cfg.tailscaleAuthKey, "tailscale-auth-key", "", "Tailscale auth key for tailnet join.")
+	flag.StringVar(&cfg.tailscaleAuthKey, "tailscale-auth-key", "", "Tailscale auth key for tailnet join (provisioning path).")
 	flag.StringVar(&cfg.kindJoinCommand, "kind-join-command", "", "kubeadm join command (optional, auto-generated if not provided).")
-	flag.StringVar(&cfg.controlPlaneHostname, "control-plane-hostname", "stargate-demo-control-plane", "Hostname of the Kind control plane (for /etc/hosts entry).")
-	flag.StringVar(&cfg.kindContainerName, "kind-container", "stargate-demo-control-plane", "Name of the Kind control plane Docker container.")
+	flag.StringVar(&cfg.controlPlaneHostname, "control-plane-hostname", "kind-control-plane", "Hostname of the Kind control plane (for /etc/hosts entry).")
+	flag.StringVar(&cfg.kindContainerName, "kind-container", "kind-control-plane", "Name of the Kind control plane Docker container.")
 	flag.StringVar(&cfg.controlPlaneTailscaleIP, "control-plane-ip", "", "Tailscale IP of the Kind control plane (auto-detected if not provided).")
+	flag.BoolVar(&cfg.bootstrapExisting, "bootstrap-existing", false, "Bootstrap existing VMs over SSH instead of provisioning Azure resources.")
 	flag.Parse()
 
-	if cfg.subscriptionID == "" {
-		exitf("missing subscription ID; set --subscription-id or AZURE_SUBSCRIPTION_ID")
+	cfg.vmNames = vmNames
+
+	if cfg.bootstrapExisting {
+		if len(cfg.vmNames) == 0 {
+			exitf("missing --vm targets for bootstrap-existing mode")
+		}
+	} else {
+		if cfg.subscriptionID == "" {
+			exitf("missing subscription ID; set --subscription-id or AZURE_SUBSCRIPTION_ID")
+		}
+		if !strings.Contains(cfg.resourceGroup, "-vapa-") {
+			exitf("resource group name must include -vapa- (got %q)", cfg.resourceGroup)
+		}
+		if cfg.tailscaleAuthKey == "" {
+			exitf("missing --tailscale-auth-key for tailnet connectivity")
+		}
 	}
 
-	if !strings.Contains(cfg.resourceGroup, "-vapa-") {
-		exitf("resource group name must include -vapa- (got %q)", cfg.resourceGroup)
-	}
-
-	if cfg.tailscaleAuthKey == "" {
-		exitf("missing --tailscale-auth-key for tailnet connectivity")
-	}
-
-	// Auto-detect control plane Tailscale IP if not provided
 	if cfg.controlPlaneTailscaleIP == "" {
 		cfg.controlPlaneTailscaleIP = detectControlPlaneTailscaleIP(cfg.kindContainerName)
 		if cfg.controlPlaneTailscaleIP == "" {
@@ -92,15 +118,25 @@ func main() {
 		}
 	}
 
-	// Auto-generate kubeadm join command if not provided
-	if cfg.kindJoinCommand == "" {
-		fmt.Println("Generating kubeadm join token from Kind cluster...")
-		joinCmd, err := generateKubeadmJoinCommand(cfg.kindContainerName, cfg.controlPlaneTailscaleIP)
-		if err != nil {
-			exitf("failed to generate kubeadm join command: %v", err)
+	fmt.Println("Generating kubeadm join token from Kind cluster (ignoring --kind-join-command)...")
+	joinCmd, err := generateKubeadmJoinCommand(cfg.kindContainerName, cfg.controlPlaneTailscaleIP)
+	if err != nil {
+		exitf("failed to generate kubeadm join command: %v", err)
+	}
+	cfg.kindJoinCommand = joinCmd
+	fmt.Printf("Generated join command: %s\n", joinCmd)
+
+	if cfg.bootstrapExisting {
+		ctx := context.Background()
+		script := buildBootstrapScript(cfg)
+		for _, host := range cfg.vmNames {
+			fmt.Printf("Bootstrapping existing VM %q...\n", host)
+			if err := runRemoteBootstrap(ctx, host, cfg, script); err != nil {
+				exitf("bootstrap %s: %v", host, err)
+			}
 		}
-		cfg.kindJoinCommand = joinCmd
-		fmt.Printf("Generated join command: %s\n", joinCmd)
+		fmt.Println("Bootstrap completed for all targets")
+		return
 	}
 
 	sshPublicKey, err := os.ReadFile(cfg.sshPublicKeyPath)
@@ -291,68 +327,39 @@ write_files:
       # Fix kube-proxy service routing: The Kubernetes API endpoint (10.96.0.1:443)
       # points to the control plane's internal IP which is not reachable from Azure.
       # We need NAT rules to redirect this traffic to the control plane's Tailscale IP.
-      CONTROL_PLANE_TAILSCALE_IP=$(grep stargate-demo-control-plane /etc/hosts | awk '{print $1}')
-      
+      CONTROL_PLANE_TAILSCALE_IP=$(grep %s /etc/hosts | awk '{print $1}')
       if [[ -n "$CONTROL_PLANE_TAILSCALE_IP" ]]; then
-        echo "Setting up NAT rules for Kubernetes API access via Tailscale..."
-        
-        # Get the Docker bridge IP that kube-proxy will try to reach
-        DOCKER_IP=$(kubectl --kubeconfig /etc/kubernetes/kubelet.conf get endpoints kubernetes -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null || echo "")
-        
-        # NAT rule 1: Redirect ClusterIP (10.96.0.1:443) to Tailscale IP
-        echo "Adding NAT: 10.96.0.1:443 -> $CONTROL_PLANE_TAILSCALE_IP:6443"
+        # Redirect service IP to control plane Tailscale IP
         iptables -t nat -I OUTPUT -d 10.96.0.1 -p tcp --dport 443 -j DNAT --to-destination "$CONTROL_PLANE_TAILSCALE_IP:6443"
         iptables -t nat -I PREROUTING -d 10.96.0.1 -p tcp --dport 443 -j DNAT --to-destination "$CONTROL_PLANE_TAILSCALE_IP:6443"
-        
-        # NAT rule 2: If Docker bridge IP is different, redirect that too
+      
+        # Also redirect if kube-proxy picks up the control plane's Docker IP (Kind internal)
+        DOCKER_IP=$(kubectl --kubeconfig /etc/kubernetes/kubelet.conf get endpoints kubernetes -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null || echo "")
         if [[ -n "$DOCKER_IP" && "$DOCKER_IP" != "$CONTROL_PLANE_TAILSCALE_IP" ]]; then
-          echo "Adding NAT: $DOCKER_IP:6443 -> $CONTROL_PLANE_TAILSCALE_IP:6443"
           iptables -t nat -I OUTPUT -d "$DOCKER_IP" -p tcp --dport 6443 -j DNAT --to-destination "$CONTROL_PLANE_TAILSCALE_IP:6443"
           iptables -t nat -I PREROUTING -d "$DOCKER_IP" -p tcp --dport 6443 -j DNAT --to-destination "$CONTROL_PLANE_TAILSCALE_IP:6443"
         fi
-        
-        # MASQUERADE rule: Ensure return traffic works correctly
-        echo "Adding MASQUERADE for API server traffic"
+      
+        # Ensure SNAT for return traffic
         iptables -t nat -A POSTROUTING -d "$CONTROL_PLANE_TAILSCALE_IP" -p tcp --dport 6443 -j MASQUERADE
-        
-        # Make rules persistent across reboots
+      
+        # Persist rules (best-effort)
         mkdir -p /etc/iptables
         iptables-save > /etc/iptables/rules.v4
-        
-        # Install iptables-persistent if not present
         DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent 2>/dev/null || true
-        
-        echo "NAT rules configured successfully"
-      else
-        echo "WARNING: Could not find control plane Tailscale IP in /etc/hosts"
       fi
       
-      # Configure Tailscale subnet routing for pod network
-      echo "Configuring Tailscale subnet routing..."
-      
-      # Wait for kubelet to register and get pod CIDR assigned
+      # Wait for Pod CIDR and advertise via Tailscale (so pods are reachable over tailnet)
       for i in {1..60}; do
-        POD_CIDR=$(cat /etc/kubernetes/kubelet.conf 2>/dev/null && \
-          kubectl --kubeconfig /etc/kubernetes/kubelet.conf get node $(hostname) -o jsonpath='{.spec.podCIDR}' 2>/dev/null || true)
+        POD_CIDR=$(kubectl --kubeconfig /etc/kubernetes/kubelet.conf get node $(hostname) -o jsonpath='{.spec.podCIDR}' 2>/dev/null || true)
         if [[ -n "$POD_CIDR" && "$POD_CIDR" != "<no value>" ]]; then
-          echo "Pod CIDR assigned: $POD_CIDR"
           break
         fi
-        echo "Waiting for pod CIDR assignment... ($i/60)"
         sleep 5
       done
       
       if [[ -n "$POD_CIDR" && "$POD_CIDR" != "<no value>" ]]; then
-        # Advertise pod CIDR via Tailscale and accept routes from other nodes
-        echo "Advertising pod CIDR $POD_CIDR via Tailscale..."
-        tailscale set --advertise-routes="$POD_CIDR" --accept-routes || {
-          echo "WARNING: Failed to configure Tailscale subnet routing"
-          echo "You may need to manually approve routes in Tailscale admin console"
-        }
-        echo "Tailscale subnet routing configured for $POD_CIDR"
-      else
-        echo "WARNING: Could not determine pod CIDR, skipping Tailscale subnet routing"
-        echo "You can manually configure with: tailscale set --advertise-routes=<POD_CIDR> --accept-routes"
+        tailscale set --advertise-routes="$POD_CIDR" --accept-routes || true
       fi
 
   - path: /tmp/install-k8s.sh
@@ -360,46 +367,43 @@ write_files:
     content: |
       #!/bin/bash
       set -ex
-
-      # Load kernel modules
+      
       modprobe overlay
       modprobe br_netfilter
-      cat <<EOF > /etc/modules-load.d/k8s.conf
+      cat <<EOF >/etc/modules-load.d/k8s.conf
       overlay
       br_netfilter
       EOF
-      cat <<EOF > /etc/sysctl.d/k8s.conf
+      cat <<EOF >/etc/sysctl.d/k8s.conf
       net.bridge.bridge-nf-call-iptables  = 1
       net.bridge.bridge-nf-call-ip6tables = 1
       net.ipv4.ip_forward                 = 1
       EOF
       sysctl --system
-
-      # Disable swap
+      
       swapoff -a
       sed -i '/swap/d' /etc/fstab
-
-      # Install containerd
+      
       mkdir -p /etc/apt/keyrings
       curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
       echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
       apt-get update
       apt-get install -y containerd.io
-
+      
       # Configure containerd for Kubernetes
       mkdir -p /etc/containerd
       containerd config default > /etc/containerd/config.toml
       sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
       systemctl restart containerd
       systemctl enable containerd
-
+      
       # Install Kubernetes components (v1.34)
       curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
       echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /' > /etc/apt/sources.list.d/kubernetes.list
       apt-get update
       apt-get install -y kubelet kubeadm kubectl
       apt-mark hold kubelet kubeadm kubectl
-
+      
       # Join the cluster
       /tmp/kubeadm-join.sh
 
@@ -415,143 +419,184 @@ runcmd:
 		cfg.controlPlaneTailscaleIP, // Use pre-detected Tailscale IP
 		cfg.controlPlaneHostname,
 		cfg.kindJoinCommand,
+		cfg.controlPlaneHostname,
 	)
 
 	return cloudInit, nil
 }
 
-// extractControlPlaneIP extracts the IP address from a kubeadm join command.
-// Example: "kubeadm join 100.66.238.55:6443 --token ..." -> "100.66.238.55"
-func extractControlPlaneIP(joinCommand string) string {
-	re := regexp.MustCompile(`kubeadm\s+join\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):\d+`)
-	matches := re.FindStringSubmatch(joinCommand)
-	if len(matches) >= 2 {
-		return matches[1]
-	}
-	return ""
+// buildBootstrapScript renders a standalone bash script that installs containerd/k8s bits
+// and joins the Kind control plane using the provided join command. This is used when
+// bootstrapping existing VMs over SSH (no Azure provisioning).
+func buildBootstrapScript(cfg config) string {
+	return fmt.Sprintf(`#!/bin/bash
+set -ex
+
+echo '%s %s' >> /etc/hosts
+
+echo "Waiting for Tailscale IP..."
+for i in {1..30}; do
+  TAILSCALE_IP=$(tailscale ip -4 2>/dev/null | head -n1 || true)
+  if [[ -n "$TAILSCALE_IP" ]]; then
+  echo "Tailscale IP: $TAILSCALE_IP"
+  break
+  fi
+  sleep 2
+done
+
+if [[ -z "$TAILSCALE_IP" ]]; then
+  echo "ERROR: Could not get Tailscale IP"
+  exit 1
+fi
+
+JOIN_CMD='%s'
+
+API_SERVER=$(echo "$JOIN_CMD" | grep -oP 'kubeadm join \K[^\s]+')
+TOKEN=$(echo "$JOIN_CMD" | grep -oP -- '--token \K[^\s]+')
+CA_CERT_HASH=$(echo "$JOIN_CMD" | grep -oP -- '--discovery-token-ca-cert-hash \K[^\s]+')
+
+cat > /tmp/kubeadm-join-config.yaml <<EOF
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: JoinConfiguration
+discovery:
+  bootstrapToken:
+    apiServerEndpoint: $API_SERVER
+    token: $TOKEN
+    caCertHashes:
+      - $CA_CERT_HASH
+nodeRegistration:
+  kubeletExtraArgs:
+    - name: cgroup-root
+      value: /
+    - name: node-ip
+      value: "$TAILSCALE_IP"
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupRoot: /
+EOF
+
+echo "Configuring kernel params..."
+modprobe overlay
+modprobe br_netfilter
+sysctl -w net.bridge.bridge-nf-call-iptables=1
+sysctl -w net.bridge.bridge-nf-call-ip6tables=1
+sysctl -w net.ipv4.ip_forward=1
+swapoff -a
+sed -i '/swap/d' /etc/fstab
+
+if ! command -v containerd >/dev/null; then
+  mkdir -p /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
+  apt-get update
+  apt-get install -y containerd.io
+  mkdir -p /etc/containerd
+  containerd config default > /etc/containerd/config.toml
+  sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+  systemctl restart containerd
+  systemctl enable containerd
+fi
+
+if ! command -v kubeadm >/dev/null; then
+  curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /' > /etc/apt/sources.list.d/kubernetes.list
+  apt-get update
+  apt-get install -y kubelet kubeadm kubectl
+  apt-mark hold kubelet kubeadm kubectl
+fi
+
+timeout 120 kubeadm reset -f || true
+rm -rf /etc/cni/net.d/* || true
+
+echo "Running kubeadm join..."
+timeout 180 kubeadm join --config /tmp/kubeadm-join-config.yaml
+
+CONTROL_PLANE_TAILSCALE_IP='%s'
+if [[ -n "$CONTROL_PLANE_TAILSCALE_IP" ]]; then
+  iptables -t nat -I OUTPUT -d 10.96.0.1 -p tcp --dport 443 -j DNAT --to-destination "$CONTROL_PLANE_TAILSCALE_IP:6443"
+  iptables -t nat -I PREROUTING -d 10.96.0.1 -p tcp --dport 443 -j DNAT --to-destination "$CONTROL_PLANE_TAILSCALE_IP:6443"
+  iptables -t nat -A POSTROUTING -d "$CONTROL_PLANE_TAILSCALE_IP" -p tcp --dport 6443 -j MASQUERADE
+  mkdir -p /etc/iptables
+  iptables-save > /etc/iptables/rules.v4
+fi
+
+for i in {1..60}; do
+  POD_CIDR=$(kubectl --kubeconfig /etc/kubernetes/kubelet.conf get node $(hostname) -o jsonpath='{.spec.podCIDR}' 2>/dev/null || true)
+  if [[ -n "$POD_CIDR" && "$POD_CIDR" != "<no value>" ]]; then
+  tailscale set --advertise-routes="$POD_CIDR" --accept-routes || true
+  break
+  fi
+  sleep 5
+done
+`,
+		cfg.controlPlaneTailscaleIP,
+		cfg.controlPlaneHostname,
+		cfg.kindJoinCommand,
+		cfg.controlPlaneTailscaleIP,
+	)
 }
 
-// generateKubeadmJoinCommand generates a fresh kubeadm join command by executing
-// kubeadm token create inside the Kind control plane container.
-func generateKubeadmJoinCommand(containerName, controlPlaneIP string) (string, error) {
-	// Generate a new token using docker exec
-	cmd := exec.Command("docker", "exec", containerName, "kubeadm", "token", "create", "--print-join-command")
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+func runRemoteBootstrap(ctx context.Context, host string, cfg config, script string) error {
+	sshArgs := []string{
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-i", cfg.sshPrivateKeyPath,
+		"-p", strconv.Itoa(cfg.sshPort),
+		fmt.Sprintf("%s@%s", cfg.adminUsername, host),
+		"sudo", "bash", "-s",
+	}
+
+	cmd := exec.CommandContext(ctx, "ssh", sshArgs...)
+	cmd.Stdin = strings.NewReader(script)
+
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
 
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("docker exec failed: %v, stderr: %s", err, stderr.String())
+		return fmt.Errorf("ssh bootstrap failed: %w\n%s", err, buf.String())
 	}
 
-	joinCmd := strings.TrimSpace(stdout.String())
-	if joinCmd == "" {
-		return "", fmt.Errorf("empty join command returned")
-	}
-
-	// If control plane IP is provided, replace the hostname with the IP
-	if controlPlaneIP == "" {
-		// Auto-detect Tailscale IP of the control plane
-		controlPlaneIP = detectControlPlaneTailscaleIP(containerName)
-	}
-
-	if controlPlaneIP != "" {
-		// Replace "kubeadm join <hostname>:6443" with "kubeadm join <tailscale-ip>:6443"
-		re := regexp.MustCompile(`kubeadm join [^:]+:(\d+)`)
-		joinCmd = re.ReplaceAllString(joinCmd, fmt.Sprintf("kubeadm join %s:$1", controlPlaneIP))
-	}
-
-	return joinCmd, nil
+	return nil
 }
 
-// detectControlPlaneTailscaleIP gets the local host's Tailscale IP.
-// The Kind control plane runs in Docker on this host, and since the API server
-// is bound to 0.0.0.0:6443, it's accessible via the host's Tailscale IP.
-func detectControlPlaneTailscaleIP(containerName string) string {
-	cmd := exec.Command("tailscale", "ip", "-4")
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-
-	if err := cmd.Run(); err != nil {
-		fmt.Printf("Warning: failed to get Tailscale IP: %v\n", err)
+func detectControlPlaneTailscaleIP(kindContainerName string) string {
+	out, err := exec.Command("docker", "exec", kindContainerName, "tailscale", "ip", "-4").Output()
+	if err != nil {
 		return ""
 	}
 
-	ip := strings.TrimSpace(stdout.String())
-	if regexp.MustCompile(`^100\.`).MatchString(ip) {
-		fmt.Printf("Detected local Tailscale IP: %s\n", ip)
-		return ip
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) == 0 {
+		return ""
 	}
 
-	return ""
+	return strings.TrimSpace(lines[0])
 }
 
-// fixKindControlPlaneNodeIP updates the Kind control plane kubelet to advertise
-// the Tailscale IP instead of the Docker bridge IP. This is needed for kindnet
-// to route pod traffic correctly to/from Azure VMs via Tailscale.
-func fixKindControlPlaneNodeIP(containerName, tailscaleIP string) error {
-	// Check current node-ip setting
-	cmd := exec.Command("docker", "exec", containerName, "cat", "/var/lib/kubelet/kubeadm-flags.env")
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to read kubelet flags: %w", err)
+func generateKubeadmJoinCommand(kindContainerName, controlPlaneTailscaleIP string) (string, error) {
+	cmd := exec.Command("docker", "exec", kindContainerName, "kubeadm", "token", "create", "--print-join-command")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("docker exec kubeadm token create: %w", err)
 	}
 
-	currentFlags := stdout.String()
-
-	// Check if already configured with the correct IP
-	if strings.Contains(currentFlags, fmt.Sprintf("--node-ip=%s", tailscaleIP)) {
-		fmt.Println("Control plane already configured with Tailscale IP")
-		return nil
+	joinCmd := strings.TrimSpace(string(out))
+	if joinCmd == "" {
+		return "", errors.New("empty join command from kubeadm")
 	}
 
-	// Update node-ip in kubelet flags
-	var newFlags string
-	if strings.Contains(currentFlags, "--node-ip=") {
-		// Replace existing node-ip
-		re := regexp.MustCompile(`--node-ip=[0-9.]+`)
-		newFlags = re.ReplaceAllString(currentFlags, fmt.Sprintf("--node-ip=%s", tailscaleIP))
-	} else {
-		// Add node-ip flag
-		newFlags = strings.Replace(currentFlags, `KUBELET_KUBEADM_ARGS="`, fmt.Sprintf(`KUBELET_KUBEADM_ARGS="--node-ip=%s `, tailscaleIP), 1)
+	if controlPlaneTailscaleIP != "" {
+		re := regexp.MustCompile(`kubeadm join\s+[^\s]+`)
+		joinCmd = re.ReplaceAllString(joinCmd, fmt.Sprintf("kubeadm join %s:6443", controlPlaneTailscaleIP))
 	}
 
-	// Write updated flags
-	cmd = exec.Command("docker", "exec", containerName, "sh", "-c", fmt.Sprintf("echo '%s' > /var/lib/kubelet/kubeadm-flags.env", strings.TrimSpace(newFlags)))
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to update kubelet flags: %w", err)
+	if !strings.Contains(joinCmd, "--token") || !strings.Contains(joinCmd, "--discovery-token-ca-cert-hash") {
+		return "", fmt.Errorf("join command missing token or ca hash: %s", joinCmd)
 	}
 
-	// Restart kubelet
-	fmt.Println("Restarting kubelet on control plane...")
-	cmd = exec.Command("docker", "exec", containerName, "systemctl", "restart", "kubelet")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to restart kubelet: %w", err)
-	}
-
-	// Wait for kubelet to be ready
-	time.Sleep(5 * time.Second)
-
-	// Patch the node status to update the advertised IP
-	fmt.Println("Patching control plane node status...")
-	patchJSON := fmt.Sprintf(`[{"op": "replace", "path": "/status/addresses/0/address", "value": "%s"}]`, tailscaleIP)
-	cmd = exec.Command("kubectl", "patch", "node", containerName, "--subresource=status", "--type=json", "-p", patchJSON)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to patch node status: %w, stderr: %s", err, stderr.String())
-	}
-
-	// Restart kindnet to pick up new routes
-	fmt.Println("Restarting kindnet daemonset...")
-	cmd = exec.Command("kubectl", "rollout", "restart", "daemonset", "kindnet", "-n", "kube-system")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to restart kindnet: %w", err)
-	}
-
-	fmt.Println("Control plane configured to use Tailscale IP")
-	return nil
+	return joinCmd, nil
 }
 
 func ensureResourceGroup(ctx context.Context, client *armresources.ResourceGroupsClient, cfg config) error {
@@ -563,9 +608,7 @@ func ensureResourceGroup(ctx context.Context, client *armresources.ResourceGroup
 		return err
 	}
 
-	_, err = client.CreateOrUpdate(ctx, cfg.resourceGroup, armresources.ResourceGroup{
-		Location: to.Ptr(cfg.location),
-	}, nil)
+	_, err = client.CreateOrUpdate(ctx, cfg.resourceGroup, armresources.ResourceGroup{Location: to.Ptr(cfg.location)}, nil)
 	return err
 }
 
@@ -581,9 +624,7 @@ func ensureVNet(ctx context.Context, client *armnetwork.VirtualNetworksClient, c
 	poller, err := client.BeginCreateOrUpdate(ctx, cfg.resourceGroup, cfg.vnetName, armnetwork.VirtualNetwork{
 		Location: to.Ptr(cfg.location),
 		Properties: &armnetwork.VirtualNetworkPropertiesFormat{
-			AddressSpace: &armnetwork.AddressSpace{
-				AddressPrefixes: []*string{to.Ptr(cfg.vnetCIDR)},
-			},
+			AddressSpace: &armnetwork.AddressSpace{AddressPrefixes: []*string{to.Ptr(cfg.vnetCIDR)}},
 		},
 	}, nil)
 	if err != nil {
@@ -607,9 +648,7 @@ func ensureSubnet(ctx context.Context, client *armnetwork.SubnetsClient, cfg con
 	}
 
 	poller, err := client.BeginCreateOrUpdate(ctx, cfg.resourceGroup, cfg.vnetName, cfg.subnetName, armnetwork.Subnet{
-		Properties: &armnetwork.SubnetPropertiesFormat{
-			AddressPrefix: to.Ptr(cfg.subnetCIDR),
-		},
+		Properties: &armnetwork.SubnetPropertiesFormat{AddressPrefix: to.Ptr(cfg.subnetCIDR)},
 	}, nil)
 	if err != nil {
 		return "", err
@@ -640,9 +679,7 @@ func ensurePublicIP(ctx context.Context, client *armnetwork.PublicIPAddressesCli
 	poller, err := client.BeginCreateOrUpdate(ctx, cfg.resourceGroup, cfg.publicIPName, armnetwork.PublicIPAddress{
 		Location: to.Ptr(cfg.location),
 		Zones:    []*string{to.Ptr(cfg.zone)},
-		SKU: &armnetwork.PublicIPAddressSKU{
-			Name: to.Ptr(armnetwork.PublicIPAddressSKUNameStandard),
-		},
+		SKU:      &armnetwork.PublicIPAddressSKU{Name: to.Ptr(armnetwork.PublicIPAddressSKUNameStandard)},
 		Properties: &armnetwork.PublicIPAddressPropertiesFormat{
 			PublicIPAllocationMethod: to.Ptr(armnetwork.IPAllocationMethodStatic),
 			PublicIPAddressVersion:   to.Ptr(armnetwork.IPVersionIPv4),
@@ -677,20 +714,14 @@ func ensureNIC(ctx context.Context, client *armnetwork.InterfacesClient, cfg con
 	poller, err := client.BeginCreateOrUpdate(ctx, cfg.resourceGroup, cfg.nicName, armnetwork.Interface{
 		Location: to.Ptr(cfg.location),
 		Properties: &armnetwork.InterfacePropertiesFormat{
-			IPConfigurations: []*armnetwork.InterfaceIPConfiguration{
-				{
-					Name: to.Ptr("ipconfig1"),
-					Properties: &armnetwork.InterfaceIPConfigurationPropertiesFormat{
-						Subnet: &armnetwork.Subnet{
-							ID: to.Ptr(subnetID),
-						},
-						PublicIPAddress: &armnetwork.PublicIPAddress{
-							ID: to.Ptr(publicIPID),
-						},
-						PrivateIPAllocationMethod: to.Ptr(armnetwork.IPAllocationMethodDynamic),
-					},
+			IPConfigurations: []*armnetwork.InterfaceIPConfiguration{{
+				Name: to.Ptr("ipconfig1"),
+				Properties: &armnetwork.InterfaceIPConfigurationPropertiesFormat{
+					Subnet:                    &armnetwork.Subnet{ID: to.Ptr(subnetID)},
+					PublicIPAddress:           &armnetwork.PublicIPAddress{ID: to.Ptr(publicIPID)},
+					PrivateIPAllocationMethod: to.Ptr(armnetwork.IPAllocationMethodDynamic),
 				},
-			},
+			}},
 		},
 	}, nil)
 	if err != nil {
@@ -717,49 +748,32 @@ func ensureVM(ctx context.Context, client *armcompute.VirtualMachinesClient, cfg
 	}
 
 	customData := base64.StdEncoding.EncodeToString([]byte(cloudInit))
-	sshKeyPath := fmt.Sprintf("/home/%s/.ssh/authorized_keys", cfg.adminUsername)
+	sshKeyPath := filepath.Join("/home", cfg.adminUsername, ".ssh", "authorized_keys")
 
 	poller, err := client.BeginCreateOrUpdate(ctx, cfg.resourceGroup, cfg.vmName, armcompute.VirtualMachine{
 		Location: to.Ptr(cfg.location),
 		Zones:    []*string{to.Ptr(cfg.zone)},
 		Properties: &armcompute.VirtualMachineProperties{
-			HardwareProfile: &armcompute.HardwareProfile{
-				VMSize: to.Ptr(armcompute.VirtualMachineSizeTypes(cfg.vmSize)),
-			},
-			StorageProfile: &armcompute.StorageProfile{
-				ImageReference: &armcompute.ImageReference{
-					Publisher: to.Ptr("Canonical"),
-					Offer:     to.Ptr("0001-com-ubuntu-server-jammy"),
-					SKU:       to.Ptr("22_04-lts-gen2"),
-					Version:   to.Ptr("latest"),
-				},
-			},
+			HardwareProfile: &armcompute.HardwareProfile{VMSize: to.Ptr(armcompute.VirtualMachineSizeTypes(cfg.vmSize))},
+			StorageProfile: &armcompute.StorageProfile{ImageReference: &armcompute.ImageReference{
+				Publisher: to.Ptr("Canonical"),
+				Offer:     to.Ptr("0001-com-ubuntu-server-jammy"),
+				SKU:       to.Ptr("22_04-lts-gen2"),
+				Version:   to.Ptr("latest"),
+			}},
 			OSProfile: &armcompute.OSProfile{
 				ComputerName:  to.Ptr(cfg.vmName),
 				AdminUsername: to.Ptr(cfg.adminUsername),
 				CustomData:    to.Ptr(customData),
 				LinuxConfiguration: &armcompute.LinuxConfiguration{
 					DisablePasswordAuthentication: to.Ptr(true),
-					SSH: &armcompute.SSHConfiguration{
-						PublicKeys: []*armcompute.SSHPublicKey{
-							{
-								Path:    to.Ptr(sshKeyPath),
-								KeyData: to.Ptr(sshPublicKey),
-							},
-						},
-					},
+					SSH:                           &armcompute.SSHConfiguration{PublicKeys: []*armcompute.SSHPublicKey{{Path: to.Ptr(sshKeyPath), KeyData: to.Ptr(sshPublicKey)}}},
 				},
 			},
-			NetworkProfile: &armcompute.NetworkProfile{
-				NetworkInterfaces: []*armcompute.NetworkInterfaceReference{
-					{
-						ID: to.Ptr(nicID),
-						Properties: &armcompute.NetworkInterfaceReferenceProperties{
-							Primary: to.Ptr(true),
-						},
-					},
-				},
-			},
+			NetworkProfile: &armcompute.NetworkProfile{NetworkInterfaces: []*armcompute.NetworkInterfaceReference{{
+				ID:         to.Ptr(nicID),
+				Properties: &armcompute.NetworkInterfaceReferenceProperties{Primary: to.Ptr(true)},
+			}}},
 		},
 	}, nil)
 	if err != nil {
@@ -778,7 +792,7 @@ func isNotFound(err error) bool {
 	return false
 }
 
-func exitf(format string, args ...any) {
+func exitf(format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 	os.Exit(1)
 }

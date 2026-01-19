@@ -40,21 +40,45 @@ check_prerequisites() {
         log_error "tailscale is not installed"
         exit 1
     fi
+
+    if [[ -z "${TAILSCALE_AUTH_KEY}" ]]; then
+        log_error "TAILSCALE_AUTH_KEY is not set"
+        exit 1
+    fi
     
     log_info "All prerequisites met"
 }
 
 # Get Tailscale IP
-get_tailscale_ip() {
-    log_info "Getting Tailscale IP..."
-    TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || true)
-    
-    if [[ -z "$TAILSCALE_IP" ]]; then
-        log_error "Could not get Tailscale IP. Is Tailscale running?"
+install_tailscale_in_control_plane() {
+    log_info "Installing Tailscale inside control-plane container..."
+    docker exec ${CLUSTER_NAME}-control-plane sh -c "apt-get update && apt-get install -y curl iptables iproute2 ca-certificates" >/dev/null
+    docker exec ${CLUSTER_NAME}-control-plane sh -c "curl -fsSL https://tailscale.com/install.sh | sh" >/dev/null
+}
+
+start_tailscaled_in_control_plane() {
+    log_info "Starting tailscaled inside control-plane..."
+    docker exec ${CLUSTER_NAME}-control-plane sh -c "nohup tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock >/var/log/tailscaled.log 2>&1 &"
+    sleep 2
+    if ! docker exec ${CLUSTER_NAME}-control-plane pidof tailscaled >/dev/null 2>&1; then
+        log_error "tailscaled did not start in control-plane"
         exit 1
     fi
-    
-    log_info "Tailscale IP: $TAILSCALE_IP"
+}
+
+start_tailscale_in_control_plane() {
+    log_info "Bringing up Tailscale inside control-plane..."
+    docker exec ${CLUSTER_NAME}-control-plane sh -c "tailscale --socket /var/run/tailscale/tailscaled.sock up --authkey '${TAILSCALE_AUTH_KEY}' --ssh" >/dev/null
+}
+
+get_control_plane_tailscale_ip() {
+    log_info "Getting control-plane Tailscale IP..."
+    TAILSCALE_IP=$(docker exec ${CLUSTER_NAME}-control-plane tailscale --socket /var/run/tailscale/tailscaled.sock ip -4 2>/dev/null | head -n1 || true)
+    if [[ -z "$TAILSCALE_IP" ]]; then
+        log_error "Could not get control-plane Tailscale IP. Is Tailscale up inside the container?"
+        exit 1
+    fi
+    log_info "Control-plane Tailscale IP: $TAILSCALE_IP"
 }
 
 # Delete existing cluster if it exists
@@ -240,10 +264,13 @@ main() {
     echo ""
     
     check_prerequisites
-    get_tailscale_ip
     delete_existing_cluster
     create_cluster
     install_cni
+    install_tailscale_in_control_plane
+    start_tailscaled_in_control_plane
+    start_tailscale_in_control_plane
+    get_control_plane_tailscale_ip
     configure_apiserver_for_tailscale
     verify_cluster
 }
