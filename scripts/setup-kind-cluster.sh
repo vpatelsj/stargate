@@ -242,7 +242,64 @@ verify_cluster() {
     else
         log_warn "API server may not be accessible via Tailscale IP yet"
     fi
+}
+
+# Install Stargate CRDs
+install_crds() {
+    log_info "Installing Stargate CRDs..."
     
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    CRD_DIR="${SCRIPT_DIR}/../config/crd/bases"
+    
+    if [[ ! -d "$CRD_DIR" ]]; then
+        log_error "CRD directory not found: $CRD_DIR"
+        exit 1
+    fi
+    
+    for crd in "$CRD_DIR"/*.yaml; do
+        if [[ -f "$crd" ]]; then
+            log_info "Applying CRD: $(basename "$crd")"
+            kubectl apply -f "$crd"
+        fi
+    done
+    
+    log_info "CRDs installed successfully"
+    kubectl get crds | grep stargate || true
+}
+
+# Build and start the controller
+start_controller() {
+    log_info "Building and starting Stargate controller..."
+    
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    PROJECT_DIR="${SCRIPT_DIR}/.."
+    
+    # Build the controller
+    log_info "Building controller binary..."
+    (cd "$PROJECT_DIR" && go build -o bin/controller ./main.go)
+    
+    if [[ ! -x "${PROJECT_DIR}/bin/controller" ]]; then
+        log_error "Controller binary not found after build"
+        exit 1
+    fi
+    
+    # Start controller in background (uses KUBECONFIG env or ~/.kube/config automatically)
+    log_info "Starting controller in background..."
+    nohup "${PROJECT_DIR}/bin/controller" > /tmp/stargate-controller.log 2>&1 &
+    CONTROLLER_PID=$!
+    
+    sleep 2
+    if kill -0 "$CONTROLLER_PID" 2>/dev/null; then
+        log_info "Controller started with PID $CONTROLLER_PID"
+        log_info "Logs: /tmp/stargate-controller.log"
+    else
+        log_error "Controller failed to start. Check /tmp/stargate-controller.log"
+        exit 1
+    fi
+}
+
+# Print final summary
+print_summary() {
     echo ""
     log_info "Cluster setup complete!"
     echo ""
@@ -253,6 +310,9 @@ verify_cluster() {
     echo "    --subscription-id \"\$AZURE_SUBSCRIPTION_ID\" \\"
     echo "    --vm-name stargate-azure-vm<N> \\"
     echo "    --tailscale-auth-key \"\$TAILSCALE_AUTH_KEY\""
+    echo ""
+    echo "Controller PID: $CONTROLLER_PID"
+    echo "Controller logs: /tmp/stargate-controller.log"
     echo ""
 }
 
@@ -273,6 +333,9 @@ main() {
     get_control_plane_tailscale_ip
     configure_apiserver_for_tailscale
     verify_cluster
+    install_crds
+    start_controller
+    print_summary
 }
 
 main "$@"

@@ -48,6 +48,9 @@ type ServerStatus struct {
 	// CurrentOS version running on the hardware
 	CurrentOS string `json:"currentOS,omitempty"`
 
+	// AppliedProvisioningProfile is the name of the last successfully applied ProvisioningProfile
+	AppliedProvisioningProfile string `json:"appliedProvisioningProfile,omitempty"`
+
 	// LastUpdated timestamp
 	LastUpdated metav1.Time `json:"lastUpdated,omitempty"`
 

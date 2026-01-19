@@ -1,18 +1,23 @@
 ---
+# Example ProvisioningProfiles for different namespaces/environments
 apiVersion: stargate.io/v1alpha1
 kind: ProvisioningProfile
 metadata:
-  name: os-2-0-0
+  name: k8s-1-34-worker
   namespace: dc-west
 spec:
-  osVersion: "2.0.0"
-  osImage: "https://images.example.com/ubuntu-22-aks-2.0.0.img"
+  kubernetesVersion: "1.34"
+  containerRuntime: containerd
+  sshCredentialsSecretRef: ssh-credentials
+  adminUsername: ubuntu
 ---
 apiVersion: stargate.io/v1alpha1
 kind: ProvisioningProfile
 metadata:
-  name: os-2-0-0
+  name: k8s-1-34-worker
   namespace: dc-east
 spec:
-  osVersion: "2.0.0"
-  osImage: "https://images.example.com/ubuntu-22-aks-2.0.0.img"
+  kubernetesVersion: "1.34"
+  containerRuntime: containerd
+  sshCredentialsSecretRef: ssh-credentials
+  adminUsername: ubuntu

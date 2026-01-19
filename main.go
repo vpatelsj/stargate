@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"os"
+	"path/filepath"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -14,7 +15,6 @@ import (
 
 	api "github.com/vpatelsj/stargate/api/v1alpha1"
 	"github.com/vpatelsj/stargate/controller"
-	"github.com/vpatelsj/stargate/dcclient"
 )
 
 var (
@@ -30,11 +30,25 @@ func init() {
 func main() {
 	var metricsAddr string
 	var probeAddr string
-	var dcAPIURL string
+
+	// Bootstrap configuration flags
+	var kindContainerName string
+	var controlPlaneTailscaleIP string
+	var controlPlaneHostname string
+	var sshPrivateKeyPath string
+	var sshPort int
+	var adminUsername string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8081", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8082", "The address the probe endpoint binds to.")
-	flag.StringVar(&dcAPIURL, "dc-api-url", "http://localhost:8080", "The URL of the datacenter API.")
+
+	// Bootstrap configuration flags
+	flag.StringVar(&kindContainerName, "kind-container", "stargate-demo-control-plane", "Name of the Kind control plane Docker container.")
+	flag.StringVar(&controlPlaneTailscaleIP, "control-plane-ip", "", "Tailscale IP of the Kind control plane (auto-detected if not provided).")
+	flag.StringVar(&controlPlaneHostname, "control-plane-hostname", "stargate-demo-control-plane", "Hostname of the Kind control plane.")
+	flag.StringVar(&sshPrivateKeyPath, "ssh-private-key", filepath.Join(os.Getenv("HOME"), ".ssh", "id_rsa"), "Path to SSH private key for server bootstrap.")
+	flag.IntVar(&sshPort, "ssh-port", 22, "SSH port for server bootstrap.")
+	flag.StringVar(&adminUsername, "admin-username", "ubuntu", "Admin username for SSH.")
 
 	opts := zap.Options{
 		Development: true,
@@ -54,14 +68,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create DC client
-	dcClient := dcclient.NewHTTPClient(dcAPIURL)
-
 	// Set up Operation controller
 	if err = (&controller.OperationReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		DCClient: dcClient,
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		KindContainerName:       kindContainerName,
+		ControlPlaneTailscaleIP: controlPlaneTailscaleIP,
+		ControlPlaneHostname:    controlPlaneHostname,
+		SSHPrivateKeyPath:       sshPrivateKeyPath,
+		SSHPort:                 sshPort,
+		AdminUsername:           adminUsername,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Operation")
 		os.Exit(1)
@@ -77,7 +93,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Info("starting manager", "dc-api-url", dcAPIURL)
+	setupLog.Info("starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)

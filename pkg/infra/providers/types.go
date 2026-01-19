@@ -11,4 +11,5 @@ type NodeInfo struct {
 	PublicIP    string
 	PrivateIP   string
 	TailnetFQDN string
+	TailscaleIP string // Tailscale IPv4 address for mesh connectivity
 }

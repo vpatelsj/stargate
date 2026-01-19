@@ -3,10 +3,12 @@ apiVersion: stargate.io/v1alpha1
 kind: Operation
 metadata:
   name: repave-server-001
-  namespace: dc-west
+  namespace: default
 spec:
   serverRef:
-    name: server-001
+    # Name of the Server CR to repave
+    name: stargate-azure-vm25-1
   provisioningProfileRef:
-    name: os-2-0-0
+    # Name of the ProvisioningProfile that defines bootstrap config
+    name: azure-k8s-worker
   operation: repave
