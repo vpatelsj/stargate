@@ -28,6 +28,7 @@ type QemuOperationReconciler struct {
 	Scheme *runtime.Scheme
 
 	// Control plane configuration
+	KindContainerName       string // Name of the Kind control plane container
 	ControlPlaneTailscaleIP string // Tailscale IP of the control plane node
 	ControlPlaneHostname    string // Hostname of the control plane node
 
@@ -268,17 +269,17 @@ func (r *QemuOperationReconciler) bootstrapServer(ctx context.Context, server *a
 		return fmt.Errorf("server %s has no IPv4 address", server.Name)
 	}
 
-	// Get control plane Tailscale IP
+	// Get control plane Tailscale IP (via Kind control-plane container, same as azure flow)
 	controlPlaneIP := r.ControlPlaneTailscaleIP
 	if controlPlaneIP == "" {
 		var err error
-		controlPlaneIP, err = r.detectLocalControlPlaneTailscaleIP()
+		controlPlaneIP, err = r.detectControlPlaneTailscaleIP()
 		if err != nil {
 			return fmt.Errorf("detect control plane IP: %w", err)
 		}
 	}
 
-	// Generate kubeadm join command
+	// Generate kubeadm join command (inside the Kind control-plane container)
 	joinCmd, err := r.generateKubeadmJoinCommand(controlPlaneIP)
 	if err != nil {
 		return fmt.Errorf("generate join command: %w", err)
@@ -291,12 +292,22 @@ func (r *QemuOperationReconciler) bootstrapServer(ctx context.Context, server *a
 	return r.runRemoteBootstrap(ctx, target, script, cfg)
 }
 
-// detectLocalControlPlaneTailscaleIP gets the Tailscale IP from the local machine (control plane)
-func (r *QemuOperationReconciler) detectLocalControlPlaneTailscaleIP() (string, error) {
-	cmd := exec.Command("tailscale", "ip", "-4")
+// detectControlPlaneTailscaleIP gets the Tailscale IP from the Kind control-plane container (aligns with azure controller)
+func (r *QemuOperationReconciler) detectControlPlaneTailscaleIP() (string, error) {
+	containerName := r.KindContainerName
+	if containerName == "" {
+		containerName = "stargate-demo-control-plane"
+	}
+
+	cmd := exec.Command("docker", "exec", containerName, "tailscale", "--socket", "/var/run/tailscale/tailscaled.sock", "ip", "-4")
 	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("tailscale ip -4: %w", err)
+		// Try without socket flag as a fallback
+		cmd = exec.Command("docker", "exec", containerName, "tailscale", "ip", "-4")
+		out, err = cmd.Output()
+		if err != nil {
+			return "", fmt.Errorf("docker exec tailscale ip: %w", err)
+		}
 	}
 
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
@@ -307,17 +318,17 @@ func (r *QemuOperationReconciler) detectLocalControlPlaneTailscaleIP() (string, 
 	return strings.TrimSpace(lines[0]), nil
 }
 
-// generateKubeadmJoinCommand creates a new join token and returns the join command
+// generateKubeadmJoinCommand creates a new join token from inside the Kind control-plane container and returns the join command
 func (r *QemuOperationReconciler) generateKubeadmJoinCommand(controlPlaneTailscaleIP string) (string, error) {
-	cmd := exec.Command("kubeadm", "token", "create", "--print-join-command")
+	containerName := r.KindContainerName
+	if containerName == "" {
+		containerName = "stargate-demo-control-plane"
+	}
+
+	cmd := exec.Command("docker", "exec", containerName, "kubeadm", "token", "create", "--print-join-command")
 	out, err := cmd.Output()
 	if err != nil {
-		// If running as non-root, try with sudo
-		cmd = exec.Command("sudo", "kubeadm", "token", "create", "--print-join-command")
-		out, err = cmd.Output()
-		if err != nil {
-			return "", fmt.Errorf("kubeadm token create: %w", err)
-		}
+		return "", fmt.Errorf("kubeadm token create: %w", err)
 	}
 
 	joinCmd := strings.TrimSpace(string(out))
