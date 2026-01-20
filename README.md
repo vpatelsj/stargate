@@ -67,7 +67,11 @@ This script:
 - Creates default `ProvisioningProfile` (`azure-k8s-worker`) in `azure-dc` namespace
 - Starts the controller
 
-### 4. Provision Azure VMs
+### 4. Provision VMs
+
+You can provision VMs using either **Azure** or **local QEMU**:
+
+#### Option A: Azure VMs
 
 ```bash
 # Generate unique deployment number (YYMMDDHHmm format)
@@ -93,15 +97,68 @@ bin/prep-dc-inventory \
   --namespace azure-dc
 ```
 
+#### Option B: Local QEMU VMs (requires root and KVM)
+
+```bash
+sudo bin/prep-dc-inventory \
+  --provider qemu \
+  --vm stargate-qemu-vm-1 \
+  --vm stargate-qemu-vm-2 \
+  --admin-username ubuntu \
+  --ssh-public-key "$HOME/.ssh/id_rsa.pub" \
+  --tailscale-auth-key "$TAILSCALE_AUTH_KEY" \
+  --namespace simulator-dc \
+  --qemu-cpus 2 \
+  --qemu-memory 4096 \
+  --qemu-disk 20
+```
+
 This command:
-- Creates Azure resource group, VNet, subnet, and NSG
+- Creates Azure resource group, VNet, subnet, and NSG (Azure) or local bridge network (QEMU)
 - Provisions VMs with Tailscale and Kubernetes prerequisites
 - Verifies connectivity via Tailscale
-- Creates `Server` CRs in the `azure-dc` namespace
+- Creates `Server` CRs in the `azure-dc` or `simulator-dc` namespace
 
-### 5. Bootstrap VMs as Kubernetes Workers
+### 5. Start the Controller
 
-Create an `Operation` for each VM to trigger the bootstrap (use same `DEPLOY_NUM`):
+Start the appropriate controller based on your provider:
+
+#### For Azure VMs:
+
+```bash
+bin/azure-controller \
+  --kind-container stargate-demo-control-plane \
+  --ssh-private-key ~/.ssh/id_rsa
+```
+
+#### For QEMU VMs:
+
+```bash
+sudo -E KUBECONFIG=$HOME/.kube/config \
+  bin/qemu-controller \
+  --ssh-private-key ~/.ssh/id_rsa \
+  --admin-username ubuntu \
+  --control-plane-ip <control-plane-tailscale-ip> \
+  --control-plane-hostname stargate-demo-control-plane
+```
+
+The qemu-controller auto-detects:
+- Control plane Tailscale IP (runs `tailscale ip -4` locally)
+- Control plane hostname (uses local hostname)
+You can omit `--control-plane-ip/--control-plane-hostname` to rely on auto-detection, but when running the controller off-cluster (e.g., on your laptop) it is safer to pass the control plane Tailscale IP/hostname explicitly.
+
+Additional flags:
+- `--control-plane-ip`: Manually specify control plane Tailscale IP
+- `--control-plane-hostname`: Manually specify control plane hostname
+- `--ssh-port`: SSH port (default: 22)
+- `--metrics-bind-address`: Metrics endpoint (default: :8083)
+- `--health-probe-bind-address`: Health probe endpoint (default: :8084)
+
+### 6. Bootstrap VMs as Kubernetes Workers
+
+Create an `Operation` for each VM to trigger the bootstrap:
+
+#### For Azure VMs (use same `DEPLOY_NUM`):
 
 ```bash
 for i in 1 2 3; do
@@ -121,12 +178,49 @@ EOF
 done
 ```
 
-### 6. Verify Cluster
+#### For QEMU VMs:
+
+```bash
+for i in 1 2; do
+kubectl apply -f - <<EOF
+apiVersion: stargate.io/v1alpha1
+kind: Operation
+metadata:
+  name: bootstrap-qemu-vm-$i
+  namespace: simulator-dc
+spec:
+  serverRef:
+    name: stargate-qemu-vm-$i
+  provisioningProfileRef:
+    name: qemu-k8s-worker
+  operation: repave
+EOF
+done
+```
+
+First, create a ProvisioningProfile for QEMU:
+
+```bash
+kubectl apply -f - <<EOF
+apiVersion: stargate.io/v1alpha1
+kind: ProvisioningProfile
+metadata:
+  name: qemu-k8s-worker
+  namespace: simulator-dc
+spec:
+  kubernetesVersion: "1.34"
+  adminUsername: ubuntu
+EOF
+```
+
+### 7. Verify Cluster
 
 ```bash
 kubectl get nodes -o wide
-kubectl get operations -n azure-dc
-kubectl get servers -n azure-dc
+kubectl get operations -n azure-dc    # For Azure
+kubectl get operations -n simulator-dc  # For QEMU
+kubectl get servers -n azure-dc       # For Azure
+kubectl get servers -n simulator-dc   # For QEMU
 ```
 
 ## Cleanup

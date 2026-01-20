@@ -1,4 +1,4 @@
-.PHONY: all build run test clean install-crds uninstall-crds mockapi azure-controller simulator \
+.PHONY: all build run test clean install-crds uninstall-crds mockapi azure-controller qemu-controller simulator \
         clean-all clean-kind clean-azure clean-tailscale clean-local prep-dc-inventory azure
 
 # Go parameters
@@ -9,6 +9,7 @@ GOMOD=$(GOCMD) mod
 
 # Binary names
 AZURE_CONTROLLER_BIN=bin/azure-controller
+QEMU_CONTROLLER_BIN=bin/qemu-controller
 MOCKAPI_BIN=bin/mockapi
 SIMULATOR_BIN=bin/simulator
 PREP_DC_INVENTORY_BIN=bin/prep-dc-inventory
@@ -18,10 +19,13 @@ all: build
 
 ## Build targets
 
-build: azure-controller mockapi simulator prep-dc-inventory azure
+build: azure-controller qemu-controller mockapi simulator prep-dc-inventory azure
 
 azure-controller:
 	$(GOBUILD) -o $(AZURE_CONTROLLER_BIN) ./main.go
+
+qemu-controller:
+	$(GOBUILD) -o $(QEMU_CONTROLLER_BIN) ./cmd/qemu-controller/main.go
 
 mockapi:
 	$(GOBUILD) -o $(MOCKAPI_BIN) ./mockapi/main.go
@@ -45,6 +49,9 @@ run-mockapi-east:
 
 run-controller:
 	$(AZURE_CONTROLLER_BIN) --dc-api-url=http://localhost:8080
+
+run-qemu-controller:
+	$(QEMU_CONTROLLER_BIN)
 
 run-simulator:
 	sudo $(SIMULATOR_BIN)
@@ -81,8 +88,8 @@ deps:
 clean:
 	rm -rf bin/
 
-## Clean everything (kind cluster, Azure VMs, Tailscale devices, local processes)
-clean-all: clean-kind clean-tailscale clean-azure clean-local
+## Clean everything (kind cluster, Azure VMs, Tailscale devices, local processes, binaries)
+clean-all: clean-kind clean-tailscale clean-azure clean-local clean
 	@echo "=== Full cleanup complete! ==="
 
 ## Delete local Kind cluster
@@ -141,11 +148,14 @@ clean-local:
 	@echo "=== Cleaning local resources ==="
 	@echo "Stopping controller..."
 	-pkill -f "bin/azure-controller" 2>/dev/null || true
+	-pkill -f "bin/qemu-controller" 2>/dev/null || true
+	-sudo pkill -f "bin/qemu-controller" 2>/dev/null || true
 	@echo "Stopping simulator processes..."
 	-pkill -f "bin/simulator" 2>/dev/null || true
 	-sudo pkill -f "bin/simulator" 2>/dev/null || true
 	@echo "Killing QEMU VMs..."
 	-sudo pkill -f "qemu-system-x86_64.*sim-worker" 2>/dev/null || true
+	-sudo pkill -f "qemu-system-x86_64.*stargate-qemu" 2>/dev/null || true
 	@echo "Cleaning up VM storage..."
 	-sudo rm -rf /var/lib/stargate/vms/ 2>/dev/null || true
 	@echo "Cleaning up tap devices..."
@@ -180,4 +190,4 @@ help:
 	@echo "  clean-kind      - Delete local Kind cluster"
 	@echo "  clean-azure     - Delete all stargate-vapa-* Azure resource groups"
 	@echo "  clean-tailscale - Remove stargate-azure-* devices from Tailscale (needs TAILSCALE_CLIENT_ID/SECRET)"
-	@echo "  clean-local     - Stop processes and clean up QEMU/network resources"
+	@echo "  clean-local     - Stop controllers, kill QEMU VMs, clean up network/resources"

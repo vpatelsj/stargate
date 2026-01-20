@@ -18,6 +18,7 @@ import (
 
 	"github.com/vpatelsj/stargate/pkg/infra/providers"
 	"github.com/vpatelsj/stargate/pkg/infra/providers/azure"
+	"github.com/vpatelsj/stargate/pkg/infra/providers/qemu"
 )
 
 type stringSlice []string
@@ -42,11 +43,15 @@ func main() {
 	var vnetName, vnetCIDR, subnetName, subnetCIDR string
 	var vmSize, adminUser, sshPubKeyPath, tailscaleAuthKey string
 
+	// QEMU flags
+	var qemuWorkDir, qemuImageCacheDir, qemuImageURL string
+	var qemuCPUs, qemuMemoryMB, qemuDiskSizeGB int
+
 	// Server CR flags
 	var kubeconfig, namespace string
 	var skipServerCR bool
 
-	flag.StringVar(&providerName, "provider", "azure", "Provider to use (azure).")
+	flag.StringVar(&providerName, "provider", "azure", "Provider to use (azure, qemu).")
 	flag.Var(&vmNames, "vm", "VM name (can be repeated or comma-separated).")
 
 	flag.StringVar(&subscriptionID, "subscription-id", os.Getenv("AZURE_SUBSCRIPTION_ID"), "Azure subscription ID.")
@@ -60,26 +65,47 @@ func main() {
 	flag.StringVar(&vmSize, "vm-size", "Standard_D2s_v5", "VM size.")
 	flag.StringVar(&adminUser, "admin-username", "ubuntu", "Admin username.")
 	flag.StringVar(&sshPubKeyPath, "ssh-public-key", filepath.Join(os.Getenv("HOME"), ".ssh", "id_rsa.pub"), "SSH public key path.")
-	flag.StringVar(&tailscaleAuthKey, "tailscale-auth-key", "", "Tailscale auth key (required).")
+	flag.StringVar(&tailscaleAuthKey, "tailscale-auth-key", os.Getenv("TAILSCALE_AUTH_KEY"), "Tailscale auth key (required).")
+
+	// QEMU flags
+	flag.StringVar(&qemuWorkDir, "qemu-work-dir", "/var/lib/stargate/vms", "QEMU: directory for VM storage.")
+	flag.StringVar(&qemuImageCacheDir, "qemu-image-cache", "/var/lib/stargate/images", "QEMU: directory for cached images.")
+	flag.StringVar(&qemuImageURL, "qemu-image-url", "", "QEMU: URL for base image (default: Ubuntu cloud image).")
+	flag.IntVar(&qemuCPUs, "qemu-cpus", 2, "QEMU: number of CPUs per VM.")
+	flag.IntVar(&qemuMemoryMB, "qemu-memory", 4096, "QEMU: memory in MB per VM.")
+	flag.IntVar(&qemuDiskSizeGB, "qemu-disk", 20, "QEMU: disk size in GB per VM.")
 
 	// Server CR flags
-	flag.StringVar(&kubeconfig, "kubeconfig", filepath.Join(os.Getenv("HOME"), ".kube", "config"), "Path to kubeconfig file.")
+	// Handle kubeconfig path when running as sudo
+	defaultKubeconfig := filepath.Join(os.Getenv("HOME"), ".kube", "config")
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+		defaultKubeconfig = filepath.Join("/home", sudoUser, ".kube", "config")
+	}
+	flag.StringVar(&kubeconfig, "kubeconfig", defaultKubeconfig, "Path to kubeconfig file.")
 	flag.StringVar(&namespace, "namespace", "azure-dc", "Namespace for Server CRs.")
 	flag.BoolVar(&skipServerCR, "skip-server-cr", false, "Skip creating Server CRs after provisioning.")
 
 	flag.Parse()
 
+	if tailscaleAuthKey == "" {
+		die("missing --tailscale-auth-key or TAILSCALE_AUTH_KEY")
+	}
+
 	if len(vmNames) == 0 {
-		vmNames = append(vmNames, "stargate-azure-vm")
+		switch providerName {
+		case "azure":
+			vmNames = append(vmNames, "stargate-azure-vm")
+		case "qemu":
+			vmNames = append(vmNames, "stargate-qemu-vm")
+		default:
+			vmNames = append(vmNames, "stargate-vm")
+		}
 	}
 
 	switch providerName {
 	case "azure":
 		if subscriptionID == "" {
 			die("missing --subscription-id or AZURE_SUBSCRIPTION_ID")
-		}
-		if tailscaleAuthKey == "" {
-			die("missing --tailscale-auth-key")
 		}
 
 		ctx := context.Background()
@@ -126,6 +152,44 @@ func main() {
 			}
 			fmt.Println("Server CRs created successfully.")
 		}
+
+	case "qemu":
+		ctx := context.Background()
+		prov, err := qemu.NewProvider(ctx, qemu.Config{
+			WorkDir:          qemuWorkDir,
+			ImageCacheDir:    qemuImageCacheDir,
+			ImageURL:         qemuImageURL,
+			CPUs:             qemuCPUs,
+			MemoryMB:         qemuMemoryMB,
+			DiskSizeGB:       qemuDiskSizeGB,
+			TailscaleAuthKey: tailscaleAuthKey,
+			SSHPublicKeyPath: sshPubKeyPath,
+			AdminUsername:    adminUser,
+		})
+		if err != nil {
+			die("qemu provider init: %v", err)
+		}
+
+		var specs []providers.NodeSpec
+		for _, name := range vmNames {
+			specs = append(specs, providers.NodeSpec{Name: name})
+		}
+
+		nodes, err := prov.CreateNodes(ctx, specs)
+		if err != nil {
+			die("provision: %v", err)
+		}
+
+		fmt.Println("Infrastructure ready and reachable.")
+
+		// Create Server CRs
+		if !skipServerCR {
+			if err := createServerCRs(ctx, kubeconfig, namespace, nodes, adminUser); err != nil {
+				die("create server CRs: %v", err)
+			}
+			fmt.Println("Server CRs created successfully.")
+		}
+
 	default:
 		die("unsupported provider %q", providerName)
 	}
@@ -261,6 +325,27 @@ func createServerCRs(ctx context.Context, kubeconfigPath, namespace string, node
 		return fmt.Errorf("create dynamic client: %w", err)
 	}
 
+	// Ensure namespace exists
+	nsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "namespaces"}
+	ns := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Namespace",
+			"metadata": map[string]interface{}{
+				"name": namespace,
+			},
+		},
+	}
+	_, err = dynClient.Resource(nsGVR).Get(ctx, namespace, metav1.GetOptions{})
+	if err != nil {
+		// Namespace doesn't exist, create it
+		fmt.Printf("[server-cr] creating namespace %s\n", namespace)
+		_, err = dynClient.Resource(nsGVR).Create(ctx, ns, metav1.CreateOptions{})
+		if err != nil {
+			return fmt.Errorf("create namespace %s: %w", namespace, err)
+		}
+	}
+
 	serverGVR := schema.GroupVersionResource{
 		Group:    "stargate.io",
 		Version:  "v1alpha1",
@@ -322,35 +407,89 @@ func createServerCRs(ctx context.Context, kubeconfigPath, namespace string, node
 
 // fetchMACAddress retrieves the primary MAC address from the node via SSH
 func fetchMACAddress(node providers.NodeInfo, adminUser string) (string, error) {
-	target := node.TailnetFQDN
+	// Prefer private IP for regular SSH (avoids Tailscale SSH auth issues)
+	target := node.PrivateIP
+	if target == "" {
+		target = node.TailscaleIP
+	}
 	if target == "" {
 		target = node.PublicIP
+	}
+	if target == "" {
+		target = node.TailnetFQDN
 	}
 	if target == "" {
 		return "", fmt.Errorf("no reachable address for node %s", node.Name)
 	}
 
-	// Get MAC of eth0 (primary interface on Azure VMs)
-	cmd := exec.Command("ssh",
+	fmt.Printf("[mac-fetch] SSHing to %s@%s to get MAC address...\n", adminUser, target)
+
+	// Use explicit SSH key to avoid Tailscale SSH
+	sshKeyPath := filepath.Join(os.Getenv("HOME"), ".ssh", "id_rsa")
+	// When running as sudo, HOME might be root's home, check SUDO_USER
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+		sshKeyPath = filepath.Join("/home", sudoUser, ".ssh", "id_rsa")
+	}
+
+	// First, try to find the primary non-loopback interface dynamically
+	findIfaceCmd := exec.Command("ssh",
+		"-i", sshKeyPath,
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "ConnectTimeout=10",
 		fmt.Sprintf("%s@%s", adminUser, target),
-		"cat", "/sys/class/net/eth0/address",
+		"sh", "-c", "ls /sys/class/net | grep -v lo | head -1",
 	)
 
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("ssh command failed: %w", err)
+	ifaceOut, err := findIfaceCmd.Output()
+	if err == nil {
+		iface := strings.TrimSpace(string(ifaceOut))
+		if iface != "" {
+			macCmd := exec.Command("ssh",
+				"-i", sshKeyPath,
+				"-o", "BatchMode=yes",
+				"-o", "StrictHostKeyChecking=no",
+				"-o", "UserKnownHostsFile=/dev/null",
+				"-o", "ConnectTimeout=10",
+				fmt.Sprintf("%s@%s", adminUser, target),
+				"cat", fmt.Sprintf("/sys/class/net/%s/address", iface),
+			)
+			out, err := macCmd.Output()
+			if err == nil {
+				mac := strings.TrimSpace(string(out))
+				if mac != "" {
+					fmt.Printf("[mac-fetch] Got MAC %s from interface %s\n", mac, iface)
+					return mac, nil
+				}
+			}
+		}
 	}
 
-	mac := strings.TrimSpace(string(out))
-	if mac == "" {
-		return "", fmt.Errorf("empty MAC address returned")
+	// Fallback: try known interface names
+	interfaces := []string{"eth0", "enp0s2", "enp0s3", "enp1s0", "ens3", "ens4", "ens5", "ens160", "ens192"}
+	for _, iface := range interfaces {
+		cmd := exec.Command("ssh",
+			"-i", sshKeyPath,
+			"-o", "BatchMode=yes",
+			"-o", "StrictHostKeyChecking=no",
+			"-o", "UserKnownHostsFile=/dev/null",
+			"-o", "ConnectTimeout=10",
+			fmt.Sprintf("%s@%s", adminUser, target),
+			"cat", fmt.Sprintf("/sys/class/net/%s/address", iface),
+		)
+
+		out, err := cmd.Output()
+		if err == nil {
+			mac := strings.TrimSpace(string(out))
+			if mac != "" {
+				fmt.Printf("[mac-fetch] Got MAC %s from interface %s\n", mac, iface)
+				return mac, nil
+			}
+		}
 	}
 
-	return mac, nil
+	return "", fmt.Errorf("could not find MAC address on any interface")
 }
 
 func die(format string, args ...any) {
