@@ -1,29 +1,56 @@
-# Stargate - Hybrid Kubernetes Cluster Manager
-
-Stargate enables creating hybrid Kubernetes clusters with a local Kind control plane and remote Azure VMs as worker nodes, connected via Tailscale.
+# Stargate - Multi-Cloud Baremetal Kubernetes Provisioning
 
 ## Architecture
 
+```mermaid
+flowchart LR
+  subgraph TS[Tailscale Network]
+    subgraph Local[Local Machine]
+      CP["MX Control Plane\nCRDs: Server, Operation, ProvisioningProfile"]
+      AZC["Azure Controller"]
+      QC["QEMU Controller"]
+    end
+
+    AZR["Azure subnet router\n(only TS member in Azure DC)"]
+    QR["QEMU subnet router\n(only TS member in QEMU DC)"]
+  end
+
+  subgraph AzureDC[Azure Datacenter]
+    AVM1[Worker VM 1]
+    AVM2[Worker VM 2]
+    AVM3[Worker VM ...]
+  end
+
+  subgraph QemuDC[QEMU Datacenter]
+    QVM1[Worker VM 1]
+    QVM2[Worker VM ...]
+  end
+
+  CP -- watches CRs --> AZC
+  CP -- watches CRs --> QC
+
+  AZC -. tailscale mgmt .- AZR
+  QC  -. tailscale mgmt .- QR
+
+  AZC -- provision/repave via router --> AZR
+  QC  -- provision/repave via router --> QR
+
+  AZR --- AVM1
+  AZR --- AVM2
+  AZR --- AVM3
+
+  QR --- QVM1
+  QR --- QVM2
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Tailscale Network                        │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│   ┌──────────────────┐       ┌──────────────────────────────┐  │
-│   │  Local Machine   │       │         Azure VMs            │  │
-│   │                  │       │                              │  │
-│   │  ┌────────────┐  │       │  ┌────────┐  ┌────────┐     │  │
-│   │  │   Kind     │  │       │  │  VM 1  │  │  VM 2  │ ... │  │
-│   │  │  Control   │◄─┼───────┼──┤ Worker │  │ Worker │     │  │
-│   │  │   Plane    │  │       │  │  Node  │  │  Node  │     │  │
-│   │  └────────────┘  │       │  └────────┘  └────────┘     │  │
-│   │                  │       │                              │  │
-│   │  ┌────────────┐  │       └──────────────────────────────┘  │
-│   │  │ Controller │  │                                         │
-│   │  └────────────┘  │                                         │
-│   └──────────────────┘                                         │
-└─────────────────────────────────────────────────────────────────┘
-```
+
+Only one device per datacenter joins Tailscale as the subnet router; the worker VMs stay on the local subnet behind that router.
+
+### Network Addressing Model (canonical)
+
+- One subnet per datacenter (example Azure: 10.50.<dc>.0/24; QEMU default: 192.168.100.0/24).
+- One dedicated router VM per datacenter joins Tailscale and advertises that subnet; workers stay on LAN only.
+- Router holds the gateway address (e.g., .1); workers consume .10+. Avoid overlapping subnets across DCs.
+- Controllers reach workers through the router over the advertised subnet; workers never join the tailnet.
 
 ## Prerequisites
 
@@ -39,11 +66,13 @@ Stargate enables creating hybrid Kubernetes clusters with a local Kind control p
 ### 1. Set Environment Variables
 
 ```bash
-export TAILSCALE_AUTH_KEY="tskey-auth-..."           # Tailscale auth key for VMs
-export TAILSCALE_CLIENT_ID="..."                      # Tailscale OAuth client ID (for cleanup)
-export TAILSCALE_CLIENT_SECRET="tskey-client-..."     # Tailscale OAuth client secret (for cleanup)
+export TAILSCALE_AUTH_KEY="tskey-auth-..."           # Tailscale auth key for the subnet router (one per DC)
+export TAILSCALE_CLIENT_ID="..."                      # Tailscale OAuth client ID (for route approval & cleanup)
+export TAILSCALE_CLIENT_SECRET="tskey-client-..."     # Tailscale OAuth client secret (for route approval & cleanup)
 export AZURE_SUBSCRIPTION_ID="..."                    # Azure subscription ID
 ```
+
+> **Note:** `TAILSCALE_CLIENT_ID` and `TAILSCALE_CLIENT_SECRET` are required for automatic subnet route approval via the Tailscale API. Without these, you must manually approve routes in the Tailscale admin console.
 
 ### 2. Build All Binaries
 
@@ -86,6 +115,7 @@ bin/prep-dc-inventory \
   --vnet-cidr 10.50.0.0/16 \
   --subnet-name stargate-subnet \
   --subnet-cidr 10.50.1.0/24 \
+  --router-name stargate-azure-router-$DEPLOY_NUM \
   --vm stargate-azure-vm$DEPLOY_NUM-1 \
   --vm stargate-azure-vm$DEPLOY_NUM-2 \
   --vm stargate-azure-vm$DEPLOY_NUM-3 \
@@ -93,8 +123,12 @@ bin/prep-dc-inventory \
   --admin-username adminuser \
   --ssh-public-key "$HOME/.ssh/id_rsa.pub" \
   --tailscale-auth-key "$TAILSCALE_AUTH_KEY" \
+  --tailscale-client-id "$TAILSCALE_CLIENT_ID" \
+  --tailscale-client-secret "$TAILSCALE_CLIENT_SECRET" \
   --namespace azure-dc
 ```
+
+The `--tailscale-client-id` and `--tailscale-client-secret` flags enable automatic subnet route approval via the Tailscale API. If omitted, routes will be advertised but require manual approval in the admin console.
 
 #### Option B: Local QEMU VMs (requires root and KVM)
 

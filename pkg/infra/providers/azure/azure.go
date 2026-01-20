@@ -109,12 +109,18 @@ func (p *Provider) CreateNodes(ctx context.Context, specs []providers.NodeSpec) 
 
 	var nodes []providers.NodeInfo
 	for _, spec := range specs {
+		role := spec.Role
+		if role == "" {
+			role = providers.RoleWorker
+		}
 		nicName := fmt.Sprintf("%s-nic", spec.Name)
-		pipName := fmt.Sprintf("%s-pip", spec.Name)
-
-		pipID, err := p.ensurePublicIP(ctx, pipName)
-		if err != nil {
-			return nil, fmt.Errorf("public IP %s: %w", pipName, err)
+		var pipID string
+		if role == providers.RoleRouter {
+			pipName := fmt.Sprintf("%s-pip", spec.Name)
+			pipID, err = p.ensurePublicIP(ctx, pipName)
+			if err != nil {
+				return nil, fmt.Errorf("public IP %s: %w", pipName, err)
+			}
 		}
 
 		nicID, err := p.ensureNIC(ctx, nicName, subnetID, pipID)
@@ -122,7 +128,7 @@ func (p *Provider) CreateNodes(ctx context.Context, specs []providers.NodeSpec) 
 			return nil, fmt.Errorf("NIC %s: %w", nicName, err)
 		}
 
-		cloudInit, err := buildBaseCloudInit(spec.Name, p.cfg.AdminUsername, string(sshKey), p.cfg.TailscaleAuthKey)
+		cloudInit, err := buildCloudInit(spec, p.cfg.AdminUsername, string(sshKey), p.cfg.TailscaleAuthKey, p.cfg.SubnetCIDR)
 		if err != nil {
 			return nil, err
 		}
@@ -131,9 +137,13 @@ func (p *Provider) CreateNodes(ctx context.Context, specs []providers.NodeSpec) 
 			return nil, fmt.Errorf("VM %s: %w", spec.Name, err)
 		}
 
-		pubIP, err := p.getPublicIPAddress(ctx, pipName)
-		if err != nil {
-			return nil, fmt.Errorf("get public IP %s: %w", pipName, err)
+		var pubIP string
+		if role == providers.RoleRouter {
+			pipName := fmt.Sprintf("%s-pip", spec.Name)
+			pubIP, err = p.getPublicIPAddress(ctx, pipName)
+			if err != nil {
+				return nil, fmt.Errorf("get public IP %s: %w", pipName, err)
+			}
 		}
 
 		privIP, err := p.getPrivateIP(ctx, nicName)
@@ -141,27 +151,41 @@ func (p *Provider) CreateNodes(ctx context.Context, specs []providers.NodeSpec) 
 			return nil, fmt.Errorf("get private IP %s: %w", nicName, err)
 		}
 
-		nodes = append(nodes, providers.NodeInfo{
-			Name:        spec.Name,
-			PublicIP:    pubIP,
-			PrivateIP:   privIP,
-			TailnetFQDN: spec.Name,
-		})
+		info := providers.NodeInfo{
+			Name:      spec.Name,
+			Role:      role,
+			PublicIP:  pubIP,
+			PrivateIP: privIP,
+		}
+		if role == providers.RoleRouter {
+			info.TailnetFQDN = spec.Name
+		}
+
+		nodes = append(nodes, info)
 	}
 
 	return nodes, nil
 }
 
-func buildBaseCloudInit(vmName, adminUser, sshPublicKey, tailscaleAuthKey string) (string, error) {
-	if tailscaleAuthKey == "" {
-		return "", fmt.Errorf("missing tailscale auth key")
-	}
-
+func buildCloudInit(spec providers.NodeSpec, adminUser, sshPublicKey, tailscaleAuthKey, subnetCIDR string) (string, error) {
 	if sshPublicKey == "" {
 		return "", fmt.Errorf("missing SSH public key")
 	}
 
-	cloudInit := fmt.Sprintf(`#cloud-config
+	role := spec.Role
+	if role == "" {
+		role = providers.RoleWorker
+	}
+
+	if role == providers.RoleRouter {
+		return buildRouterCloudInit(spec.Name, adminUser, sshPublicKey, tailscaleAuthKey, subnetCIDR)
+	}
+
+	return buildWorkerCloudInit(spec.Name, adminUser, sshPublicKey)
+}
+
+func baseCloudInitHeader(vmName, adminUser, sshPublicKey string) string {
+	return fmt.Sprintf(`#cloud-config
 hostname: %s
 users:
   - name: %s
@@ -179,28 +203,42 @@ packages:
   - curl
   - gnupg
   - lsb-release
+`, vmName, adminUser, sshPublicKey)
+}
 
+func buildRouterCloudInit(vmName, adminUser, sshPublicKey, tailscaleAuthKey, subnetCIDR string) (string, error) {
+	if tailscaleAuthKey == "" {
+		return "", fmt.Errorf("missing tailscale auth key for router %s", vmName)
+	}
+
+	cloudInit := baseCloudInitHeader(vmName, adminUser, sshPublicKey)
+	cloudInit += fmt.Sprintf(`
 write_files:
-  - path: /tmp/install-tailscale.sh
+  - path: /tmp/configure-router.sh
     permissions: '0755'
     content: |
       #!/bin/bash
       set -ex
+      sysctl -w net.ipv4.ip_forward=1
+      sed -i 's/^#*net.ipv4.ip_forward.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf
       curl -fsSL https://tailscale.com/install.sh | sh
-			tailscale up --authkey %s --hostname %s
+      tailscale up --authkey %s --hostname %s --advertise-routes=%s --accept-routes
 
 runcmd:
-  - /tmp/install-tailscale.sh
-`,
-		vmName,
-		adminUser,
-		sshPublicKey,
-		tailscaleAuthKey,
-		vmName,
-	)
+  - /tmp/configure-router.sh
+`, tailscaleAuthKey, vmName, subnetCIDR)
 
 	cloudInit = strings.ReplaceAll(cloudInit, "\t", "    ")
+	return cloudInit, nil
+}
 
+func buildWorkerCloudInit(vmName, adminUser, sshPublicKey string) (string, error) {
+	cloudInit := baseCloudInitHeader(vmName, adminUser, sshPublicKey)
+	cloudInit += `
+runcmd:
+  - echo "worker initialized without tailscale"
+`
+	cloudInit = strings.ReplaceAll(cloudInit, "\t", "    ")
 	return cloudInit, nil
 }
 
@@ -327,16 +365,20 @@ func (p *Provider) ensureNIC(ctx context.Context, name, subnetID, publicIPID str
 		return "", err
 	}
 
+	ipProps := &armnetwork.InterfaceIPConfigurationPropertiesFormat{
+		Subnet:                    &armnetwork.Subnet{ID: to.Ptr(subnetID)},
+		PrivateIPAllocationMethod: to.Ptr(armnetwork.IPAllocationMethodDynamic),
+	}
+	if publicIPID != "" {
+		ipProps.PublicIPAddress = &armnetwork.PublicIPAddress{ID: to.Ptr(publicIPID)}
+	}
+
 	poller, err := p.nicClient.BeginCreateOrUpdate(ctx, p.cfg.ResourceGroup, name, armnetwork.Interface{
 		Location: to.Ptr(p.cfg.Location),
 		Properties: &armnetwork.InterfacePropertiesFormat{
 			IPConfigurations: []*armnetwork.InterfaceIPConfiguration{{
-				Name: to.Ptr("ipconfig1"),
-				Properties: &armnetwork.InterfaceIPConfigurationPropertiesFormat{
-					Subnet:                    &armnetwork.Subnet{ID: to.Ptr(subnetID)},
-					PublicIPAddress:           &armnetwork.PublicIPAddress{ID: to.Ptr(publicIPID)},
-					PrivateIPAllocationMethod: to.Ptr(armnetwork.IPAllocationMethodDynamic),
-				},
+				Name:       to.Ptr("ipconfig1"),
+				Properties: ipProps,
 			}},
 		},
 	}, nil)

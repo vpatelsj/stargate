@@ -103,6 +103,10 @@ func (p *Provider) CreateNodes(ctx context.Context, specs []providers.NodeSpec) 
 	var nodes []providers.NodeInfo
 
 	for i, spec := range specs {
+		role := spec.Role
+		if role == "" {
+			role = providers.RoleWorker
+		}
 		fmt.Printf("[qemu] provisioning VM %s...\n", spec.Name)
 
 		// Allocate IP and create tap device
@@ -161,6 +165,7 @@ func (p *Provider) CreateNodes(ctx context.Context, specs []providers.NodeSpec) 
 
 		nodes = append(nodes, providers.NodeInfo{
 			Name:        spec.Name,
+			Role:        role,
 			PrivateIP:   vmIP,
 			TailnetFQDN: tailnetFQDN,
 			TailscaleIP: tailscaleIP,
