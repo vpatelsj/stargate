@@ -407,16 +407,16 @@ func createServerCRs(ctx context.Context, kubeconfigPath, namespace string, node
 
 // fetchMACAddress retrieves the primary MAC address from the node via SSH
 func fetchMACAddress(node providers.NodeInfo, adminUser string) (string, error) {
-	// Prefer private IP for regular SSH (avoids Tailscale SSH auth issues)
-	target := node.PrivateIP
+	// Prefer Tailscale first (works from your laptop); fall back to private/public if needed
+	target := node.TailscaleIP
 	if target == "" {
-		target = node.TailscaleIP
+		target = node.TailnetFQDN
+	}
+	if target == "" {
+		target = node.PrivateIP
 	}
 	if target == "" {
 		target = node.PublicIP
-	}
-	if target == "" {
-		target = node.TailnetFQDN
 	}
 	if target == "" {
 		return "", fmt.Errorf("no reachable address for node %s", node.Name)
