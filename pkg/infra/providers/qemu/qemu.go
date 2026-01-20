@@ -191,6 +191,8 @@ func (p *Provider) CreateNodes(ctx context.Context, specs []providers.NodeSpec) 
 			nodeInfo.TailscaleIP = tailscaleIP
 			fmt.Printf("[qemu] router %s ready: Tailscale IP %s, FQDN %s\n", spec.Name, tailscaleIP, tailnetFQDN)
 		} else {
+			// Workers get router IP for SSH proxy access
+			nodeInfo.RouterIP = routerIP
 			fmt.Printf("[qemu] worker %s ready: local IP %s (accessible via router)\n", spec.Name, vmIP)
 		}
 

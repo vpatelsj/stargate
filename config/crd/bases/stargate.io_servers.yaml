@@ -43,6 +43,9 @@ spec:
                 ipv4:
                   type: string
                   description: IPv4 address of the server
+                routerIP:
+                  type: string
+                  description: Private IP of the subnet router for SSH proxy access (workers behind router)
                 bmc:
                   type: object
                   properties:
