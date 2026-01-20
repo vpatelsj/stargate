@@ -270,11 +270,10 @@ install_crds() {
 # Create required secrets
 create_secrets() {
     log_info "Creating azure-dc namespace and Kubernetes secrets..."
-    
-    # Create namespace if it doesn't exist
+
+    # Azure namespace and secrets
     kubectl create namespace azure-dc 2>/dev/null || true
-    
-    # SSH credentials secret
+
     if kubectl get secret azure-ssh-credentials -n azure-dc &>/dev/null; then
         log_warn "Secret azure-ssh-credentials already exists, skipping"
     else
@@ -288,8 +287,7 @@ create_secrets() {
             log_warn "SSH key not found at $HOME/.ssh/id_rsa, skipping azure-ssh-credentials secret"
         fi
     fi
-    
-    # Tailscale auth secret
+
     if kubectl get secret tailscale-auth -n azure-dc &>/dev/null; then
         log_warn "Secret tailscale-auth already exists, skipping"
     else
@@ -298,8 +296,7 @@ create_secrets() {
             --from-literal=authKey="$TAILSCALE_AUTH_KEY"
         log_info "Created secret: tailscale-auth"
     fi
-    
-    # Create default ProvisioningProfile
+
     log_info "Creating default ProvisioningProfile..."
     kubectl apply -f - <<EOF
 apiVersion: stargate.io/v1alpha1
@@ -314,20 +311,46 @@ spec:
 EOF
     log_info "Created ProvisioningProfile: azure-k8s-worker"
 
-        # QEMU profile (simulator-dc)
-        kubectl create namespace simulator-dc 2>/dev/null || true
-        log_info "Ensured namespace: simulator-dc"
-        kubectl apply -f - <<EOF
+    # Simulator namespace and secrets
+    kubectl create namespace simulator-dc 2>/dev/null || true
+    log_info "Ensured namespace: simulator-dc"
+
+    if kubectl get secret qemu-ssh-credentials -n simulator-dc &>/dev/null; then
+        log_warn "Secret qemu-ssh-credentials already exists, skipping"
+    else
+        if [[ -f "$HOME/.ssh/id_rsa" ]]; then
+            kubectl create secret generic qemu-ssh-credentials \
+                -n simulator-dc \
+                --from-file=privateKey="$HOME/.ssh/id_rsa" \
+                --from-literal=username=ubuntu
+            log_info "Created secret: qemu-ssh-credentials"
+        else
+            log_warn "SSH key not found at $HOME/.ssh/id_rsa, skipping qemu-ssh-credentials secret"
+        fi
+    fi
+
+    if kubectl get secret tailscale-auth -n simulator-dc &>/dev/null; then
+        log_warn "Secret tailscale-auth already exists in simulator-dc, skipping"
+    else
+        kubectl create secret generic tailscale-auth \
+            -n simulator-dc \
+            --from-literal=authKey="$TAILSCALE_AUTH_KEY"
+        log_info "Created secret: tailscale-auth in simulator-dc"
+    fi
+
+    kubectl apply -f - <<EOF
 apiVersion: stargate.io/v1alpha1
 kind: ProvisioningProfile
 metadata:
-    name: qemu-k8s-worker
-    namespace: simulator-dc
+  name: qemu-k8s-worker
+  namespace: simulator-dc
 spec:
-    kubernetesVersion: "1.34"
-    adminUsername: ubuntu
+  kubernetesVersion: "1.34"
+  adminUsername: ubuntu
+  sshCredentialsSecretRef: qemu-ssh-credentials
+  tailscaleAuthKeySecretRef: tailscale-auth
 EOF
-        log_info "Created ProvisioningProfile: qemu-k8s-worker"
+    log_info "Created ProvisioningProfile: qemu-k8s-worker"
 }
 
 # Print final summary
