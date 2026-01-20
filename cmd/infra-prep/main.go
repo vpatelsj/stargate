@@ -64,7 +64,7 @@ func main() {
 
 	// Server CR flags
 	flag.StringVar(&kubeconfig, "kubeconfig", filepath.Join(os.Getenv("HOME"), ".kube", "config"), "Path to kubeconfig file.")
-	flag.StringVar(&namespace, "namespace", "default", "Namespace for Server CRs.")
+	flag.StringVar(&namespace, "namespace", "azure-dc", "Namespace for Server CRs.")
 	flag.BoolVar(&skipServerCR, "skip-server-cr", false, "Skip creating Server CRs after provisioning.")
 
 	flag.Parse()

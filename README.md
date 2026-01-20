@@ -54,7 +54,7 @@ make clean-all && make build
 ### 3. Create Kind Cluster with Tailscale
 
 ```bash
-./scripts/setup-kind-cluster.sh
+./scripts/create-mx-cluster.sh
 ```
 
 This script:
@@ -63,15 +63,17 @@ This script:
 - Configures the API server to be accessible via Tailscale IP
 - Installs Flannel CNI
 - Installs Stargate CRDs
+- Creates `azure-dc` namespace with required secrets (`azure-ssh-credentials`, `tailscale-auth`)
+- Creates default `ProvisioningProfile` (`azure-k8s-worker`) in `azure-dc` namespace
 - Starts the controller
 
 ### 4. Provision Azure VMs
 
 ```bash
-# Generate unique deployment number (HHMM format)
-export DEPLOY_NUM=$(date +%H%M)
+# Generate unique deployment number (YYMMDDHHmm format)
+export DEPLOY_NUM=$(date +%y%m%d%H%M)
 
-bin/infra-prep \
+bin/prep-dc-inventory \
   --provider azure \
   --subscription-id "$AZURE_SUBSCRIPTION_ID" \
   --resource-group stargate-vapa-$DEPLOY_NUM \
@@ -87,41 +89,17 @@ bin/infra-prep \
   --vm-size Standard_D2s_v5 \
   --admin-username adminuser \
   --ssh-public-key "$HOME/.ssh/id_rsa.pub" \
-  --tailscale-auth-key "$TAILSCALE_AUTH_KEY"
+  --tailscale-auth-key "$TAILSCALE_AUTH_KEY" \
+  --namespace azure-dc
 ```
 
 This command:
 - Creates Azure resource group, VNet, subnet, and NSG
 - Provisions VMs with Tailscale and Kubernetes prerequisites
 - Verifies connectivity via Tailscale
-- Creates `Server` CRs in the cluster
+- Creates `Server` CRs in the `azure-dc` namespace
 
-### 5. Create Secrets and ProvisioningProfile
-
-```bash
-# SSH credentials secret
-kubectl create secret generic azure-ssh-credentials \
-  --from-file=privateKey=$HOME/.ssh/id_rsa \
-  --from-literal=username=adminuser
-
-# Tailscale auth secret
-kubectl create secret generic tailscale-auth \
-  --from-literal=authKey="$TAILSCALE_AUTH_KEY"
-
-# ProvisioningProfile
-kubectl apply -f - <<EOF
-apiVersion: stargate.io/v1alpha1
-kind: ProvisioningProfile
-metadata:
-  name: azure-k8s-worker
-spec:
-  kubernetesVersion: "1.34"
-  sshCredentialsSecretRef: azure-ssh-credentials
-  tailscaleAuthKeySecretRef: tailscale-auth
-EOF
-```
-
-### 6. Bootstrap VMs as Kubernetes Workers
+### 5. Bootstrap VMs as Kubernetes Workers
 
 Create an `Operation` for each VM to trigger the bootstrap (use same `DEPLOY_NUM`):
 
@@ -132,6 +110,7 @@ apiVersion: stargate.io/v1alpha1
 kind: Operation
 metadata:
   name: bootstrap-vm$DEPLOY_NUM-$i
+  namespace: azure-dc
 spec:
   serverRef:
     name: stargate-azure-vm$DEPLOY_NUM-$i
@@ -142,12 +121,12 @@ EOF
 done
 ```
 
-### 7. Verify Cluster
+### 6. Verify Cluster
 
 ```bash
 kubectl get nodes -o wide
-kubectl get operations
-kubectl get servers
+kubectl get operations -n azure-dc
+kubectl get servers -n azure-dc
 ```
 
 ## Cleanup
@@ -236,7 +215,7 @@ status:
 
 | Target | Description |
 |--------|-------------|
-| `make build` | Build all binaries (controller, mockapi, simulator, infra-prep, azure) |
+| `make build` | Build all binaries (azure-controller, mockapi, simulator, prep-dc-inventory, azure) |
 | `make clean` | Remove built binaries |
 | `make clean-all` | Full cleanup: Kind cluster, Azure RGs, Tailscale, local |
 | `make clean-kind` | Delete local Kind cluster |
@@ -251,7 +230,14 @@ status:
 ### Controller Logs
 
 ```bash
+# Follow logs in real-time
 tail -f /tmp/stargate-controller.log
+
+# View last 50 lines
+tail -50 /tmp/stargate-controller.log
+
+# Search for errors
+grep -i error /tmp/stargate-controller.log
 ```
 
 ### Check Operation Status
@@ -298,7 +284,7 @@ stargate/
 │   ├── infra/providers/    # Infrastructure provider implementations
 │   └── qemu/               # QEMU VM management
 ├── scripts/
-│   └── setup-kind-cluster.sh
+│   └── create-mx-cluster.sh
 ├── main.go                 # Controller entrypoint
 └── Makefile
 ```

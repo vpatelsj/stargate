@@ -1,5 +1,5 @@
-.PHONY: all build run test clean install-crds uninstall-crds mockapi controller simulator \
-        clean-all clean-kind clean-azure clean-tailscale clean-local infra-prep azure
+.PHONY: all build run test clean install-crds uninstall-crds mockapi azure-controller simulator \
+        clean-all clean-kind clean-azure clean-tailscale clean-local prep-dc-inventory azure
 
 # Go parameters
 GOCMD=go
@@ -8,20 +8,20 @@ GOTEST=$(GOCMD) test
 GOMOD=$(GOCMD) mod
 
 # Binary names
-CONTROLLER_BIN=bin/controller
+AZURE_CONTROLLER_BIN=bin/azure-controller
 MOCKAPI_BIN=bin/mockapi
 SIMULATOR_BIN=bin/simulator
-INFRA_PREP_BIN=bin/infra-prep
+PREP_DC_INVENTORY_BIN=bin/prep-dc-inventory
 AZURE_BIN=bin/azure
 
 all: build
 
 ## Build targets
 
-build: controller mockapi simulator infra-prep azure
+build: azure-controller mockapi simulator prep-dc-inventory azure
 
-controller:
-	$(GOBUILD) -o $(CONTROLLER_BIN) ./main.go
+azure-controller:
+	$(GOBUILD) -o $(AZURE_CONTROLLER_BIN) ./main.go
 
 mockapi:
 	$(GOBUILD) -o $(MOCKAPI_BIN) ./mockapi/main.go
@@ -29,8 +29,8 @@ mockapi:
 simulator:
 	$(GOBUILD) -o $(SIMULATOR_BIN) ./cmd/simulator/main.go
 
-infra-prep:
-	$(GOBUILD) -o $(INFRA_PREP_BIN) ./cmd/infra-prep/main.go
+prep-dc-inventory:
+	$(GOBUILD) -o $(PREP_DC_INVENTORY_BIN) ./cmd/infra-prep/main.go
 
 azure:
 	$(GOBUILD) -o $(AZURE_BIN) ./cmd/azure/main.go
@@ -44,7 +44,7 @@ run-mockapi-east:
 	DC_NAME=dc-east PORT=8081 $(MOCKAPI_BIN)
 
 run-controller:
-	$(CONTROLLER_BIN) --dc-api-url=http://localhost:8080
+	$(AZURE_CONTROLLER_BIN) --dc-api-url=http://localhost:8080
 
 run-simulator:
 	sudo $(SIMULATOR_BIN)
@@ -140,7 +140,7 @@ clean-azure:
 clean-local:
 	@echo "=== Cleaning local resources ==="
 	@echo "Stopping controller..."
-	-pkill -f "bin/controller" 2>/dev/null || true
+	-pkill -f "bin/azure-controller" 2>/dev/null || true
 	@echo "Stopping simulator processes..."
 	-pkill -f "bin/simulator" 2>/dev/null || true
 	-sudo pkill -f "bin/simulator" 2>/dev/null || true
@@ -162,7 +162,7 @@ clean-local:
 help:
 	@echo "Available targets:"
 	@echo "  build           - Build all binaries"
-	@echo "  controller      - Build the controller"
+	@echo "  azure-controller - Build the Azure controller"
 	@echo "  mockapi         - Build the mock DC API"
 	@echo "  simulator       - Build the QEMU simulator controller"
 	@echo "  run-mockapi-west - Run mock DC API for dc-west (port 8080)"

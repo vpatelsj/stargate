@@ -267,6 +267,54 @@ install_crds() {
     kubectl get crds | grep stargate || true
 }
 
+# Create required secrets
+create_secrets() {
+    log_info "Creating azure-dc namespace and Kubernetes secrets..."
+    
+    # Create namespace if it doesn't exist
+    kubectl create namespace azure-dc 2>/dev/null || true
+    
+    # SSH credentials secret
+    if kubectl get secret azure-ssh-credentials -n azure-dc &>/dev/null; then
+        log_warn "Secret azure-ssh-credentials already exists, skipping"
+    else
+        if [[ -f "$HOME/.ssh/id_rsa" ]]; then
+            kubectl create secret generic azure-ssh-credentials \
+                -n azure-dc \
+                --from-file=privateKey="$HOME/.ssh/id_rsa" \
+                --from-literal=username=adminuser
+            log_info "Created secret: azure-ssh-credentials"
+        else
+            log_warn "SSH key not found at $HOME/.ssh/id_rsa, skipping azure-ssh-credentials secret"
+        fi
+    fi
+    
+    # Tailscale auth secret
+    if kubectl get secret tailscale-auth -n azure-dc &>/dev/null; then
+        log_warn "Secret tailscale-auth already exists, skipping"
+    else
+        kubectl create secret generic tailscale-auth \
+            -n azure-dc \
+            --from-literal=authKey="$TAILSCALE_AUTH_KEY"
+        log_info "Created secret: tailscale-auth"
+    fi
+    
+    # Create default ProvisioningProfile
+    log_info "Creating default ProvisioningProfile..."
+    kubectl apply -f - <<EOF
+apiVersion: stargate.io/v1alpha1
+kind: ProvisioningProfile
+metadata:
+  name: azure-k8s-worker
+  namespace: azure-dc
+spec:
+  kubernetesVersion: "1.34"
+  sshCredentialsSecretRef: azure-ssh-credentials
+  tailscaleAuthKeySecretRef: tailscale-auth
+EOF
+    log_info "Created ProvisioningProfile: azure-k8s-worker"
+}
+
 # Build and start the controller
 start_controller() {
     log_info "Building and starting Stargate controller..."
@@ -276,16 +324,16 @@ start_controller() {
     
     # Build the controller
     log_info "Building controller binary..."
-    (cd "$PROJECT_DIR" && go build -o bin/controller ./main.go)
+    (cd "$PROJECT_DIR" && go build -o bin/azure-controller ./main.go)
     
-    if [[ ! -x "${PROJECT_DIR}/bin/controller" ]]; then
+    if [[ ! -x "${PROJECT_DIR}/bin/azure-controller" ]]; then
         log_error "Controller binary not found after build"
         exit 1
     fi
     
     # Start controller in background (uses KUBECONFIG env or ~/.kube/config automatically)
     log_info "Starting controller in background..."
-    nohup "${PROJECT_DIR}/bin/controller" > /tmp/stargate-controller.log 2>&1 &
+    nohup "${PROJECT_DIR}/bin/azure-controller" > /tmp/stargate-controller.log 2>&1 &
     CONTROLLER_PID=$!
     
     sleep 2
@@ -302,14 +350,6 @@ start_controller() {
 print_summary() {
     echo ""
     log_info "Cluster setup complete!"
-    echo ""
-    echo "To provision Azure VMs that join this cluster, run:"
-    echo ""
-    echo "  bin/azure \\"
-    echo "    --resource-group stargate-vapa-<N> \\"
-    echo "    --subscription-id \"\$AZURE_SUBSCRIPTION_ID\" \\"
-    echo "    --vm-name stargate-azure-vm<N> \\"
-    echo "    --tailscale-auth-key \"\$TAILSCALE_AUTH_KEY\""
     echo ""
     echo "Controller PID: $CONTROLLER_PID"
     echo "Controller logs: /tmp/stargate-controller.log"
@@ -334,6 +374,7 @@ main() {
     configure_apiserver_for_tailscale
     verify_cluster
     install_crds
+    create_secrets
     start_controller
     print_summary
 }
