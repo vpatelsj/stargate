@@ -48,7 +48,12 @@ func main() {
 		defaultKubeconfig = filepath.Join("/home", sudoUser, ".kube", "config")
 	}
 
-	flag.StringVar(&kubeconfig, "kubeconfig", defaultKubeconfig, "Path to kubeconfig file.")
+	if flag.CommandLine.Lookup("kubeconfig") == nil {
+		flag.StringVar(&kubeconfig, "kubeconfig", defaultKubeconfig, "Path to kubeconfig file.")
+	} else {
+		// If another package already registered this flag, defer to its value
+		kubeconfig = flag.CommandLine.Lookup("kubeconfig").Value.String()
+	}
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8083", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8084", "The address the probe endpoint binds to.")
 
@@ -66,6 +71,15 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	if kubeconfig == "" {
+		if existing := flag.CommandLine.Lookup("kubeconfig"); existing != nil {
+			kubeconfig = existing.Value.String()
+		}
+	}
+	if kubeconfig == "" {
+		kubeconfig = defaultKubeconfig
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
