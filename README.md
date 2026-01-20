@@ -1,310 +1,304 @@
-# Stargate
+# Stargate - Hybrid Kubernetes Cluster Manager
 
-A proof-of-concept for managing bare-metal server lifecycle across multiple datacenters from a central Kubernetes management cluster.
+Stargate enables creating hybrid Kubernetes clusters with a local Kind control plane and remote Azure VMs as worker nodes, connected via Tailscale.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Management Cluster                                         │
-│                                                             │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │  CRDs                                               │    │
-│  │  - Server (inventory)                               │    │
-│  │  - ProvisioningProfile (provisioning config)        │    │
-│  │  - Operation (operations)                           │    │
-│  └─────────────────────────────────────────────────────┘    │
-│                                                             │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │  Operation Controller                               │    │
-│  │  - Watches Operation CRs                            │    │
-│  │  - Calls DC API to execute operations               │    │
-│  │  - Updates status                                   │    │
-│  └─────────────────────────────────────────────────────┘    │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-              ┌────────────┴────────────┐
-              ▼                         ▼
-       ┌─────────────┐           ┌─────────────┐
-       │ DC West API │           │ DC East API │
-       │ (port 8080) │           │ (port 8081) │
-       └─────────────┘           └─────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                        Tailscale Network                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   ┌──────────────────┐       ┌──────────────────────────────┐  │
+│   │  Local Machine   │       │         Azure VMs            │  │
+│   │                  │       │                              │  │
+│   │  ┌────────────┐  │       │  ┌────────┐  ┌────────┐     │  │
+│   │  │   Kind     │  │       │  │  VM 1  │  │  VM 2  │ ... │  │
+│   │  │  Control   │◄─┼───────┼──┤ Worker │  │ Worker │     │  │
+│   │  │   Plane    │  │       │  │  Node  │  │  Node  │     │  │
+│   │  └────────────┘  │       │  └────────┘  └────────┘     │  │
+│   │                  │       │                              │  │
+│   │  ┌────────────┐  │       └──────────────────────────────┘  │
+│   │  │ Controller │  │                                         │
+│   │  └────────────┘  │                                         │
+│   └──────────────────┘                                         │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Prerequisites
 
-- Go 1.22+
+- Docker
+- Kind
 - kubectl
-- A Kubernetes cluster (kind, minikube, or real cluster)
+- Tailscale (installed and authenticated)
+- Azure CLI (authenticated)
+- Go 1.21+
 
 ## Quick Start
 
-### 1. Install dependencies
+### 1. Set Environment Variables
 
 ```bash
-make deps
+export TAILSCALE_AUTH_KEY="tskey-auth-..."           # Tailscale auth key for VMs
+export TAILSCALE_CLIENT_ID="..."                      # Tailscale OAuth client ID (for cleanup)
+export TAILSCALE_CLIENT_SECRET="tskey-client-..."     # Tailscale OAuth client secret (for cleanup)
+export AZURE_SUBSCRIPTION_ID="..."                    # Azure subscription ID
 ```
 
-### 2. Build binaries
+### 2. Build All Binaries
 
 ```bash
-make build
+make clean-all && make build
 ```
 
-### 3. Install CRDs
+### 3. Create Kind Cluster with Tailscale
 
 ```bash
-make install-crds
+./scripts/setup-kind-cluster.sh
 ```
 
-### 4. Start Mock DC APIs
+This script:
+- Creates a Kind cluster named `stargate-demo`
+- Installs Tailscale inside the control-plane container
+- Configures the API server to be accessible via Tailscale IP
+- Installs Flannel CNI
+- Installs Stargate CRDs
+- Starts the controller
 
-In separate terminals:
+### 4. Provision Azure VMs
 
 ```bash
-# Terminal 1 - DC West
-make run-mockapi-west
+# Generate unique deployment number (HHMM format)
+export DEPLOY_NUM=$(date +%H%M)
+
+bin/infra-prep \
+  --provider azure \
+  --subscription-id "$AZURE_SUBSCRIPTION_ID" \
+  --resource-group stargate-vapa-$DEPLOY_NUM \
+  --location canadacentral \
+  --zone 1 \
+  --vnet-name stargate-vnet \
+  --vnet-cidr 10.50.0.0/16 \
+  --subnet-name stargate-subnet \
+  --subnet-cidr 10.50.1.0/24 \
+  --vm stargate-azure-vm$DEPLOY_NUM-1 \
+  --vm stargate-azure-vm$DEPLOY_NUM-2 \
+  --vm stargate-azure-vm$DEPLOY_NUM-3 \
+  --vm-size Standard_D2s_v5 \
+  --admin-username adminuser \
+  --ssh-public-key "$HOME/.ssh/id_rsa.pub" \
+  --tailscale-auth-key "$TAILSCALE_AUTH_KEY"
 ```
 
-### 5. Start the Controller
+This command:
+- Creates Azure resource group, VNet, subnet, and NSG
+- Provisions VMs with Tailscale and Kubernetes prerequisites
+- Verifies connectivity via Tailscale
+- Creates `Server` CRs in the cluster
+
+### 5. Create Secrets and ProvisioningProfile
 
 ```bash
-# Terminal 2 - DC Controller
-make run-controller
+# SSH credentials secret
+kubectl create secret generic azure-ssh-credentials \
+  --from-file=privateKey=$HOME/.ssh/id_rsa \
+  --from-literal=username=adminuser
+
+# Tailscale auth secret
+kubectl create secret generic tailscale-auth \
+  --from-literal=authKey="$TAILSCALE_AUTH_KEY"
+
+# ProvisioningProfile
+kubectl apply -f - <<EOF
+apiVersion: stargate.io/v1alpha1
+kind: ProvisioningProfile
+metadata:
+  name: azure-k8s-worker
+spec:
+  kubernetesVersion: "1.34"
+  sshCredentialsSecretRef: azure-ssh-credentials
+  tailscaleAuthKeySecretRef: tailscale-auth
+EOF
 ```
 
-### 6. Create sample resources
+### 6. Bootstrap VMs as Kubernetes Workers
+
+Create an `Operation` for each VM to trigger the bootstrap (use same `DEPLOY_NUM`):
 
 ```bash
-make create-samples
+for i in 1 2 3; do
+kubectl apply -f - <<EOF
+apiVersion: stargate.io/v1alpha1
+kind: Operation
+metadata:
+  name: bootstrap-vm$DEPLOY_NUM-$i
+spec:
+  serverRef:
+    name: stargate-azure-vm$DEPLOY_NUM-$i
+  provisioningProfileRef:
+    name: azure-k8s-worker
+  operation: repave
+EOF
+done
 ```
 
-### 7. Trigger a repave operation
+### 7. Verify Cluster
 
 ```bash
-kubectl apply -f config/samples/operation-repave.yaml
+kubectl get nodes -o wide
+kubectl get operations
+kubectl get servers
 ```
 
-### 8. Watch the operation progress
+## Cleanup
+
+### Full Cleanup
+
+Cleans up everything: Kind cluster, Tailscale devices, Azure resource groups, and local processes.
 
 ```bash
-kubectl get operations.stargate.io -n dc-west -w
+TAILSCALE_CLIENT_ID="..." \
+TAILSCALE_CLIENT_SECRET="tskey-client-..." \
+make clean-all
 ```
 
-You should see:
-
-```
-NAME                SERVER       OPERATION   PHASE       AGE
-repave-server-001   server-001   repave      Pending     0s
-repave-server-001   server-001   repave      Running     1s
-repave-server-001   server-001   repave      Succeeded   32s
-```
-
-### 9. Check server status
+### Partial Cleanup
 
 ```bash
-kubectl get servers -n dc-west
+# Delete only Kind cluster
+make clean-kind
+
+# Remove only Tailscale devices
+TAILSCALE_CLIENT_ID="..." TAILSCALE_CLIENT_SECRET="..." make clean-tailscale
+
+# Delete only Azure resource groups (stargate-vapa-*)
+make clean-azure
+
+# Stop local processes only
+make clean-local
 ```
 
-You should see:
-
-```
-NAME         STATE   OS      IPV4
-server-001   ready   2.0.0   10.0.1.5
-server-002                   10.0.1.6
-```
-
-## Project Structure
-
-```
-├── api/v1alpha1/           # CRD type definitions
-│   ├── server_types.go
-│   ├── provisioningprofile_types.go
-│   ├── operation_types.go
-│   └── groupversion_info.go
-├── cmd/
-│   └── simulator/          # QEMU simulator controller
-│       └── main.go
-├── controller/
-│   └── operation_controller.go   # Operation reconciliation logic
-├── dcclient/
-│   ├── client.go           # DC API interface
-│   └── http_client.go      # HTTP implementation
-├── mockapi/
-│   └── main.go             # Mock DC API server
-├── pkg/
-│   └── qemu/               # QEMU VM management
-│       ├── vm.go           # VM create, start, stop
-│       ├── cloudinit.go    # Cloud-init ISO generation
-│       ├── network.go      # Bridge/tap networking
-│       └── image.go        # Image download/cache
-├── scripts/
-│   └── setup-demo.sh       # Demo environment setup
-├── config/
-│   ├── crd/bases/          # CRD YAML manifests
-│   └── samples/            # Sample resources
-├── main.go                 # Controller entrypoint
-├── Makefile
-└── README.md
-```
-
-## CRDs
+## Custom Resource Definitions (CRDs)
 
 ### Server
 
-Represents a bare-metal server in a datacenter.
+Represents a physical or virtual machine that can be provisioned.
 
 ```yaml
 apiVersion: stargate.io/v1alpha1
 kind: Server
 metadata:
-  name: server-001
-  namespace: dc-west
+  name: my-server
 spec:
-  mac: "aa:bb:cc:dd:ee:01"
-  ipv4: "10.0.1.5"
-  inventory:
-    sku: "GPU-8xH100"
-    location: "rack-5-slot-12"
+  ipv4: 100.x.x.x          # Tailscale IP
+  provisioningProfile: azure-k8s-worker
 status:
-  state: ready
-  currentOS: "2.0.0"
+  state: ready             # pending, provisioning, ready, error
+  os: k8s-1.34
 ```
 
 ### ProvisioningProfile
 
-Defines provisioning configuration.
+Defines how servers should be provisioned.
 
 ```yaml
 apiVersion: stargate.io/v1alpha1
 kind: ProvisioningProfile
 metadata:
-  name: os-2-0-0
-  namespace: dc-west
+  name: azure-k8s-worker
 spec:
-  osVersion: "2.0.0"
-  osImage: "https://images.example.com/ubuntu-22-aks-2.0.0.img"
+  kubernetesVersion: "1.34"
+  sshCredentialsSecretRef: azure-ssh-credentials
+  tailscaleAuthKeySecretRef: tailscale-auth
 ```
 
 ### Operation
 
-Triggers an operation on a server.
+Triggers a provisioning operation on a server.
 
 ```yaml
 apiVersion: stargate.io/v1alpha1
 kind: Operation
 metadata:
-  name: repave-server-001
-  namespace: dc-west
+  name: bootstrap-my-server
 spec:
   serverRef:
-    name: server-001
+    name: my-server
   provisioningProfileRef:
-    name: os-2-0-0
-  operation: repave
+    name: azure-k8s-worker
+  operation: repave        # repave is the only supported operation
 status:
-  phase: Succeeded
-  dcJobID: "job-1234567890"
+  phase: Succeeded         # Pending, Running, Succeeded, Failed
+  message: "Bootstrap completed successfully"
 ```
 
-## Multi-DC Support
+## Makefile Targets
 
-To run multiple DCs:
+| Target | Description |
+|--------|-------------|
+| `make build` | Build all binaries (controller, mockapi, simulator, infra-prep, azure) |
+| `make clean` | Remove built binaries |
+| `make clean-all` | Full cleanup: Kind cluster, Azure RGs, Tailscale, local |
+| `make clean-kind` | Delete local Kind cluster |
+| `make clean-azure` | Delete all stargate-vapa-* Azure resource groups |
+| `make clean-tailscale` | Remove stargate-* devices from Tailscale |
+| `make clean-local` | Stop processes and clean up local resources |
+| `make install-crds` | Install CRDs to cluster |
+| `make help` | Show all available targets |
 
-1. Start multiple mock APIs on different ports
-2. Run separate controller instances per DC, or configure a single controller to handle multiple DCs (future enhancement)
+## Troubleshooting
 
-For now, each controller instance watches all namespaces and connects to one DC API. In production, you would:
-
-- Use namespace selectors to scope each controller to specific namespaces
-- Configure each controller with its corresponding DC API URL
-
-## Simulator Mode
-
-The simulator controller creates real QEMU VMs instead of simulating operations via the mock API. This allows you to test the full provisioning flow including cloud-init and Kubernetes node join.
-
-### Prerequisites
-
-- QEMU with KVM support
-- ISO generation tool (genisoimage, mkisofs, or xorrisofs)
-- kind cluster
-- Root access (for networking)
-
-### Simulator Quick Start
+### Controller Logs
 
 ```bash
-# 1. Setup (creates kind cluster, generates manifests with join command)
-sudo ./scripts/setup-demo.sh
-
-# 2. Build
-make build
-
-# 3. Install CRDs
-kubectl apply -f config/crd/bases/
-
-# 4. Apply demo resources
-kubectl apply -f /tmp/stargate-demo/namespace.yaml
-kubectl apply -f /tmp/stargate-demo/server.yaml
-kubectl apply -f /tmp/stargate-demo/provisioningprofile-k8s-worker.yaml
-
-# 5. Start simulator controller (requires root for networking)
-sudo ./bin/simulator
-
-# 6. Trigger repave (in another terminal)
-kubectl apply -f /tmp/stargate-demo/operation.yaml
-
-# 7. Watch operation progress
-kubectl get operations.stargate.io -n dc-simulator -w
-
-# 8. Watch node join cluster
-kubectl get nodes -w
+tail -f /tmp/stargate-controller.log
 ```
 
-### Simulator Architecture
+### Check Operation Status
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Kind Cluster (runs on host)                                │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │  - Stargate CRDs (Server, ProvisioningProfile, Operation) │    │
-│  │  - API server exposed on host IP                    │    │
-│  └─────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────┘
-       │
-       │ watches Operation CRs
-       ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Simulator Controller (runs on host, outside cluster)      │
-│  - Watches Operation CRs                                   │
-│  - On repave: creates QEMU VM with cloud-init from ProvisioningProfile │
-│  - Updates Server status with VM IP                        │
-│  - Updates Operation status (Pending → Running → Succeeded)│
-└─────────────────────────────────────────────────────────────┘
-       │
-       │ creates
-       ▼
-┌─────────────────────────────────────────────────────────────┐
-│  QEMU VM (bridge network: 192.168.100.0/24)                 │
-│  - Boots Ubuntu cloud image                                 │
-│  - Runs cloud-init from ProvisioningProfile                 │
-│  - Installs containerd, kubelet, kubeadm                    │
-│  - Executes kubeadm join to join kind cluster               │
-└─────────────────────────────────────────────────────────────┘
+```bash
+kubectl get operation <name> -o yaml
 ```
 
-### Technical Details
+### SSH to Azure VM
 
-- **VM Specs**: 2 CPU, 4GB RAM, 20GB disk
-- **Base Image**: Ubuntu 22.04 cloud image (auto-downloaded)
-- **Networking**: Bridge `stargate-br0` with NAT (192.168.100.0/24)
-- **Storage**: `/var/lib/stargate/` (images and VM disks)
+```bash
+ssh adminuser@<tailscale-ip>
+```
 
-## Next Steps
+### Check Tailscale Status in Kind
 
-- [ ] Add namespace-scoped controller configuration
-- [x] Add cloud-init support for cluster join
-- [ ] Add reboot operation
-- [ ] Add operation TTL / garbage collection
-- [ ] Add metrics and observability
-- [ ] Add webhook validation
-- [ ] Add VM health monitoring and auto-recovery
+```bash
+docker exec stargate-demo-control-plane tailscale --socket /var/run/tailscale/tailscaled.sock status
+```
+
+### Regenerate Join Token
+
+```bash
+docker exec stargate-demo-control-plane kubeadm token create --print-join-command
+```
+
+## Project Structure
+
+```
+stargate/
+├── api/v1alpha1/           # CRD type definitions
+├── bin/                    # Built binaries
+├── cmd/
+│   ├── azure/              # Azure VM provisioner (legacy)
+│   ├── infra-prep/         # Infrastructure preparation tool
+│   └── simulator/          # QEMU VM simulator
+├── config/
+│   ├── crd/bases/          # CRD YAML manifests
+│   └── samples/            # Sample CR YAML files
+├── controller/             # Kubernetes controller logic
+├── dcclient/               # Datacenter API client
+├── mockapi/                # Mock datacenter API
+├── pkg/
+│   ├── infra/providers/    # Infrastructure provider implementations
+│   └── qemu/               # QEMU VM management
+├── scripts/
+│   └── setup-kind-cluster.sh
+├── main.go                 # Controller entrypoint
+└── Makefile
+```

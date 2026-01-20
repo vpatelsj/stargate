@@ -1,5 +1,5 @@
 .PHONY: all build run test clean install-crds uninstall-crds mockapi controller simulator \
-        clean-all clean-kind clean-azure clean-tailscale clean-local
+        clean-all clean-kind clean-azure clean-tailscale clean-local infra-prep azure
 
 # Go parameters
 GOCMD=go
@@ -11,12 +11,14 @@ GOMOD=$(GOCMD) mod
 CONTROLLER_BIN=bin/controller
 MOCKAPI_BIN=bin/mockapi
 SIMULATOR_BIN=bin/simulator
+INFRA_PREP_BIN=bin/infra-prep
+AZURE_BIN=bin/azure
 
 all: build
 
 ## Build targets
 
-build: controller mockapi simulator
+build: controller mockapi simulator infra-prep azure
 
 controller:
 	$(GOBUILD) -o $(CONTROLLER_BIN) ./main.go
@@ -26,6 +28,12 @@ mockapi:
 
 simulator:
 	$(GOBUILD) -o $(SIMULATOR_BIN) ./cmd/simulator/main.go
+
+infra-prep:
+	$(GOBUILD) -o $(INFRA_PREP_BIN) ./cmd/infra-prep/main.go
+
+azure:
+	$(GOBUILD) -o $(AZURE_BIN) ./cmd/azure/main.go
 
 ## Run targets
 
