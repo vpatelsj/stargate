@@ -79,6 +79,12 @@ func (r *OperationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return r.updateOperationStatus(ctx, &operation, api.OperationPhaseFailed, fmt.Sprintf("Server not found: %v", err))
 	}
 
+	// Provider gating: only handle azure servers
+	if server.Spec.Provider != "" && server.Spec.Provider != "azure" {
+		logger.Info("Skipping server with non-azure provider", "server", server.Name, "provider", server.Spec.Provider)
+		return ctrl.Result{}, nil
+	}
+
 	// Fetch referenced ProvisioningProfile
 	var profile api.ProvisioningProfile
 	profileKey := client.ObjectKey{

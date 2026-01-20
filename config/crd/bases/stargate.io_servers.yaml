@@ -37,6 +37,9 @@ spec:
                 mac:
                   type: string
                   description: MAC address of the server's primary NIC
+                provider:
+                  description: Provider indicates which controller should manage this server (e.g., "azure" or "qemu")
+                  type: string
                 ipv4:
                   type: string
                   description: IPv4 address of the server

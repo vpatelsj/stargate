@@ -147,7 +147,7 @@ func main() {
 
 		// Create Server CRs
 		if !skipServerCR {
-			if err := createServerCRs(ctx, kubeconfig, namespace, nodes, adminUser); err != nil {
+			if err := createServerCRs(ctx, kubeconfig, namespace, nodes, adminUser, providerName); err != nil {
 				die("create server CRs: %v", err)
 			}
 			fmt.Println("Server CRs created successfully.")
@@ -184,7 +184,7 @@ func main() {
 
 		// Create Server CRs
 		if !skipServerCR {
-			if err := createServerCRs(ctx, kubeconfig, namespace, nodes, adminUser); err != nil {
+			if err := createServerCRs(ctx, kubeconfig, namespace, nodes, adminUser, providerName); err != nil {
 				die("create server CRs: %v", err)
 			}
 			fmt.Println("Server CRs created successfully.")
@@ -314,7 +314,13 @@ func execCommand(name string, args ...string) *exec.Cmd {
 }
 
 // createServerCRs creates Server custom resources for each provisioned node
-func createServerCRs(ctx context.Context, kubeconfigPath, namespace string, nodes []providers.NodeInfo, adminUser string) error {
+func createServerCRs(ctx context.Context, kubeconfigPath, namespace string, nodes []providers.NodeInfo, adminUser, providerName string) error {
+	providerName = strings.ToLower(strings.TrimSpace(providerName))
+	switch providerName {
+	case "azure", "qemu":
+	default:
+		return fmt.Errorf("unsupported provider for Server CRs: %s", providerName)
+	}
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("load kubeconfig: %w", err)
@@ -376,8 +382,9 @@ func createServerCRs(ctx context.Context, kubeconfigPath, namespace string, node
 					"namespace": namespace,
 				},
 				"spec": map[string]interface{}{
-					"mac":  mac,
-					"ipv4": ipv4,
+					"mac":      mac,
+					"ipv4":     ipv4,
+					"provider": providerName,
 				},
 			},
 		}

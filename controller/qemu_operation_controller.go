@@ -71,6 +71,12 @@ func (r *QemuOperationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return r.updateOperationStatus(ctx, &operation, api.OperationPhaseFailed, fmt.Sprintf("Server not found: %s", operation.Spec.ServerRef.Name))
 	}
 
+	// Provider gating: only handle qemu servers
+	if server.Spec.Provider != "" && server.Spec.Provider != "qemu" {
+		logger.Info("Skipping server with non-qemu provider", "server", server.Name, "provider", server.Spec.Provider)
+		return ctrl.Result{}, nil
+	}
+
 	// Get the referenced ProvisioningProfile
 	var profile api.ProvisioningProfile
 	profileKey := client.ObjectKey{

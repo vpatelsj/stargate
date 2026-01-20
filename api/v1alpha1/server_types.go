@@ -9,6 +9,9 @@ type ServerSpec struct {
 	// MAC address of the server's primary NIC
 	MAC string `json:"mac"`
 
+	// Provider indicates which controller should manage this server (e.g., "azure" or "qemu")
+	Provider string `json:"provider,omitempty"`
+
 	// IPv4 address of the server
 	IPv4 string `json:"ipv4,omitempty"`
 
