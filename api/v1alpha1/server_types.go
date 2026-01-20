@@ -15,6 +15,9 @@ type ServerSpec struct {
 	// IPv4 address of the server
 	IPv4 string `json:"ipv4,omitempty"`
 
+	// RouterIP is the Tailscale IP or FQDN of the subnet router for SSH access (for workers behind a router)
+	RouterIP string `json:"routerIP,omitempty"`
+
 	// BMC configuration for out-of-band management
 	BMC *BMCConfig `json:"bmc,omitempty"`
 

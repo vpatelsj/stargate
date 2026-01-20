@@ -703,6 +703,17 @@ func createServerCRs(ctx context.Context, kubeconfigPath, namespace string, node
 			ipv4 = node.TailscaleIP
 		}
 
+		// Build the Server CR with router info for workers
+		serverSpec := map[string]interface{}{
+			"mac":      mac,
+			"ipv4":     ipv4,
+			"provider": providerName,
+		}
+		// Add router IP for workers so the controller knows how to SSH via proxy
+		if routerProxy != "" && node.Role != providers.RoleRouter {
+			serverSpec["routerIP"] = routerProxy
+		}
+
 		// Build the Server CR
 		server := &unstructured.Unstructured{
 			Object: map[string]interface{}{
@@ -712,11 +723,7 @@ func createServerCRs(ctx context.Context, kubeconfigPath, namespace string, node
 					"name":      node.Name,
 					"namespace": namespace,
 				},
-				"spec": map[string]interface{}{
-					"mac":      mac,
-					"ipv4":     ipv4,
-					"provider": providerName,
-				},
+				"spec": serverSpec,
 			},
 		}
 

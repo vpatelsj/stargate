@@ -105,6 +105,7 @@ func (p *Provider) CreateNodes(ctx context.Context, specs []providers.NodeSpec) 
 	}
 
 	var nodes []providers.NodeInfo
+	var routerIP string // Track router IP for workers to use as gateway for Tailscale traffic
 
 	for i, spec := range specs {
 		role := spec.Role
@@ -117,6 +118,11 @@ func (p *Provider) CreateNodes(ctx context.Context, specs []providers.NodeSpec) 
 
 		// Allocate IP and create tap device
 		vmIP := p.network.AllocateIP(spec.Name)
+
+		// Track router IP for workers
+		if isRouter {
+			routerIP = vmIP
+		}
 
 		tapDevice, err := p.network.CreateTap(ctx, spec.Name)
 		if err != nil {
@@ -131,7 +137,7 @@ func (p *Provider) CreateNodes(ctx context.Context, specs []providers.NodeSpec) 
 		if isRouter {
 			userData = p.generateRouterCloudInit(spec.Name, string(sshPubKey))
 		} else {
-			userData = p.generateWorkerCloudInit(spec.Name, string(sshPubKey))
+			userData = p.generateWorkerCloudInit(spec.Name, string(sshPubKey), routerIP)
 		}
 
 		cloudInitISO, err := p.ciGen.GenerateISO(ctx, pkgqemu.CloudInitConfig{
@@ -226,15 +232,18 @@ runcmd:
   - tailscale up --authkey '%s' --hostname '%s' --advertise-routes=%s --accept-routes --snat-subnet-routes=true
   # Disable Tailscale SSH to allow regular SSH via Tailscale IP
   - tailscale set --ssh=false
+  # Add MASQUERADE for LAN traffic going to Tailscale (for workers to reach control plane)
+  - iptables -t nat -A POSTROUTING -s %s -o tailscale0 -j MASQUERADE
   # Signal that we're ready
   - touch /var/run/cloud-init-complete
 
 final_message: "Cloud-init complete after $UPTIME seconds"
-`, hostname, p.cfg.AdminUsername, strings.TrimSpace(sshPubKey), p.cfg.TailscaleAuthKey, hostname, p.cfg.SubnetCIDR)
+`, hostname, p.cfg.AdminUsername, strings.TrimSpace(sshPubKey), p.cfg.TailscaleAuthKey, hostname, p.cfg.SubnetCIDR, p.cfg.SubnetCIDR)
 }
 
 // generateWorkerCloudInit creates cloud-init for worker VMs (no Tailscale, local network only)
-func (p *Provider) generateWorkerCloudInit(hostname, sshPubKey string) string {
+// Workers need a route to Tailscale IPs via the router VM
+func (p *Provider) generateWorkerCloudInit(hostname, sshPubKey, routerIP string) string {
 	return fmt.Sprintf(`#cloud-config
 hostname: %s
 manage_etc_hosts: true
@@ -255,13 +264,17 @@ packages:
   - ca-certificates
 
 runcmd:
+  # Add route for Tailscale CGNAT range via the router VM
+  - ip route add 100.64.0.0/10 via %s || true
+  # Make the route persistent
+  - echo "100.64.0.0/10 via %s" >> /etc/network/routes.conf || true
   # Workers don't join Tailscale - they're accessed via the router
   - echo "Worker VM initialized without Tailscale"
   # Signal that we're ready
   - touch /var/run/cloud-init-complete
 
 final_message: "Cloud-init complete after $UPTIME seconds"
-`, hostname, p.cfg.AdminUsername, strings.TrimSpace(sshPubKey))
+`, hostname, p.cfg.AdminUsername, strings.TrimSpace(sshPubKey), routerIP, routerIP)
 }
 
 // waitForTailscale waits for a VM to appear in Tailscale and returns its IP

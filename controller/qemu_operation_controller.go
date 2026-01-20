@@ -269,6 +269,9 @@ func (r *QemuOperationReconciler) bootstrapServer(ctx context.Context, server *a
 		return fmt.Errorf("server %s has no IPv4 address", server.Name)
 	}
 
+	// Get router IP for SSH proxy (empty for router itself)
+	routerIP := server.Spec.RouterIP
+
 	// Get control plane Tailscale IP (via Kind control-plane container, same as azure flow)
 	controlPlaneIP := r.ControlPlaneTailscaleIP
 	if controlPlaneIP == "" {
@@ -285,11 +288,11 @@ func (r *QemuOperationReconciler) bootstrapServer(ctx context.Context, server *a
 		return fmt.Errorf("generate join command: %w", err)
 	}
 
-	// Build the bootstrap script
-	script := r.buildBootstrapScript(controlPlaneIP, joinCmd, cfg.kubernetesVersion)
+	// Build the bootstrap script with the node's actual IP
+	script := r.buildBootstrapScript(controlPlaneIP, joinCmd, cfg.kubernetesVersion, target)
 
-	// Run the script via SSH
-	return r.runRemoteBootstrap(ctx, target, script, cfg)
+	// Run the script via SSH (via router proxy if routerIP is set)
+	return r.runRemoteBootstrap(ctx, target, routerIP, script, cfg)
 }
 
 // detectControlPlaneTailscaleIP gets the Tailscale IP from the Kind control-plane container (aligns with azure controller)
@@ -350,14 +353,20 @@ func (r *QemuOperationReconciler) generateKubeadmJoinCommand(controlPlaneTailsca
 }
 
 // buildBootstrapScript creates the bash script for QEMU VM bootstrap
-func (r *QemuOperationReconciler) buildBootstrapScript(controlPlaneTailscaleIP, joinCmd, kubernetesVersion string) string {
+// Workers behind a router don't have Tailscale - they use their local IP for node registration
+func (r *QemuOperationReconciler) buildBootstrapScript(controlPlaneTailscaleIP, joinCmd, kubernetesVersion, nodeIP string) string {
 	controlPlaneHostname := r.ControlPlaneHostname
 	if controlPlaneHostname == "" {
-		// Try to get local hostname
-		if h, err := os.Hostname(); err == nil {
-			controlPlaneHostname = h
+		// Try to get hostname from Kind container
+		containerName := r.KindContainerName
+		if containerName == "" {
+			containerName = "stargate-demo-control-plane"
+		}
+		cmd := exec.Command("docker", "exec", containerName, "hostname")
+		if out, err := cmd.Output(); err == nil {
+			controlPlaneHostname = strings.TrimSpace(string(out))
 		} else {
-			controlPlaneHostname = "control-plane"
+			controlPlaneHostname = containerName // Fall back to container name
 		}
 	}
 
@@ -375,24 +384,12 @@ func (r *QemuOperationReconciler) buildBootstrapScript(controlPlaneTailscaleIP, 
 set -ex
 
 KUBERNETES_VERSION="%s"
+NODE_IP="%s"
 
 # Add control plane hostname to /etc/hosts
 echo '%s %s' >> /etc/hosts
 
-echo "Waiting for Tailscale IP..."
-for i in {1..30}; do
-  TAILSCALE_IP=$(tailscale ip -4 2>/dev/null | head -n1 || true)
-  if [[ -n "$TAILSCALE_IP" ]]; then
-    echo "Tailscale IP: $TAILSCALE_IP"
-    break
-  fi
-  sleep 2
-done
-
-if [[ -z "$TAILSCALE_IP" ]]; then
-  echo "ERROR: Could not get Tailscale IP"
-  exit 1
-fi
+echo "Using node IP: $NODE_IP"
 
 JOIN_CMD='%s'
 
@@ -414,7 +411,7 @@ nodeRegistration:
     - name: cgroup-root
       value: /
     - name: node-ip
-      value: "$TAILSCALE_IP"
+      value: "$NODE_IP"
 ---
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
@@ -470,19 +467,22 @@ if [[ -n "$CONTROL_PLANE_TAILSCALE_IP" ]]; then
   iptables-save > /etc/iptables/rules.v4
 fi
 
-# Advertise pod CIDR via Tailscale for routing
-for i in {1..60}; do
-  POD_CIDR=$(kubectl --kubeconfig /etc/kubernetes/kubelet.conf get node $(hostname) -o jsonpath='{.spec.podCIDR}' 2>/dev/null || true)
-  if [[ -n "$POD_CIDR" && "$POD_CIDR" != "<no value>" ]]; then
-    tailscale set --advertise-routes="$POD_CIDR" --accept-routes || true
-    break
-  fi
-  sleep 5
-done
+# Advertise pod CIDR via Tailscale for routing (only if Tailscale is present)
+if command -v tailscale >/dev/null; then
+  for i in {1..60}; do
+    POD_CIDR=$(kubectl --kubeconfig /etc/kubernetes/kubelet.conf get node $(hostname) -o jsonpath='{.spec.podCIDR}' 2>/dev/null || true)
+    if [[ -n "$POD_CIDR" && "$POD_CIDR" != "<no value>" ]]; then
+      tailscale set --advertise-routes="$POD_CIDR" --accept-routes || true
+      break
+    fi
+    sleep 5
+  done
+fi
 
 echo "Bootstrap complete! Node joined cluster."
 `,
 		k8sRepoVersion,
+		nodeIP,
 		controlPlaneTailscaleIP,
 		controlPlaneHostname,
 		joinCmd,
@@ -491,16 +491,26 @@ echo "Bootstrap complete! Node joined cluster."
 }
 
 // runRemoteBootstrap executes the bootstrap script on the QEMU VM via SSH
-func (r *QemuOperationReconciler) runRemoteBootstrap(ctx context.Context, host, script string, cfg *qemuBootstrapConfig) error {
+func (r *QemuOperationReconciler) runRemoteBootstrap(ctx context.Context, host, routerIP, script string, cfg *qemuBootstrapConfig) error {
 	sshArgs := []string{
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "ConnectTimeout=30",
 		"-i", cfg.sshPrivateKeyPath,
+	}
+
+	// If we have a router IP, SSH via the router as a proxy
+	if routerIP != "" {
+		proxyCmd := fmt.Sprintf("ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i %s -p %d -W %%h:%%p %s@%s",
+			cfg.sshPrivateKeyPath, cfg.sshPort, cfg.adminUsername, routerIP)
+		sshArgs = append(sshArgs, "-o", fmt.Sprintf("ProxyCommand=%s", proxyCmd))
+	}
+
+	sshArgs = append(sshArgs,
 		"-p", strconv.Itoa(cfg.sshPort),
 		fmt.Sprintf("%s@%s", cfg.adminUsername, host),
 		"sudo", "bash", "-s",
-	}
+	)
 
 	cmd := exec.CommandContext(ctx, "ssh", sshArgs...)
 	cmd.Stdin = strings.NewReader(script)
