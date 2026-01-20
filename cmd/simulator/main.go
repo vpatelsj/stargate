@@ -161,11 +161,8 @@ func (r *SimulatorReconciler) handlePending(ctx context.Context, operation *api.
 	log := ctrl.LoggerFrom(ctx)
 	log.Info("Starting repave operation", "server", server.Name, "provisioningProfile", profile.Name)
 
-	// Download base image if needed
-	imageURL := profile.Spec.OSImage
-	if imageURL == "" {
-		imageURL = qemu.UbuntuCloudImageURL
-	}
+	// Download base image - for simulator, use Ubuntu cloud image
+	imageURL := qemu.UbuntuCloudImageURL
 
 	basePath, err := r.ImageMgr.EnsureImage(ctx, imageURL)
 	if err != nil {
@@ -188,7 +185,7 @@ func (r *SimulatorReconciler) handlePending(ctx context.Context, operation *api.
 	cloudInitConfig := qemu.CloudInitConfig{
 		InstanceID: vmName,
 		Hostname:   vmName,
-		UserData:   profile.Spec.CloudInit,
+		UserData:   profile.Spec.CustomBootstrapScript, // Use custom script if available
 		IPAddress:  vmIP,
 		Gateway:    qemu.DefaultBridgeIP,
 	}

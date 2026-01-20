@@ -37,6 +37,9 @@ spec:
                 mac:
                   type: string
                   description: MAC address of the server's primary NIC
+                provider:
+                  description: Provider indicates which controller should manage this server (e.g., "azure" or "qemu")
+                  type: string
                 ipv4:
                   type: string
                   description: IPv4 address of the server
@@ -66,10 +69,13 @@ spec:
               properties:
                 state:
                   type: string
-                  description: "State of the server: ready, provisioning, error"
+                  description: "State of the server: pending, provisioning, ready, error"
                 currentOS:
                   type: string
                   description: Current OS version running on the server
+                appliedProvisioningProfile:
+                  type: string
+                  description: Name of the last successfully applied ProvisioningProfile
                 lastUpdated:
                   type: string
                   format: date-time
@@ -86,6 +92,9 @@ spec:
         - name: OS
           type: string
           jsonPath: .status.currentOS
+        - name: Profile
+          type: string
+          jsonPath: .status.appliedProvisioningProfile
         - name: IPv4
           type: string
           jsonPath: .spec.ipv4

@@ -32,20 +32,26 @@ spec:
             spec:
               type: object
               required:
-                - osVersion
+                - kubernetesVersion
               properties:
-                osVersion:
+                kubernetesVersion:
                   type: string
-                  description: OS version to install
-                osImage:
+                  description: Kubernetes version to install (e.g., "1.34")
+                containerRuntime:
                   type: string
-                  description: URL of the OS image
-                cloudInit:
+                  description: Container runtime to use (default containerd)
+                tailscaleAuthKeySecretRef:
                   type: string
-                  description: Cloud-init configuration
-                cloudInitSecretRef:
+                  description: Reference to Secret containing Tailscale auth key (key "authKey")
+                sshCredentialsSecretRef:
                   type: string
-                  description: Reference to Secret containing cloud-init data
+                  description: Reference to Secret containing SSH credentials (keys "privateKey", "username")
+                adminUsername:
+                  type: string
+                  description: Admin username for SSH access (default ubuntu)
+                customBootstrapScript:
+                  type: string
+                  description: Custom bootstrap script (overrides built-in k8s worker script)
             status:
               type: object
               properties:
@@ -58,9 +64,9 @@ spec:
       subresources:
         status: {}
       additionalPrinterColumns:
-        - name: OSVersion
+        - name: K8sVersion
           type: string
-          jsonPath: .spec.osVersion
+          jsonPath: .spec.kubernetesVersion
         - name: Ready
           type: boolean
           jsonPath: .status.ready

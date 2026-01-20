@@ -6,22 +6,31 @@ import (
 
 // ProvisioningProfileSpec defines the desired state of ProvisioningProfile
 type ProvisioningProfileSpec struct {
-	// OSVersion to install (e.g., "2.0.0")
-	OSVersion string `json:"osVersion"`
+	// KubernetesVersion to install (e.g., "1.34")
+	KubernetesVersion string `json:"kubernetesVersion"`
 
-	// OSImage URL (optional, for future use)
-	OSImage string `json:"osImage,omitempty"`
+	// ContainerRuntime to use (default: containerd)
+	ContainerRuntime string `json:"containerRuntime,omitempty"`
 
-	// CloudInit configuration (optional, for future use)
-	CloudInit string `json:"cloudInit,omitempty"`
+	// TailscaleAuthKeySecretRef references a Secret containing the Tailscale auth key
+	// Secret should have key "authKey"
+	TailscaleAuthKeySecretRef string `json:"tailscaleAuthKeySecretRef,omitempty"`
 
-	// CloudInitSecretRef references a Secret containing cloud-init data (optional)
-	CloudInitSecretRef string `json:"cloudInitSecretRef,omitempty"`
+	// SSHCredentialsSecretRef references a Secret containing SSH credentials for bootstrap
+	// Secret should have keys "privateKey" and optionally "username" (default: ubuntu)
+	SSHCredentialsSecretRef string `json:"sshCredentialsSecretRef,omitempty"`
+
+	// AdminUsername for SSH access (default: ubuntu)
+	AdminUsername string `json:"adminUsername,omitempty"`
+
+	// CustomBootstrapScript allows overriding the default bootstrap script
+	// If empty, uses the built-in k8s worker bootstrap script
+	CustomBootstrapScript string `json:"customBootstrapScript,omitempty"`
 }
 
 // ProvisioningProfileStatus defines the observed state of ProvisioningProfile
 type ProvisioningProfileStatus struct {
-	// Ready indicates if the template is valid and ready for use
+	// Ready indicates if the profile is valid and ready for use
 	Ready bool `json:"ready,omitempty"`
 
 	// Message provides additional status information
@@ -30,7 +39,7 @@ type ProvisioningProfileStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="OSVersion",type="string",JSONPath=".spec.osVersion"
+// +kubebuilder:printcolumn:name="K8sVersion",type="string",JSONPath=".spec.kubernetesVersion"
 // +kubebuilder:printcolumn:name="Ready",type="boolean",JSONPath=".status.ready"
 
 // ProvisioningProfile defines a provisioning configuration that can be applied to Server

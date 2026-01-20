@@ -2,11 +2,22 @@ apiVersion: stargate.io/v1alpha1
 kind: ProvisioningProfile
 metadata:
   name: k8s-worker
-  namespace: dc-simulator
+  namespace: default
 spec:
-  osVersion: "ubuntu-22.04"
-  osImage: "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
-  cloudInit: |
+  # Kubernetes version - used for kubeadm, kubectl, kubelet packages
+  kubernetesVersion: "1.34"
+  
+  # Container runtime
+  containerRuntime: containerd
+  
+  # SSH credentials for bootstrap
+  sshCredentialsSecretRef: azure-ssh-credentials
+  
+  # SSH admin username
+  adminUsername: ubuntu
+  
+  # Custom bootstrap script (optional) - if empty, default script is used
+  customBootstrapScript: |
     #cloud-config
     # Kubernetes Worker Node Cloud-Init Provisioning Profile
     # This template provisions a VM to join a Kubernetes cluster as a worker node

@@ -1,0 +1,25 @@
+apiVersion: stargate.io/v1alpha1
+kind: ProvisioningProfile
+metadata:
+  name: azure-k8s-worker
+  namespace: default
+spec:
+  # Kubernetes version for the worker node (major.minor format)
+  kubernetesVersion: "1.34"
+  
+  # Container runtime to use
+  containerRuntime: containerd
+  
+  # Reference to a Secret containing SSH credentials
+  # Secret should have:
+  #   - privateKey: the SSH private key (in PEM format)
+  #   - username: (optional) SSH username, defaults to controller flag
+  sshCredentialsSecretRef: azure-ssh-credentials
+  
+  # Reference to a Secret containing Tailscale auth key
+  # Secret should have:
+  #   - authKey: the Tailscale auth key
+  tailscaleAuthKeySecretRef: tailscale-auth
+  
+  # SSH admin username (can also be in the secret)
+  adminUsername: adminuser
