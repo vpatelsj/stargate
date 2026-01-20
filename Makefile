@@ -59,11 +59,11 @@ run-simulator:
 # Build and start both controllers (azure + qemu)
 start-controllers: azure-controller qemu-controller
 	@echo "Starting azure-controller..."
-	@nohup $(AZURE_CONTROLLER_BIN) > /tmp/stargate-azure-controller.log 2>&1 & echo $$! > /tmp/stargate-azure-controller.pid
+	@nohup $(AZURE_CONTROLLER_BIN) --metrics-bind-address=:8081 > /tmp/stargate-azure-controller.log 2>&1 & echo $$! > /tmp/stargate-azure-controller.pid
 	@echo "azure-controller PID: $$(cat /tmp/stargate-azure-controller.pid)"
 	@echo "Starting qemu-controller with sudo..."
 	@sudo -n true 2>/dev/null || (echo "sudo requires a password; run 'sudo -v' first" && exit 1)
-	@nohup sudo -n -E $(QEMU_CONTROLLER_BIN) > /tmp/stargate-qemu-controller.log 2>&1 & echo $$! > /tmp/stargate-qemu-controller.pid
+	@nohup sudo -n -E $(QEMU_CONTROLLER_BIN) --metrics-bind-address=:8082 > /tmp/stargate-qemu-controller.log 2>&1 & echo $$! > /tmp/stargate-qemu-controller.pid
 	@sudo -n chmod 644 /tmp/stargate-qemu-controller.log 2>/dev/null || true
 	@echo "qemu-controller PID: $$(cat /tmp/stargate-qemu-controller.pid)"
 	@echo "Logs: /tmp/stargate-azure-controller.log, /tmp/stargate-qemu-controller.log"
