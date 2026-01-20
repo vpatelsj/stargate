@@ -133,24 +133,35 @@ The `--tailscale-client-id` and `--tailscale-client-secret` flags enable automat
 #### Option B: Local QEMU VMs (requires root and KVM)
 
 ```bash
-sudo bin/prep-dc-inventory \
+# Generate unique deployment number
+export DEPLOY_NUM=$(date +%y%m%d%H%M)
+
+sudo -E bin/prep-dc-inventory \
   --provider qemu \
-  --vm stargate-qemu-vm-1 \
-  --vm stargate-qemu-vm-2 \
+  --router-name stargate-qemu-router-$DEPLOY_NUM \
+  --vm stargate-qemu-vm$DEPLOY_NUM-1 \
+  --vm stargate-qemu-vm$DEPLOY_NUM-2 \
   --admin-username ubuntu \
   --ssh-public-key "$HOME/.ssh/id_rsa.pub" \
   --tailscale-auth-key "$TAILSCALE_AUTH_KEY" \
+  --tailscale-client-id "$TAILSCALE_CLIENT_ID" \
+  --tailscale-client-secret "$TAILSCALE_CLIENT_SECRET" \
   --namespace simulator-dc \
+  --qemu-subnet-cidr 192.168.100.0/24 \
   --qemu-cpus 2 \
   --qemu-memory 4096 \
   --qemu-disk 20
 ```
 
+> **Note:** Use `sudo -E` to preserve environment variables when running as root.
+
 This command:
-- Creates Azure resource group, VNet, subnet, and NSG (Azure) or local bridge network (QEMU)
-- Provisions VMs with Tailscale and Kubernetes prerequisites
-- Verifies connectivity via Tailscale
-- Creates `Server` CRs in the `azure-dc` or `simulator-dc` namespace
+- Creates a bridge network (192.168.100.0/24) for QEMU VMs
+- Provisions a **router VM** that joins Tailscale and advertises the subnet
+- Provisions **worker VMs** on the local subnet (no Tailscale, accessed via router)
+- Automatically approves subnet routes via Tailscale API
+- Verifies connectivity via the router
+- Creates `Server` CRs in the `simulator-dc` namespace
 
 ### 5. Build and Run Controllers
 

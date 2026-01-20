@@ -92,6 +92,10 @@ func main() {
 	flag.IntVar(&qemuMemoryMB, "qemu-memory", 4096, "QEMU: memory in MB per VM.")
 	flag.IntVar(&qemuDiskSizeGB, "qemu-disk", 20, "QEMU: disk size in GB per VM.")
 
+	// QEMU subnet CIDR (for route advertisement)
+	var qemuSubnetCIDR string
+	flag.StringVar(&qemuSubnetCIDR, "qemu-subnet-cidr", "192.168.100.0/24", "QEMU: subnet CIDR for route advertisement.")
+
 	// Server CR flags
 	// Handle kubeconfig path when running as sudo
 	defaultKubeconfig := filepath.Join(os.Getenv("HOME"), ".kube", "config")
@@ -182,6 +186,13 @@ func main() {
 
 	case "qemu":
 		ctx := context.Background()
+
+		// Determine subnet CIDR for QEMU
+		qemuSubnet := qemuSubnetCIDR
+		if qemuSubnet == "" {
+			qemuSubnet = "192.168.100.0/24"
+		}
+
 		prov, err := qemu.NewProvider(ctx, qemu.Config{
 			WorkDir:          qemuWorkDir,
 			ImageCacheDir:    qemuImageCacheDir,
@@ -192,6 +203,7 @@ func main() {
 			TailscaleAuthKey: tailscaleAuthKey,
 			SSHPublicKeyPath: sshPubKeyPath,
 			AdminUsername:    adminUser,
+			SubnetCIDR:       qemuSubnet,
 		})
 		if err != nil {
 			die("qemu provider init: %v", err)
@@ -200,6 +212,9 @@ func main() {
 		var specs []providers.NodeSpec
 		if routerName != "" {
 			specs = append(specs, providers.NodeSpec{Name: routerName, Role: providers.RoleRouter})
+		} else {
+			// Default router name for QEMU if not specified
+			specs = append(specs, providers.NodeSpec{Name: "stargate-qemu-router", Role: providers.RoleRouter})
 		}
 		for _, name := range vmNames {
 			specs = append(specs, providers.NodeSpec{Name: name, Role: providers.RoleWorker})
@@ -210,7 +225,8 @@ func main() {
 			die("provision: %v", err)
 		}
 
-		nodes, err = runConnectivitySuite(nodes, adminUser, "")
+		// Run connectivity suite with subnet for route verification
+		nodes, err = runConnectivitySuite(nodes, adminUser, qemuSubnet)
 		if err != nil {
 			die("connectivity checks failed: %v", err)
 		}
