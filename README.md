@@ -65,11 +65,10 @@ This script:
 - Installs Stargate CRDs
 - Creates `azure-dc` namespace with required secrets (`azure-ssh-credentials`, `tailscale-auth`)
 - Creates default `ProvisioningProfile` (`azure-k8s-worker`) in `azure-dc` namespace
-- Starts the controller
 
 ### 4. Provision VMs
 
-You can provision VMs using either **Azure** or **local QEMU**:
+You can provision VMs using **Azure** and **local QEMU** providers:
 
 #### Option A: Azure VMs
 
@@ -119,40 +118,14 @@ This command:
 - Verifies connectivity via Tailscale
 - Creates `Server` CRs in the `azure-dc` or `simulator-dc` namespace
 
-### 5. Start the Controller
-
-Start the appropriate controller based on your provider:
-
-#### For Azure VMs:
+### 5. Build and Run Controllers
 
 ```bash
-bin/azure-controller \
-  --kind-container stargate-demo-control-plane \
-  --ssh-private-key ~/.ssh/id_rsa
+make start-controllers
 ```
 
-#### For QEMU VMs:
+This builds `bin/azure-controller` and `bin/qemu-controller`, then starts them (qemu controller runs under sudo). Logs: `/tmp/stargate-azure-controller.log` and `/tmp/stargate-qemu-controller.log`. If sudo prompts, run `sudo -v` first.
 
-```bash
-sudo -E KUBECONFIG=$HOME/.kube/config \
-  bin/qemu-controller \
-  --ssh-private-key ~/.ssh/id_rsa \
-  --admin-username ubuntu \
-  --control-plane-ip <control-plane-tailscale-ip> \
-  --control-plane-hostname stargate-demo-control-plane
-```
-
-The qemu-controller auto-detects:
-- Control plane Tailscale IP (runs `tailscale ip -4` locally)
-- Control plane hostname (uses local hostname)
-You can omit `--control-plane-ip/--control-plane-hostname` to rely on auto-detection, but when running the controller off-cluster (e.g., on your laptop) it is safer to pass the control plane Tailscale IP/hostname explicitly.
-
-Additional flags:
-- `--control-plane-ip`: Manually specify control plane Tailscale IP
-- `--control-plane-hostname`: Manually specify control plane hostname
-- `--ssh-port`: SSH port (default: 22)
-- `--metrics-bind-address`: Metrics endpoint (default: :8083)
-- `--health-probe-bind-address`: Health probe endpoint (default: :8084)
 
 ### 6. Bootstrap VMs as Kubernetes Workers
 
@@ -198,21 +171,6 @@ EOF
 done
 ```
 
-First, create a ProvisioningProfile for QEMU:
-
-```bash
-kubectl apply -f - <<EOF
-apiVersion: stargate.io/v1alpha1
-kind: ProvisioningProfile
-metadata:
-  name: qemu-k8s-worker
-  namespace: simulator-dc
-spec:
-  kubernetesVersion: "1.34"
-  adminUsername: ubuntu
-EOF
-```
-
 ### 7. Verify Cluster
 
 ```bash
@@ -230,25 +188,7 @@ kubectl get servers -n simulator-dc   # For QEMU
 Cleans up everything: Kind cluster, Tailscale devices, Azure resource groups, and local processes.
 
 ```bash
-TAILSCALE_CLIENT_ID="..." \
-TAILSCALE_CLIENT_SECRET="tskey-client-..." \
 make clean-all
-```
-
-### Partial Cleanup
-
-```bash
-# Delete only Kind cluster
-make clean-kind
-
-# Remove only Tailscale devices
-TAILSCALE_CLIENT_ID="..." TAILSCALE_CLIENT_SECRET="..." make clean-tailscale
-
-# Delete only Azure resource groups (stargate-vapa-*)
-make clean-azure
-
-# Stop local processes only
-make clean-local
 ```
 
 ## Custom Resource Definitions (CRDs)
@@ -303,82 +243,4 @@ spec:
 status:
   phase: Succeeded         # Pending, Running, Succeeded, Failed
   message: "Bootstrap completed successfully"
-```
-
-## Makefile Targets
-
-| Target | Description |
-|--------|-------------|
-| `make build` | Build all binaries (azure-controller, mockapi, simulator, prep-dc-inventory, azure) |
-| `make clean` | Remove built binaries |
-| `make clean-all` | Full cleanup: Kind cluster, Azure RGs, Tailscale, local |
-| `make clean-kind` | Delete local Kind cluster |
-| `make clean-azure` | Delete all stargate-vapa-* Azure resource groups |
-| `make clean-tailscale` | Remove stargate-* devices from Tailscale |
-| `make clean-local` | Stop processes and clean up local resources |
-| `make install-crds` | Install CRDs to cluster |
-| `make help` | Show all available targets |
-
-## Troubleshooting
-
-### Controller Logs
-
-```bash
-# Follow logs in real-time
-tail -f /tmp/stargate-controller.log
-
-# View last 50 lines
-tail -50 /tmp/stargate-controller.log
-
-# Search for errors
-grep -i error /tmp/stargate-controller.log
-```
-
-### Check Operation Status
-
-```bash
-kubectl get operation <name> -o yaml
-```
-
-### SSH to Azure VM
-
-```bash
-ssh adminuser@<tailscale-ip>
-```
-
-### Check Tailscale Status in Kind
-
-```bash
-docker exec stargate-demo-control-plane tailscale --socket /var/run/tailscale/tailscaled.sock status
-```
-
-### Regenerate Join Token
-
-```bash
-docker exec stargate-demo-control-plane kubeadm token create --print-join-command
-```
-
-## Project Structure
-
-```
-stargate/
-├── api/v1alpha1/           # CRD type definitions
-├── bin/                    # Built binaries
-├── cmd/
-│   ├── azure/              # Azure VM provisioner (legacy)
-│   ├── infra-prep/         # Infrastructure preparation tool
-│   └── simulator/          # QEMU VM simulator
-├── config/
-│   ├── crd/bases/          # CRD YAML manifests
-│   └── samples/            # Sample CR YAML files
-├── controller/             # Kubernetes controller logic
-├── dcclient/               # Datacenter API client
-├── mockapi/                # Mock datacenter API
-├── pkg/
-│   ├── infra/providers/    # Infrastructure provider implementations
-│   └── qemu/               # QEMU VM management
-├── scripts/
-│   └── create-mx-cluster.sh
-├── main.go                 # Controller entrypoint
-└── Makefile
 ```

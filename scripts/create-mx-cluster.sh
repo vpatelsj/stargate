@@ -313,96 +313,21 @@ spec:
   tailscaleAuthKeySecretRef: tailscale-auth
 EOF
     log_info "Created ProvisioningProfile: azure-k8s-worker"
-}
 
-# Build and start the controllers
-start_azure_controller() {
-    log_info "Building and starting Azure controller..."
-
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    PROJECT_DIR="${SCRIPT_DIR}/.."
-
-    if pgrep -f "${PROJECT_DIR}/bin/azure-controller" >/dev/null 2>&1; then
-        AZURE_CONTROLLER_PID=$(pgrep -f "${PROJECT_DIR}/bin/azure-controller" | head -n1)
-        log_warn "Azure controller already running (PID ${AZURE_CONTROLLER_PID}), skipping start"
-        return
-    fi
-
-    log_info "Building azure-controller binary..."
-    (cd "$PROJECT_DIR" && go build -o bin/azure-controller ./main.go)
-
-    if [[ ! -x "${PROJECT_DIR}/bin/azure-controller" ]]; then
-        log_error "Azure controller binary not found after build"
-        exit 1
-    fi
-
-    log_info "Starting azure-controller in background..."
-    nohup "${PROJECT_DIR}/bin/azure-controller" \
-        --control-plane-ip "${TAILSCALE_IP}" \
-        --control-plane-hostname "${CLUSTER_NAME}-control-plane" \
-        > /tmp/stargate-azure-controller.log 2>&1 &
-    AZURE_CONTROLLER_PID=$!
-
-    sleep 2
-    if kill -0 "$AZURE_CONTROLLER_PID" 2>/dev/null; then
-        log_info "Azure controller started with PID $AZURE_CONTROLLER_PID"
-        log_info "Logs: /tmp/stargate-azure-controller.log"
-    else
-        log_error "Azure controller failed to start. Check /tmp/stargate-azure-controller.log"
-        exit 1
-    fi
-}
-
-start_qemu_controller() {
-    log_info "Building and starting QEMU controller..."
-
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    PROJECT_DIR="${SCRIPT_DIR}/.."
-
-    if pgrep -f "${PROJECT_DIR}/bin/qemu-controller" >/dev/null 2>&1; then
-        QEMU_CONTROLLER_PID=$(pgrep -f "${PROJECT_DIR}/bin/qemu-controller" | head -n1)
-        log_warn "QEMU controller already running (PID ${QEMU_CONTROLLER_PID}), skipping start"
-        return
-    fi
-
-    log_info "Building qemu-controller binary..."
-    (cd "$PROJECT_DIR" && go build -o bin/qemu-controller ./cmd/qemu-controller)
-
-    if [[ ! -x "${PROJECT_DIR}/bin/qemu-controller" ]]; then
-        log_error "QEMU controller binary not found after build"
-        exit 1
-    fi
-
-    # Ensure sudo can run non-interactively
-    if ! sudo -n true 2>/dev/null; then
-        log_error "sudo requires a password; run 'sudo -v' once before running this script or configure passwordless sudo for this user"
-        exit 1
-    fi
-
-    # Always run qemu-controller with sudo to ensure access to tailscale/kubeadm
-    log_info "Starting qemu-controller in background with sudo..."
-    nohup sudo -n -E "${PROJECT_DIR}/bin/qemu-controller" \
-        --control-plane-ip "${TAILSCALE_IP}" \
-        --control-plane-hostname "${CLUSTER_NAME}-control-plane" \
-        > /tmp/stargate-qemu-controller.log 2>&1 &
-    QEMU_CONTROLLER_PID=$!
-
-    # Make log world-readable for non-root viewing
-    sudo -n chmod 644 /tmp/stargate-qemu-controller.log 2>/dev/null || true
-
-    sleep 2
-    if kill -0 "$QEMU_CONTROLLER_PID" 2>/dev/null; then
-        log_info "QEMU controller started with PID $QEMU_CONTROLLER_PID"
-        log_info "Logs: /tmp/stargate-qemu-controller.log"
-    else
-        log_error "QEMU controller failed to start. Check /tmp/stargate-qemu-controller.log"
-        exit 1
-    fi
-}
-
-start_controllers() {
-    start_azure_controller
-    start_qemu_controller
+        # QEMU profile (simulator-dc)
+        kubectl create namespace simulator-dc 2>/dev/null || true
+        log_info "Ensured namespace: simulator-dc"
+        kubectl apply -f - <<EOF
+apiVersion: stargate.io/v1alpha1
+kind: ProvisioningProfile
+metadata:
+    name: qemu-k8s-worker
+    namespace: simulator-dc
+spec:
+    kubernetesVersion: "1.34"
+    adminUsername: ubuntu
+EOF
+        log_info "Created ProvisioningProfile: qemu-k8s-worker"
 }
 
 # Print final summary
@@ -410,10 +335,7 @@ print_summary() {
     echo ""
     log_info "Cluster setup complete!"
     echo ""
-    [[ -n "$AZURE_CONTROLLER_PID" ]] && echo "Azure controller PID: $AZURE_CONTROLLER_PID"
-    [[ -n "$QEMU_CONTROLLER_PID" ]] && echo "QEMU controller PID: $QEMU_CONTROLLER_PID"
-    echo "Azure controller logs: /tmp/stargate-azure-controller.log"
-    echo "QEMU controller logs: /tmp/stargate-qemu-controller.log"
+    echo "Controllers are not started by this script. Use make targets to build/run them."
     echo ""
 }
 
@@ -436,7 +358,6 @@ main() {
     verify_cluster
     install_crds
     create_secrets
-    start_controllers
     print_summary
 }
 
