@@ -261,6 +261,11 @@ func (r *OperationReconciler) bootstrapServer(ctx context.Context, server *api.S
 	// Get router IP for SSH proxy (empty for router itself)
 	routerIP := server.Spec.RouterIP
 
+	// Delete existing K8s Node object if it exists (for repave)
+	if err := r.deleteNodeIfExists(ctx, server.Name); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to delete existing node (continuing anyway)", "node", server.Name)
+	}
+
 	// Get control plane Tailscale IP if not set
 	controlPlaneIP := r.ControlPlaneTailscaleIP
 	if controlPlaneIP == "" {
@@ -537,4 +542,27 @@ func (r *OperationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&api.Operation{}).
 		Complete(r)
+}
+
+// deleteNodeIfExists removes a Kubernetes Node object if it exists (for repave operations)
+func (r *OperationReconciler) deleteNodeIfExists(ctx context.Context, nodeName string) error {
+	logger := log.FromContext(ctx)
+
+	node := &corev1.Node{}
+	if err := r.Get(ctx, client.ObjectKey{Name: nodeName}, node); err != nil {
+		if client.IgnoreNotFound(err) != nil {
+			return err
+		}
+		// Node doesn't exist, nothing to delete
+		return nil
+	}
+
+	logger.Info("Deleting existing node for repave", "node", nodeName)
+	if err := r.Delete(ctx, node); err != nil {
+		return fmt.Errorf("delete node %s: %w", nodeName, err)
+	}
+
+	// Wait briefly for node deletion to propagate
+	time.Sleep(2 * time.Second)
+	return nil
 }

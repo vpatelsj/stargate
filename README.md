@@ -176,19 +176,19 @@ This builds `bin/azure-controller` and `bin/qemu-controller`, then starts them (
 
 Create an `Operation` for each VM to trigger the bootstrap:
 
-#### For Azure VMs (use same `DEPLOY_NUM`):
+#### For Azure VMs:
 
 ```bash
-for i in 1 2 3; do
+for server in $(kubectl get servers -n azure-dc -o jsonpath='{.items[*].metadata.name}'); do
 kubectl apply -f - <<EOF
 apiVersion: stargate.io/v1alpha1
 kind: Operation
 metadata:
-  name: bootstrap-vm$DEPLOY_NUM-$i
+  name: bootstrap-${server}
   namespace: azure-dc
 spec:
   serverRef:
-    name: stargate-azure-vm$DEPLOY_NUM-$i
+    name: ${server}
   provisioningProfileRef:
     name: azure-k8s-worker
   operation: repave
@@ -199,16 +199,16 @@ done
 #### For QEMU VMs:
 
 ```bash
-for i in 1 2; do
+for server in $(kubectl get servers -n simulator-dc -o jsonpath='{.items[*].metadata.name}'); do
 kubectl apply -f - <<EOF
 apiVersion: stargate.io/v1alpha1
 kind: Operation
 metadata:
-  name: bootstrap-qemu-vm-$i
+  name: bootstrap-${server}
   namespace: simulator-dc
 spec:
   serverRef:
-    name: stargate-qemu-vm-$i
+    name: ${server}
   provisioningProfileRef:
     name: qemu-k8s-worker
   operation: repave
