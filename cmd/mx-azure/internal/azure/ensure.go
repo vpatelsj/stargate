@@ -571,3 +571,187 @@ func (c *Clients) ProvisionAll(ctx context.Context, cfg VMConfig) (*ProvisionAll
 
 	return result, nil
 }
+
+// ResourceStatus represents the existence status of a resource
+type ResourceStatus struct {
+	Name   string
+	Exists bool
+	ID     string
+	Extra  map[string]string // Additional info like IP addresses
+}
+
+// ClusterStatus contains the status of all resources in a cluster
+type ClusterStatus struct {
+	ResourceGroup ResourceStatus
+	NSG           ResourceStatus
+	VNet          ResourceStatus
+	Subnet        ResourceStatus
+	PublicIP      ResourceStatus
+	NIC           ResourceStatus
+	VM            ResourceStatus
+}
+
+// GetStatus checks which resources exist and returns their status
+func (c *Clients) GetStatus(ctx context.Context, cfg VMConfig) (*ClusterStatus, error) {
+	log := c.Logger.With("operation", "GetStatus", "resourceGroup", cfg.ResourceGroup)
+	status := &ClusterStatus{}
+
+	// Check Resource Group
+	log.Debug("checking resource group")
+	rgResp, err := c.ResourceGroups.Get(ctx, cfg.ResourceGroup, nil)
+	if err == nil {
+		status.ResourceGroup = ResourceStatus{
+			Name:   cfg.ResourceGroup,
+			Exists: true,
+			ID:     *rgResp.ID,
+		}
+	} else if isNotFound(err) {
+		status.ResourceGroup = ResourceStatus{Name: cfg.ResourceGroup, Exists: false}
+		// If RG doesn't exist, nothing else can exist
+		return status, nil
+	} else {
+		return nil, fmt.Errorf("failed to get resource group: %w", err)
+	}
+
+	// Check NSG
+	log.Debug("checking NSG")
+	nsgResp, err := c.SecurityGroups.Get(ctx, cfg.ResourceGroup, cfg.NSGName, nil)
+	if err == nil {
+		status.NSG = ResourceStatus{
+			Name:   cfg.NSGName,
+			Exists: true,
+			ID:     *nsgResp.ID,
+		}
+	} else if isNotFound(err) {
+		status.NSG = ResourceStatus{Name: cfg.NSGName, Exists: false}
+	} else {
+		return nil, fmt.Errorf("failed to get NSG: %w", err)
+	}
+
+	// Check VNet
+	log.Debug("checking VNet")
+	vnetResp, err := c.VirtualNetworks.Get(ctx, cfg.ResourceGroup, cfg.VNetName, nil)
+	if err == nil {
+		status.VNet = ResourceStatus{
+			Name:   cfg.VNetName,
+			Exists: true,
+			ID:     *vnetResp.ID,
+		}
+	} else if isNotFound(err) {
+		status.VNet = ResourceStatus{Name: cfg.VNetName, Exists: false}
+	} else {
+		return nil, fmt.Errorf("failed to get VNet: %w", err)
+	}
+
+	// Check Subnet
+	log.Debug("checking Subnet")
+	subnetResp, err := c.Subnets.Get(ctx, cfg.ResourceGroup, cfg.VNetName, cfg.SubnetName, nil)
+	if err == nil {
+		status.Subnet = ResourceStatus{
+			Name:   cfg.SubnetName,
+			Exists: true,
+			ID:     *subnetResp.ID,
+		}
+	} else if isNotFound(err) {
+		status.Subnet = ResourceStatus{Name: cfg.SubnetName, Exists: false}
+	} else {
+		return nil, fmt.Errorf("failed to get Subnet: %w", err)
+	}
+
+	// Check Public IP
+	log.Debug("checking Public IP")
+	pipResp, err := c.PublicIPs.Get(ctx, cfg.ResourceGroup, cfg.PublicIPName, nil)
+	if err == nil {
+		extra := make(map[string]string)
+		if pipResp.Properties.IPAddress != nil {
+			extra["ipAddress"] = *pipResp.Properties.IPAddress
+		}
+		status.PublicIP = ResourceStatus{
+			Name:   cfg.PublicIPName,
+			Exists: true,
+			ID:     *pipResp.ID,
+			Extra:  extra,
+		}
+	} else if isNotFound(err) {
+		status.PublicIP = ResourceStatus{Name: cfg.PublicIPName, Exists: false}
+	} else {
+		return nil, fmt.Errorf("failed to get Public IP: %w", err)
+	}
+
+	// Check NIC
+	log.Debug("checking NIC")
+	nicResp, err := c.Interfaces.Get(ctx, cfg.ResourceGroup, cfg.NICName, nil)
+	if err == nil {
+		extra := make(map[string]string)
+		if len(nicResp.Properties.IPConfigurations) > 0 &&
+			nicResp.Properties.IPConfigurations[0].Properties.PrivateIPAddress != nil {
+			extra["privateIP"] = *nicResp.Properties.IPConfigurations[0].Properties.PrivateIPAddress
+		}
+		status.NIC = ResourceStatus{
+			Name:   cfg.NICName,
+			Exists: true,
+			ID:     *nicResp.ID,
+			Extra:  extra,
+		}
+	} else if isNotFound(err) {
+		status.NIC = ResourceStatus{Name: cfg.NICName, Exists: false}
+	} else {
+		return nil, fmt.Errorf("failed to get NIC: %w", err)
+	}
+
+	// Check VM
+	log.Debug("checking VM")
+	vmResp, err := c.VirtualMachines.Get(ctx, cfg.ResourceGroup, cfg.VMName, nil)
+	if err == nil {
+		extra := make(map[string]string)
+		if vmResp.Properties.ProvisioningState != nil {
+			extra["provisioningState"] = *vmResp.Properties.ProvisioningState
+		}
+		status.VM = ResourceStatus{
+			Name:   cfg.VMName,
+			Exists: true,
+			ID:     *vmResp.ID,
+			Extra:  extra,
+		}
+	} else if isNotFound(err) {
+		status.VM = ResourceStatus{Name: cfg.VMName, Exists: false}
+	} else {
+		return nil, fmt.Errorf("failed to get VM: %w", err)
+	}
+
+	return status, nil
+}
+
+// DeleteResourceGroup deletes the resource group and all its contents.
+// This is a destructive operation that cannot be undone.
+func (c *Clients) DeleteResourceGroup(ctx context.Context, resourceGroup string) error {
+	log := c.Logger.With("operation", "DeleteResourceGroup", "resourceGroup", resourceGroup)
+
+	// Check if resource group exists first
+	log.Info("checking if resource group exists")
+	_, err := c.ResourceGroups.Get(ctx, resourceGroup, nil)
+	if err != nil {
+		if isNotFound(err) {
+			log.Info("resource group does not exist, nothing to delete")
+			return nil
+		}
+		return fmt.Errorf("failed to check resource group: %w", err)
+	}
+
+	// Start deletion
+	log.Info("deleting resource group (this may take several minutes)")
+	poller, err := c.ResourceGroups.BeginDelete(ctx, resourceGroup, nil)
+	if err != nil {
+		return fmt.Errorf("failed to start resource group deletion: %w", err)
+	}
+
+	// Wait for completion
+	log.Info("waiting for deletion to complete")
+	_, err = poller.PollUntilDone(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to complete resource group deletion: %w", err)
+	}
+
+	log.Info("resource group deleted successfully")
+	return nil
+}
