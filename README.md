@@ -425,6 +425,237 @@ bin/mx-azure destroy \
   --yes
 ```
 
+## Add External Workers to an Existing AKS Cluster
+
+You can add external VMs as worker nodes to an existing AKS cluster. The controller automatically:
+- Detects the API server URL from kubeconfig
+- Extracts the CA certificate from kubeconfig  
+- Creates ServiceAccount tokens programmatically for each node bootstrap
+
+### Prerequisites
+
+- An existing AKS cluster
+- Azure CLI authenticated (`az login`)
+- Tailscale installed and authenticated
+- SSH key pair for worker VM access
+
+### 1. Get AKS Cluster Kubeconfig
+
+```bash
+# Set your AKS cluster details
+export AKS_RESOURCE_GROUP="your-aks-resource-group"
+export AKS_CLUSTER_NAME="your-aks-cluster-name"
+export AZURE_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+# Get admin kubeconfig (saves to ~/.kube/config or use --file to save elsewhere)
+az aks get-credentials --resource-group $AKS_RESOURCE_GROUP --name $AKS_CLUSTER_NAME --admin
+
+# If you saved kubeconfig to a different file, set KUBECONFIG
+# export KUBECONFIG=~/.kube/your-aks-cluster.conf
+```
+
+### 2. Create ServiceAccount for Node Bootstrap
+
+The controller uses the Kubernetes TokenRequest API to generate short-lived tokens for each node bootstrap.
+Create the ServiceAccount that will be used:
+
+```bash
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubelet-bootstrap
+  namespace: kube-system
+EOF
+```
+
+### 3. Create RBAC for Node Bootstrap
+
+```bash
+# Grant the ServiceAccount permissions to bootstrap nodes
+kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubelet-bootstrap
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:node-bootstrapper
+subjects:
+- kind: ServiceAccount
+  name: kubelet-bootstrap
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubelet-bootstrap-node-autoapprove
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:certificates.k8s.io:certificatesigningrequests:nodeclient
+subjects:
+- kind: ServiceAccount
+  name: kubelet-bootstrap
+  namespace: kube-system
+EOF
+```
+
+### 4. Deploy Tailscale Subnet Router in AKS (Optional)
+
+If you want to access the AKS pod network from your Tailscale network:
+
+```bash
+# Create namespace and auth secret
+kubectl create namespace tailscale
+kubectl create secret generic tailscale-auth \
+  --namespace tailscale \
+  --from-literal=authkey="$TAILSCALE_AUTH_KEY"
+
+# Get the pod and service CIDRs
+POD_CIDR=$(az aks show -g $AKS_RESOURCE_GROUP -n $AKS_CLUSTER_NAME --query "networkProfile.podCidr" -o tsv)
+SERVICE_CIDR=$(az aks show -g $AKS_RESOURCE_GROUP -n $AKS_CLUSTER_NAME --query "networkProfile.serviceCidr" -o tsv)
+echo "Pod CIDR: $POD_CIDR, Service CIDR: $SERVICE_CIDR"
+
+# Deploy Tailscale subnet router
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tailscale-router
+  namespace: tailscale
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tailscale-router
+  template:
+    metadata:
+      labels:
+        app: tailscale-router
+    spec:
+      serviceAccountName: default
+      containers:
+      - name: tailscale
+        image: tailscale/tailscale:latest
+        securityContext:
+          capabilities:
+            add: ["NET_ADMIN"]
+        env:
+        - name: TS_AUTHKEY
+          valueFrom:
+            secretKeyRef:
+              name: tailscale-auth
+              key: authkey
+        - name: TS_ROUTES
+          value: "${POD_CIDR},${SERVICE_CIDR}"
+        - name: TS_ACCEPT_ROUTES
+          value: "true"
+        - name: TS_USERSPACE
+          value: "false"
+EOF
+```
+
+### 5. Provision Worker VMs
+
+```bash
+export DEPLOY_NUM=$(date +%y%m%d%H%M)
+
+bin/prep-dc-inventory \
+  --provider azure \
+  --subscription-id "$AZURE_SUBSCRIPTION_ID" \
+  --resource-group stargate-vapa-aks-workers-$DEPLOY_NUM \
+  --location canadacentral \
+  --zone 1 \
+  --vnet-name stargate-aks-vnet \
+  --vnet-cidr 10.60.0.0/16 \
+  --subnet-name stargate-aks-subnet \
+  --subnet-cidr 10.60.1.0/24 \
+  --router-name stargate-aks-router-$DEPLOY_NUM \
+  --vm stargate-aks-vm$DEPLOY_NUM-1 \
+  --vm stargate-aks-vm$DEPLOY_NUM-2 \
+  --vm-size Standard_D2s_v5 \
+  --admin-username adminuser \
+  --ssh-public-key "$HOME/.ssh/id_rsa.pub" \
+  --tailscale-auth-key "$TAILSCALE_AUTH_KEY" \
+  --tailscale-client-id "$TAILSCALE_CLIENT_ID" \
+  --tailscale-client-secret "$TAILSCALE_CLIENT_SECRET" \
+  --kubeconfig ~/.kube/config \
+  --namespace aks-workers
+```
+
+### 6. Create Secrets and ProvisioningProfile
+
+```bash
+# Create namespace
+kubectl create namespace aks-workers
+
+# Create SSH credentials secret
+kubectl create secret generic aks-ssh-credentials \
+  --namespace aks-workers \
+  --from-literal=username=adminuser \
+  --from-file=privateKey=$HOME/.ssh/id_rsa
+
+# Create ProvisioningProfile
+kubectl apply -f - <<EOF
+apiVersion: stargate.io/v1alpha1
+kind: ProvisioningProfile
+metadata:
+  name: aks-worker
+  namespace: aks-workers
+spec:
+  kubernetesVersion: "1.29"
+  containerRuntime: containerd
+  sshCredentialsSecretRef: aks-ssh-credentials
+  adminUsername: adminuser
+EOF
+```
+
+### 7. Start the Controller in AKS Mode
+
+The controller automatically detects the API server and CA certificate from the kubeconfig,
+and creates ServiceAccount tokens for each node bootstrap.
+
+```bash
+bin/azure-controller \
+  --control-plane-mode=aks \
+  --aks-cluster-name="$AKS_CLUSTER_NAME" \
+  --aks-resource-group="$AKS_RESOURCE_GROUP" \
+  --aks-subscription-id="$AZURE_SUBSCRIPTION_ID" \
+  --aks-vm-resource-group="stargate-vapa-aks-workers-$DEPLOY_NUM" \
+  --admin-username=adminuser &
+```
+
+### 8. Bootstrap Workers
+
+```bash
+for server in $(kubectl get servers -n aks-workers -o jsonpath='{.items[*].metadata.name}'); do
+  kubectl apply -f - <<EOF
+apiVersion: stargate.io/v1alpha1
+kind: Operation
+metadata:
+  name: bootstrap-${server}
+  namespace: aks-workers
+spec:
+  serverRef:
+    name: ${server}
+  provisioningProfileRef:
+    name: aks-worker
+  operation: repave
+EOF
+done
+```
+
+### 9. Verify Workers Joined
+
+```bash
+kubectl get nodes -o wide
+kubectl get operations -n aks-workers
+```
+
+The external VMs should appear as nodes in your AKS cluster with labels indicating they are managed by Stargate.
+
 ## Cleanup
 
 ### Full Cleanup

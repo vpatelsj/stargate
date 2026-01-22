@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,9 +13,11 @@ import (
 	"strings"
 	"time"
 
+	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -31,11 +34,24 @@ type OperationReconciler struct {
 	KindContainerName       string
 	ControlPlaneTailscaleIP string
 	ControlPlaneHostname    string
-	ControlPlaneMode        string // "kind" or "tailscale"
+	ControlPlaneMode        string // "kind", "tailscale", or "aks"
 	ControlPlaneSSHUser     string // SSH user for tailscale mode
 	SSHPrivateKeyPath       string // Default SSH key path
 	SSHPort                 int
 	AdminUsername           string // Default admin username
+
+	// AKS configuration (for aks mode)
+	AKSAPIServer       string // AKS API server URL (auto-detected from kubeconfig if empty)
+	AKSClusterName     string // Cluster name for node labels
+	AKSResourceGroup   string // Cluster resource group for node labels
+	AKSClusterDNS      string // Cluster DNS IP (default 10.0.0.10)
+	AKSSubscriptionID  string // Azure subscription ID for provider-id
+	AKSVMResourceGroup string // Resource group containing the worker VMs
+
+	// Runtime fields (populated automatically)
+	Clientset    *kubernetes.Clientset // For creating SA tokens
+	CACertBase64 string                // Fetched from rest config
+	RestConfig   interface{}           // Store rest.Config for CA cert extraction
 }
 
 // bootstrapConfig holds resolved configuration for a bootstrap operation
@@ -268,24 +284,36 @@ func (r *OperationReconciler) bootstrapServer(ctx context.Context, server *api.S
 		log.FromContext(ctx).Error(err, "Failed to delete existing node (continuing anyway)", "node", server.Name)
 	}
 
-	// Get control plane Tailscale IP if not set
-	controlPlaneIP := r.ControlPlaneTailscaleIP
-	if controlPlaneIP == "" {
-		var err error
-		controlPlaneIP, err = r.detectControlPlaneTailscaleIP()
+	var script string
+
+	// AKS mode uses ServiceAccount token instead of kubeadm
+	if r.ControlPlaneMode == "aks" {
+		// Generate fresh SA token for this bootstrap
+		saToken, err := r.getOrCreateSAToken(ctx)
 		if err != nil {
-			return fmt.Errorf("detect control plane IP: %w", err)
+			return fmt.Errorf("get SA token for AKS bootstrap: %w", err)
 		}
-	}
+		script = r.buildAKSBootstrapScript(cfg.kubernetesVersion, target, server.Name, saToken)
+	} else {
+		// Get control plane Tailscale IP if not set
+		controlPlaneIP := r.ControlPlaneTailscaleIP
+		if controlPlaneIP == "" {
+			var err error
+			controlPlaneIP, err = r.detectControlPlaneTailscaleIP()
+			if err != nil {
+				return fmt.Errorf("detect control plane IP: %w", err)
+			}
+		}
 
-	// Generate kubeadm join command
-	joinCmd, err := r.generateKubeadmJoinCommand(controlPlaneIP)
-	if err != nil {
-		return fmt.Errorf("generate join command: %w", err)
-	}
+		// Generate kubeadm join command
+		joinCmd, err := r.generateKubeadmJoinCommand(controlPlaneIP)
+		if err != nil {
+			return fmt.Errorf("generate join command: %w", err)
+		}
 
-	// Build the bootstrap script with node's actual IP
-	script := r.buildBootstrapScript(controlPlaneIP, joinCmd, cfg.kubernetesVersion, target)
+		// Build the bootstrap script with node's actual IP
+		script = r.buildBootstrapScript(controlPlaneIP, joinCmd, cfg.kubernetesVersion, target)
+	}
 
 	// Run the script via SSH (via router proxy if routerIP is set)
 	return r.runRemoteBootstrap(ctx, target, routerIP, script, cfg)
@@ -521,6 +549,329 @@ echo "Bootstrap complete!"
 	)
 }
 
+// buildAKSBootstrapScript creates a bash script for AKS node join
+// This uses a ServiceAccount token (not bootstrap tokens) because AKS doesn't support TLS bootstrapping
+// It also sets provider-id so the Azure cloud-controller-manager recognizes the node
+func (r *OperationReconciler) buildAKSBootstrapScript(kubernetesVersion, nodeIP, vmName, saToken string) string {
+	// Default values
+	clusterDNS := r.AKSClusterDNS
+	if clusterDNS == "" {
+		clusterDNS = "10.0.0.10"
+	}
+
+	clusterName := r.AKSClusterName
+	if clusterName == "" {
+		clusterName = "aks-cluster"
+	}
+
+	resourceGroup := r.AKSResourceGroup
+	if resourceGroup == "" {
+		resourceGroup = "aks-rg"
+	}
+
+	subscriptionID := r.AKSSubscriptionID
+	vmResourceGroup := r.AKSVMResourceGroup
+	if vmResourceGroup == "" {
+		vmResourceGroup = resourceGroup
+	}
+
+	// Construct Azure provider-id so cloud-controller-manager won't delete the node
+	providerID := fmt.Sprintf("azure:///subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/virtualMachines/%s",
+		subscriptionID, vmResourceGroup, vmName)
+
+	return fmt.Sprintf(`#!/bin/bash
+set -ex
+
+NODE_NAME=$(hostname)
+NODE_IP="%s"
+SA_TOKEN="%s"
+API_SERVER="%s"
+CA_CERT_BASE64="%s"
+CLUSTER_DNS="%s"
+CLUSTER_NAME="%s"
+RESOURCE_GROUP="%s"
+PROVIDER_ID="%s"
+
+echo "=== AKS Node Join for $NODE_NAME ==="
+echo "Provider ID: $PROVIDER_ID"
+
+# Link resolv.conf
+ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf || true
+
+# Create required directories
+mkdir -p /var/lib/cni
+mkdir -p /opt/cni/bin
+mkdir -p /etc/cni/net.d
+mkdir -p /etc/kubernetes/volumeplugins
+mkdir -p /etc/kubernetes/certs
+mkdir -p /etc/containerd
+mkdir -p /usr/lib/systemd/system/kubelet.service.d
+mkdir -p /var/lib/kubelet
+
+# Install containerd
+echo "Installing containerd..."
+cat > /usr/lib/systemd/system/containerd.service <<'CONTAINERD_SVC'
+[Unit]
+Description=containerd container runtime
+Documentation=https://containerd.io
+After=network.target local-fs.target
+[Service]
+ExecStartPre=-/sbin/modprobe overlay
+ExecStart=/usr/bin/containerd
+Type=notify
+Delegate=yes
+KillMode=process
+Restart=always
+RestartSec=5
+LimitNPROC=infinity
+LimitCORE=infinity
+LimitNOFILE=infinity
+TasksMax=infinity
+OOMScoreAdjust=-999
+[Install]
+WantedBy=multi-user.target
+CONTAINERD_SVC
+
+cat > /etc/containerd/config.toml <<'CONTAINERD_CFG'
+version = 2
+oom_score = 0
+[plugins."io.containerd.grpc.v1.cri"]
+    sandbox_image = "mcr.microsoft.com/oss/kubernetes/pause:3.6"
+    [plugins."io.containerd.grpc.v1.cri".containerd]
+        default_runtime_name = "runc"
+        [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+            runtime_type = "io.containerd.runc.v2"
+        [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+            BinaryName = "/usr/bin/runc"
+            SystemdCgroup = true
+    [plugins."io.containerd.grpc.v1.cri".cni]
+        bin_dir = "/opt/cni/bin"
+        conf_dir = "/etc/cni/net.d"
+    [plugins."io.containerd.grpc.v1.cri".registry]
+        config_path = "/etc/containerd/certs.d"
+    [plugins."io.containerd.grpc.v1.cri".registry.headers]
+        X-Meta-Source-Client = ["azure/aks"]
+[metrics]
+    address = "0.0.0.0:10257"
+CONTAINERD_CFG
+
+# Sysctl settings for Kubernetes
+cat > /etc/sysctl.d/999-sysctl-aks.conf <<'SYSCTL_CFG'
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.forwarding = 1
+net.ipv6.conf.all.forwarding = 1
+net.bridge.bridge-nf-call-iptables = 1
+vm.overcommit_memory = 1
+kernel.panic = 10
+kernel.panic_on_oops = 1
+kernel.pid_max = 4194304
+fs.inotify.max_user_watches = 1048576
+fs.inotify.max_user_instances = 1024
+net.ipv4.tcp_retries2 = 8
+net.core.message_burst = 80
+net.core.message_cost = 40
+net.core.somaxconn = 16384
+net.ipv4.tcp_max_syn_backlog = 16384
+net.ipv4.neigh.default.gc_thresh1 = 4096
+net.ipv4.neigh.default.gc_thresh2 = 8192
+net.ipv4.neigh.default.gc_thresh3 = 16384
+SYSCTL_CFG
+
+# Write CA certificate
+echo "Writing CA certificate..."
+KUBE_CA_PATH="/etc/kubernetes/certs/ca.crt"
+touch "${KUBE_CA_PATH}"
+chmod 0600 "${KUBE_CA_PATH}"
+chown root:root "${KUBE_CA_PATH}"
+echo "${CA_CERT_BASE64}" | base64 -d > "${KUBE_CA_PATH}"
+
+# Create kubelet config.yaml
+# IMPORTANT: rotateCertificates and serverTLSBootstrap must be false for SA token auth
+cat > /var/lib/kubelet/config.yaml <<KUBELET_CONFIG
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+authentication:
+  anonymous:
+    enabled: false
+  webhook:
+    cacheTTL: 0s
+    enabled: true
+  x509:
+    clientCAFile: /etc/kubernetes/certs/ca.crt
+authorization:
+  mode: Webhook
+  webhook:
+    cacheAuthorizedTTL: 0s
+    cacheUnauthorizedTTL: 0s
+cgroupDriver: systemd
+clusterDNS:
+- ${CLUSTER_DNS}
+clusterDomain: cluster.local
+cpuManagerReconcilePeriod: 0s
+evictionPressureTransitionPeriod: 0s
+fileCheckFrequency: 0s
+healthzBindAddress: 127.0.0.1
+healthzPort: 10248
+httpCheckFrequency: 0s
+imageMinimumGCAge: 0s
+nodeStatusReportFrequency: 0s
+nodeStatusUpdateFrequency: 0s
+rotateCertificates: false
+serverTLSBootstrap: false
+runtimeRequestTimeout: 0s
+shutdownGracePeriod: 0s
+shutdownGracePeriodCriticalPods: 0s
+streamingConnectionIdleTimeout: 0s
+syncFrequency: 0s
+volumeStatsAggPeriod: 0s
+KUBELET_CONFIG
+
+# Create kubeconfig with ServiceAccount token (direct auth, not bootstrap)
+cat > /var/lib/kubelet/kubeconfig <<KUBECONFIG
+apiVersion: v1
+kind: Config
+clusters:
+- name: aks
+  cluster:
+    certificate-authority: /etc/kubernetes/certs/ca.crt
+    server: "${API_SERVER}"
+users:
+- name: kubelet
+  user:
+    token: "${SA_TOKEN}"
+contexts:
+- context:
+    cluster: aks
+    user: kubelet
+  name: aks
+current-context: aks
+KUBECONFIG
+
+chmod 0600 /var/lib/kubelet/kubeconfig
+
+# NOTE: kubelet.service is created AFTER package installation to prevent apt from overwriting it
+
+# Create bridge CNI config
+# Use a unique subnet per node (based on last octet of node IP or just use .1.0)
+cat > /etc/cni/net.d/10-bridge.conf <<'CNI_CONFIG'
+{
+    "cniVersion": "0.3.1",
+    "name": "bridge",
+    "type": "bridge",
+    "bridge": "cni0",
+    "isGateway": true,
+    "ipMasq": true,
+    "ipam": {
+        "type": "host-local",
+        "subnet": "10.244.1.0/24",
+        "routes": [{ "dst": "0.0.0.0/0" }]
+    }
+}
+CNI_CONFIG
+
+# Create empty azure.json for cloud-provider
+AZURE_JSON_PATH="/etc/kubernetes/azure.json"
+touch "${AZURE_JSON_PATH}"
+chmod 0600 "${AZURE_JSON_PATH}"
+chown root:root "${AZURE_JSON_PATH}"
+
+# Install containerd if not present
+if ! command -v containerd >/dev/null; then
+  echo "Installing containerd..."
+  apt-get update
+  apt-get install -y apt-transport-https ca-certificates curl gnupg
+  mkdir -p /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
+  apt-get update
+  apt-get install -y containerd.io
+fi
+
+# Install kubelet if not present
+if ! command -v kubelet >/dev/null; then
+  echo "Installing kubelet..."
+  curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.33/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.33/deb/ /" > /etc/apt/sources.list.d/kubernetes.list
+  apt-get update
+  apt-get install -y kubelet kubectl
+  apt-mark hold kubelet kubectl
+fi
+
+# Install CNI plugins if not present
+if [ ! -f /opt/cni/bin/bridge ]; then
+  echo "Installing CNI plugins..."
+  CNI_VERSION="v1.3.0"
+  curl -L "https://github.com/containernetworking/plugins/releases/download/${CNI_VERSION}/cni-plugins-linux-amd64-${CNI_VERSION}.tgz" | tar -C /opt/cni/bin -xz
+fi
+
+# Load kernel modules
+modprobe overlay || true
+modprobe br_netfilter || true
+
+# Apply sysctl settings
+sysctl --system
+
+# NOW create kubelet.service AFTER all package installation to avoid it being overwritten
+# Write to /lib/systemd/system/ which is the canonical location on Ubuntu
+echo "Writing custom AKS kubelet.service..."
+cat > /lib/systemd/system/kubelet.service <<'KUBELET_SVC'
+[Unit]
+Description=Kubelet
+ConditionPathExists=/usr/bin/kubelet
+After=containerd.service
+[Service]
+Restart=always
+SuccessExitStatus=143
+EnvironmentFile=-/etc/default/kubelet
+ExecStartPre=/bin/bash -c "if [ $(mount | grep \"/var/lib/kubelet\" | wc -l) -le 0 ] ; then /bin/mount --bind /var/lib/kubelet /var/lib/kubelet ; fi"
+ExecStartPre=/bin/mount --make-shared /var/lib/kubelet
+ExecStartPre=-/sbin/ebtables -t nat --list
+ExecStartPre=-/sbin/iptables -t nat --numeric --list
+ExecStart=/usr/bin/kubelet \
+        --enable-server \
+        --v=2 \
+        --kubeconfig=/var/lib/kubelet/kubeconfig \
+        --config=/var/lib/kubelet/config.yaml \
+        --container-runtime-endpoint=unix:///run/containerd/containerd.sock \
+        --volume-plugin-dir=/etc/kubernetes/volumeplugins \
+        $KUBELET_EXTRA_ARGS
+[Install]
+WantedBy=multi-user.target
+KUBELET_SVC
+
+# Kubelet environment with provider-id and node labels
+cat > /etc/default/kubelet <<KUBELET_ENV
+KUBELET_EXTRA_ARGS=--provider-id=${PROVIDER_ID} --node-labels=kubernetes.azure.com/cluster=MC_${RESOURCE_GROUP}_${CLUSTER_NAME},kubernetes.azure.com/agentpool=stargate,kubernetes.azure.com/mode=user,kubernetes.azure.com/role=agent,kubernetes.azure.com/managed=false,kubernetes.azure.com/stargate=true
+KUBELET_ENV
+
+# Verify kubelet.service was written correctly
+if [ $(wc -c < /lib/systemd/system/kubelet.service) -lt 500 ]; then
+  echo "ERROR: kubelet.service seems too small, something went wrong"
+  cat /lib/systemd/system/kubelet.service
+  exit 1
+fi
+
+# Enable and start services
+echo "Starting containerd and kubelet..."
+systemctl daemon-reload
+systemctl enable --now containerd
+systemctl enable --now kubelet
+
+echo "=== AKS Node Join complete for $NODE_NAME ==="
+echo "Provider ID: $PROVIDER_ID"
+echo "The node should appear in the cluster shortly. Monitor with: kubectl get nodes"
+`,
+		nodeIP,
+		saToken,
+		r.AKSAPIServer,
+		r.CACertBase64,
+		clusterDNS,
+		clusterName,
+		resourceGroup,
+		providerID,
+	)
+}
+
 // runRemoteBootstrap executes the bootstrap script on the remote server via SSH
 func (r *OperationReconciler) runRemoteBootstrap(ctx context.Context, host, routerIP, script string, cfg *bootstrapConfig) error {
 	sshArgs := []string{
@@ -604,5 +955,60 @@ func (r *OperationReconciler) deleteNodeIfExists(ctx context.Context, nodeName s
 
 	// Wait briefly for node deletion to propagate
 	time.Sleep(2 * time.Second)
+	return nil
+}
+
+// getOrCreateSAToken creates a new token for the kubelet-bootstrap ServiceAccount
+func (r *OperationReconciler) getOrCreateSAToken(ctx context.Context) (string, error) {
+	if r.Clientset == nil {
+		return "", fmt.Errorf("kubernetes clientset not initialized")
+	}
+
+	// Create a token request for the kubelet-bootstrap SA
+	// Token is valid for 24 hours (AKS limits token duration)
+	expirationSeconds := int64(86400)
+	tokenRequest := &authenticationv1.TokenRequest{
+		Spec: authenticationv1.TokenRequestSpec{
+			ExpirationSeconds: &expirationSeconds,
+		},
+	}
+
+	result, err := r.Clientset.CoreV1().ServiceAccounts("kube-system").CreateToken(
+		ctx,
+		"kubelet-bootstrap",
+		tokenRequest,
+		metav1.CreateOptions{},
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to create SA token: %w", err)
+	}
+
+	return result.Status.Token, nil
+}
+
+// getCACertBase64 returns the base64-encoded CA certificate from the rest config
+func (r *OperationReconciler) getCACertBase64() string {
+	return r.CACertBase64
+}
+
+// InitializeAKSCredentials fetches and caches AKS credentials from the kubeconfig
+func (r *OperationReconciler) InitializeAKSCredentials(cfg interface{}) error {
+	// Type assert to *rest.Config - we use interface{} to avoid import cycles
+	// The actual rest.Config is passed from main.go
+	type restConfigWithCA interface {
+		GetCAData() []byte
+		GetHost() string
+	}
+
+	if rc, ok := cfg.(restConfigWithCA); ok {
+		caData := rc.GetCAData()
+		if len(caData) > 0 {
+			r.CACertBase64 = base64.StdEncoding.EncodeToString(caData)
+		}
+		if r.AKSAPIServer == "" {
+			r.AKSAPIServer = rc.GetHost()
+		}
+	}
+
 	return nil
 }

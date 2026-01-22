@@ -1,12 +1,14 @@
 package main
 
 import (
+	"encoding/base64"
 	"flag"
 	"os"
 	"path/filepath"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -41,17 +43,33 @@ func main() {
 	var sshPort int
 	var adminUsername string
 
+	// AKS configuration flags
+	var aksAPIServer string
+	var aksClusterName string
+	var aksResourceGroup string
+	var aksClusterDNS string
+	var aksSubscriptionID string
+	var aksVMResourceGroup string
+
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8081", "The address the metric endpoint binds to.")
 
 	// Bootstrap configuration flags
 	flag.StringVar(&kindContainerName, "kind-container", "stargate-demo-control-plane", "Name of the Kind control plane Docker container.")
 	flag.StringVar(&controlPlaneTailscaleIP, "control-plane-ip", "", "Tailscale IP or hostname of the control plane (auto-detected for Kind if not provided).")
 	flag.StringVar(&controlPlaneHostname, "control-plane-hostname", "stargate-demo-control-plane", "Hostname of the control plane.")
-	flag.StringVar(&controlPlaneMode, "control-plane-mode", "kind", "Mode to access control plane: 'kind' (docker exec) or 'tailscale' (SSH via tailscale).")
+	flag.StringVar(&controlPlaneMode, "control-plane-mode", "kind", "Mode to access control plane: 'kind' (docker exec), 'tailscale' (SSH via tailscale), or 'aks' (AKS TLS bootstrap).")
 	flag.StringVar(&controlPlaneSSHUser, "control-plane-ssh-user", "azureuser", "SSH user for control plane when using tailscale mode.")
 	flag.StringVar(&sshPrivateKeyPath, "ssh-private-key", filepath.Join(os.Getenv("HOME"), ".ssh", "id_rsa"), "Path to SSH private key for server bootstrap.")
 	flag.IntVar(&sshPort, "ssh-port", 22, "SSH port for server bootstrap.")
 	flag.StringVar(&adminUsername, "admin-username", "ubuntu", "Admin username for SSH.")
+
+	// AKS configuration flags (SA token and CA cert are fetched automatically from kubeconfig)
+	flag.StringVar(&aksAPIServer, "aks-api-server", "", "AKS API server URL (auto-detected from kubeconfig if empty).")
+	flag.StringVar(&aksClusterName, "aks-cluster-name", "", "AKS cluster name (used for node labels).")
+	flag.StringVar(&aksResourceGroup, "aks-resource-group", "", "AKS cluster resource group (used for node labels).")
+	flag.StringVar(&aksClusterDNS, "aks-cluster-dns", "10.0.0.10", "AKS cluster DNS service IP.")
+	flag.StringVar(&aksSubscriptionID, "aks-subscription-id", "", "Azure subscription ID for provider-id.")
+	flag.StringVar(&aksVMResourceGroup, "aks-vm-resource-group", "", "Resource group containing the worker VMs.")
 
 	opts := zap.Options{
 		Development: true,
@@ -61,7 +79,9 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	restConfig := ctrl.GetConfigOrDie()
+
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress: probeAddr,
@@ -69,6 +89,24 @@ func main() {
 	if err != nil {
 		setupLog.Error(err, "unable to create manager")
 		os.Exit(1)
+	}
+
+	// Create kubernetes clientset for SA token creation
+	clientset, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		setupLog.Error(err, "unable to create kubernetes clientset")
+		os.Exit(1)
+	}
+
+	// Extract CA cert from rest config
+	var caCertBase64 string
+	if len(restConfig.CAData) > 0 {
+		caCertBase64 = base64.StdEncoding.EncodeToString(restConfig.CAData)
+	}
+
+	// Auto-detect API server from rest config if not provided
+	if aksAPIServer == "" && controlPlaneMode == "aks" {
+		aksAPIServer = restConfig.Host
 	}
 
 	// Set up Operation controller
@@ -83,6 +121,14 @@ func main() {
 		SSHPrivateKeyPath:       sshPrivateKeyPath,
 		SSHPort:                 sshPort,
 		AdminUsername:           adminUsername,
+		AKSAPIServer:            aksAPIServer,
+		AKSClusterName:          aksClusterName,
+		AKSResourceGroup:        aksResourceGroup,
+		AKSClusterDNS:           aksClusterDNS,
+		AKSSubscriptionID:       aksSubscriptionID,
+		AKSVMResourceGroup:      aksVMResourceGroup,
+		Clientset:               clientset,
+		CACertBase64:            caCertBase64,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Operation")
 		os.Exit(1)
