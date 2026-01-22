@@ -226,6 +226,205 @@ kubectl get servers -n azure-dc       # For Azure
 kubectl get servers -n simulator-dc   # For QEMU
 ```
 
+## Deploy MX Cluster in Azure
+
+The `mx-azure` tool provides a standalone way to deploy an MX cluster directly in Azure with a single VM that bootstraps as a Kubernetes control plane.
+
+### Prerequisites
+
+- Azure CLI authenticated (`az login`)
+- Tailscale installed and authenticated
+- SSH key pair (`~/.ssh/id_rsa.pub`)
+
+### 1. Set Environment Variables
+
+```bash
+export AZURE_SUBSCRIPTION_ID="..."           # Azure subscription ID
+export TAILSCALE_AUTH_KEY="tskey-auth-..."   # Tailscale auth key for the VM
+```
+
+### 2. Build the Tool
+
+```bash
+make build
+```
+
+### 3. Provision the MX Cluster
+
+```bash
+bin/mx-azure provision \
+  --subscription-id "$AZURE_SUBSCRIPTION_ID" \
+  --location canadacentral \
+  --zone 1 \
+  --resource-group stargate-vapa-mx-cluster \
+  --vnet-name mx-vnet \
+  --vnet-address-space 10.0.0.0/16 \
+  --subnet-name mx-subnet \
+  --subnet-prefix 10.0.1.0/24 \
+  --vm-name stargate-vapa-mx-cp \
+  --vm-size Standard_D2s_v5 \
+  --admin-username azureuser \
+  --ssh-public-key-path ~/.ssh/id_rsa.pub \
+  --tailscale-auth-key "$TAILSCALE_AUTH_KEY" \
+  --kubernetes-version 1.29
+```
+
+This command:
+- Creates a resource group with VNet, subnet, NSG, and public IP
+- Provisions a VM with cloud-init that:
+  - Installs Tailscale and joins your tailnet
+  - Installs kubeadm, kubelet, and kubectl
+  - Bootstraps a single-node Kubernetes cluster
+- Adds an SSH config entry for easy access via Tailscale
+
+### 4. Verify the Cluster
+
+Wait for the VM to appear in [Tailscale Admin Console](https://login.tailscale.com/admin/machines), then verify:
+
+```bash
+# Check bootstrap logs
+tailscale ssh azureuser@stargate-vapa-mx-cp -- sudo tail -f /var/log/mx-bootstrap.log
+
+# Verify Kubernetes is ready
+tailscale ssh azureuser@stargate-vapa-mx-cp -- sudo kubectl get nodes
+```
+
+### 5. Access the Cluster Locally (Optional)
+
+Copy the kubeconfig to your local machine:
+
+```bash
+tailscale ssh azureuser@stargate-vapa-mx-cp -- sudo cat /etc/kubernetes/admin.conf > ~/.kube/mx-azure.conf
+export KUBECONFIG=~/.kube/mx-azure.conf
+kubectl get nodes
+```
+
+### 6. Add Worker Nodes to the MX Cluster
+
+You can add worker nodes using `prep-dc-inventory` and the azure-controller.
+
+#### 6a. Provision Worker VMs
+
+This command provisions worker VMs and automatically installs Stargate CRDs on the MX cluster:
+
+```bash
+export DEPLOY_NUM=$(date +%y%m%d%H%M)
+
+bin/prep-dc-inventory \
+  --provider azure \
+  --subscription-id "$AZURE_SUBSCRIPTION_ID" \
+  --resource-group stargate-vapa-workers-$DEPLOY_NUM \
+  --location canadacentral \
+  --zone 1 \
+  --vnet-name stargate-vnet \
+  --vnet-cidr 10.50.0.0/16 \
+  --subnet-name stargate-subnet \
+  --subnet-cidr 10.50.1.0/24 \
+  --router-name stargate-azure-router-$DEPLOY_NUM \
+  --vm stargate-azure-vm$DEPLOY_NUM-1 \
+  --vm stargate-azure-vm$DEPLOY_NUM-2 \
+  --vm stargate-azure-vm$DEPLOY_NUM-3 \
+  --vm-size Standard_D2s_v5 \
+  --admin-username adminuser \
+  --ssh-public-key "$HOME/.ssh/id_rsa.pub" \
+  --tailscale-auth-key "$TAILSCALE_AUTH_KEY" \
+  --tailscale-client-id "$TAILSCALE_CLIENT_ID" \
+  --tailscale-client-secret "$TAILSCALE_CLIENT_SECRET" \
+  --kubeconfig ~/.kube/mx-azure.conf \
+  --namespace azure-dc
+```
+
+#### 6b. Create Secrets and ProvisioningProfile
+
+```bash
+# Create secrets for SSH access
+kubectl create secret generic azure-ssh-credentials \
+  --namespace azure-dc \
+  --from-literal=username=adminuser \
+  --from-file=privateKey=$HOME/.ssh/id_rsa
+
+# Create ProvisioningProfile
+kubectl apply -f - <<EOF
+apiVersion: stargate.io/v1alpha1
+kind: ProvisioningProfile
+metadata:
+  name: azure-k8s-worker
+  namespace: azure-dc
+spec:
+  kubernetesVersion: "1.29"
+  containerRuntime: containerd
+  sshCredentialsSecretRef: azure-ssh-credentials
+  adminUsername: adminuser
+EOF
+```
+
+#### 6c. Start the Controller in Tailscale Mode
+
+Get the control plane's Tailscale IP:
+
+```bash
+CP_IP=$(tailscale ssh azureuser@stargate-vapa-mx-cp -- tailscale ip -4)
+echo "Control plane IP: $CP_IP"
+```
+
+Start the controller:
+
+```bash
+KUBECONFIG=~/.kube/mx-azure.conf bin/azure-controller \
+  --control-plane-mode=tailscale \
+  --control-plane-ip=$CP_IP \
+  --control-plane-hostname=stargate-vapa-mx-cp \
+  --control-plane-ssh-user=azureuser \
+  --admin-username=adminuser
+```
+
+#### 6d. Bootstrap Workers
+
+Create Operations to trigger the bootstrap:
+
+```bash
+for server in $(kubectl get servers -n azure-dc -o jsonpath='{.items[*].metadata.name}'); do
+  kubectl apply -f - <<EOF
+apiVersion: stargate.io/v1alpha1
+kind: Operation
+metadata:
+  name: bootstrap-${server}
+  namespace: azure-dc
+spec:
+  serverRef:
+    name: ${server}
+  provisioningProfileRef:
+    name: azure-k8s-worker
+  operation: repave
+EOF
+done
+```
+
+#### 6e. Verify Workers Joined
+
+```bash
+kubectl get nodes -o wide
+kubectl get operations -n azure-dc
+kubectl get servers -n azure-dc
+```
+
+### 7. Check Cluster Status
+
+```bash
+bin/mx-azure status \
+  --subscription-id "$AZURE_SUBSCRIPTION_ID" \
+  --resource-group stargate-vapa-mx-cluster
+```
+
+### 8. Destroy the Cluster
+
+```bash
+bin/mx-azure destroy \
+  --subscription-id "$AZURE_SUBSCRIPTION_ID" \
+  --resource-group stargate-vapa-mx-cluster \
+  --yes
+```
+
 ## Cleanup
 
 ### Full Cleanup

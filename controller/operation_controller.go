@@ -31,6 +31,8 @@ type OperationReconciler struct {
 	KindContainerName       string
 	ControlPlaneTailscaleIP string
 	ControlPlaneHostname    string
+	ControlPlaneMode        string // "kind" or "tailscale"
+	ControlPlaneSSHUser     string // SSH user for tailscale mode
 	SSHPrivateKeyPath       string // Default SSH key path
 	SSHPort                 int
 	AdminUsername           string // Default admin username
@@ -291,6 +293,30 @@ func (r *OperationReconciler) bootstrapServer(ctx context.Context, server *api.S
 
 // detectControlPlaneTailscaleIP gets the Tailscale IP from the Kind control plane container
 func (r *OperationReconciler) detectControlPlaneTailscaleIP() (string, error) {
+	if r.ControlPlaneMode == "tailscale" {
+		// In tailscale mode, we require the IP to be provided
+		if r.ControlPlaneTailscaleIP != "" {
+			return r.ControlPlaneTailscaleIP, nil
+		}
+		// Try to get IP via tailscale ssh
+		target := r.ControlPlaneHostname
+		sshUser := r.ControlPlaneSSHUser
+		if sshUser == "" {
+			sshUser = "azureuser"
+		}
+		cmd := exec.Command("tailscale", "ssh", fmt.Sprintf("%s@%s", sshUser, target), "--", "tailscale", "ip", "-4")
+		out, err := cmd.Output()
+		if err != nil {
+			return "", fmt.Errorf("tailscale ssh to get IP: %w", err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		if len(lines) == 0 || lines[0] == "" {
+			return "", fmt.Errorf("no Tailscale IP found")
+		}
+		return strings.TrimSpace(lines[0]), nil
+	}
+
+	// Kind mode: use docker exec
 	containerName := r.KindContainerName
 	if containerName == "" {
 		containerName = "stargate-demo-control-plane"
@@ -317,15 +343,35 @@ func (r *OperationReconciler) detectControlPlaneTailscaleIP() (string, error) {
 
 // generateKubeadmJoinCommand creates a new join token and returns the join command
 func (r *OperationReconciler) generateKubeadmJoinCommand(controlPlaneTailscaleIP string) (string, error) {
-	containerName := r.KindContainerName
-	if containerName == "" {
-		containerName = "stargate-demo-control-plane"
-	}
+	var out []byte
+	var err error
 
-	cmd := exec.Command("docker", "exec", containerName, "kubeadm", "token", "create", "--print-join-command")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("kubeadm token create: %w", err)
+	if r.ControlPlaneMode == "tailscale" {
+		// Use tailscale SSH to reach the control plane
+		target := controlPlaneTailscaleIP
+		if target == "" {
+			target = r.ControlPlaneHostname
+		}
+		sshUser := r.ControlPlaneSSHUser
+		if sshUser == "" {
+			sshUser = "azureuser"
+		}
+		cmd := exec.Command("tailscale", "ssh", fmt.Sprintf("%s@%s", sshUser, target), "--", "sudo", "kubeadm", "token", "create", "--print-join-command")
+		out, err = cmd.Output()
+		if err != nil {
+			return "", fmt.Errorf("kubeadm token create via tailscale ssh: %w", err)
+		}
+	} else {
+		// Use docker exec for Kind control plane
+		containerName := r.KindContainerName
+		if containerName == "" {
+			containerName = "stargate-demo-control-plane"
+		}
+		cmd := exec.Command("docker", "exec", containerName, "kubeadm", "token", "create", "--print-join-command")
+		out, err = cmd.Output()
+		if err != nil {
+			return "", fmt.Errorf("kubeadm token create: %w", err)
+		}
 	}
 
 	joinCmd := strings.TrimSpace(string(out))
@@ -393,7 +439,7 @@ TOKEN=$(echo "$JOIN_CMD" | grep -oP -- '--token \K[^\s]+')
 CA_CERT_HASH=$(echo "$JOIN_CMD" | grep -oP -- '--discovery-token-ca-cert-hash \K[^\s]+')
 
 cat > /tmp/kubeadm-join-config.yaml <<EOF
-apiVersion: kubeadm.k8s.io/v1beta4
+apiVersion: kubeadm.k8s.io/v1beta3
 kind: JoinConfiguration
 discovery:
   bootstrapToken:
@@ -403,14 +449,8 @@ discovery:
       - $CA_CERT_HASH
 nodeRegistration:
   kubeletExtraArgs:
-    - name: cgroup-root
-      value: /
-    - name: node-ip
-      value: "$NODE_IP"
----
-apiVersion: kubelet.config.k8s.io/v1beta1
-kind: KubeletConfiguration
-cgroupRoot: /
+    cgroup-root: /
+    node-ip: "$NODE_IP"
 EOF
 
 echo "Configuring kernel params..."

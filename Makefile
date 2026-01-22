@@ -14,12 +14,13 @@ MOCKAPI_BIN=bin/mockapi
 SIMULATOR_BIN=bin/simulator
 PREP_DC_INVENTORY_BIN=bin/prep-dc-inventory
 AZURE_BIN=bin/azure
+MX_AZURE_BIN=bin/mx-azure
 
 all: build
 
 ## Build targets
 
-build: azure-controller qemu-controller mockapi simulator prep-dc-inventory azure
+build: azure-controller qemu-controller mockapi simulator prep-dc-inventory azure mx-azure
 
 azure-controller:
 	$(GOBUILD) -o $(AZURE_CONTROLLER_BIN) ./main.go
@@ -38,6 +39,9 @@ prep-dc-inventory:
 
 azure:
 	$(GOBUILD) -o $(AZURE_BIN) ./cmd/azure/main.go
+
+mx-azure:
+	$(GOBUILD) -o $(MX_AZURE_BIN) ./cmd/mx-azure/main.go
 
 ## Run targets
 

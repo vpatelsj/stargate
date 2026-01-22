@@ -645,6 +645,38 @@ func execCommand(name string, args ...string) *exec.Cmd {
 	return exec.Command(name, args...)
 }
 
+// installCRDs installs Stargate CRDs on the target cluster using kubectl
+func installCRDs(kubeconfigPath string) error {
+	// Find the CRD directory relative to the binary or current working directory
+	crdDir := "config/crd/bases"
+
+	// Check if CRD directory exists
+	if _, err := os.Stat(crdDir); os.IsNotExist(err) {
+		// Try relative to executable
+		exePath, err := os.Executable()
+		if err == nil {
+			crdDir = filepath.Join(filepath.Dir(exePath), "..", "config", "crd", "bases")
+		}
+	}
+
+	// Check again
+	if _, err := os.Stat(crdDir); os.IsNotExist(err) {
+		return fmt.Errorf("CRD directory not found at %s - run from project root or install CRDs manually with: kubectl apply -f config/crd/bases/", crdDir)
+	}
+
+	fmt.Printf("[crd] installing Stargate CRDs from %s\n", crdDir)
+
+	cmd := exec.Command("kubectl", "--kubeconfig", kubeconfigPath, "apply", "-f", crdDir)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("install CRDs: %w", err)
+	}
+
+	fmt.Printf("[crd] CRDs installed successfully\n")
+	return nil
+}
+
 // createServerCRs creates Server custom resources for each provisioned node
 func createServerCRs(ctx context.Context, kubeconfigPath, namespace string, nodes []providers.NodeInfo, adminUser, providerName string, routerProxy string) error {
 	providerName = strings.ToLower(strings.TrimSpace(providerName))
@@ -653,6 +685,12 @@ func createServerCRs(ctx context.Context, kubeconfigPath, namespace string, node
 	default:
 		return fmt.Errorf("unsupported provider for Server CRs: %s", providerName)
 	}
+
+	// Install CRDs first (idempotent - will update if already exist)
+	if err := installCRDs(kubeconfigPath); err != nil {
+		return fmt.Errorf("install CRDs: %w", err)
+	}
+
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("load kubeconfig: %w", err)

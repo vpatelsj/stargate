@@ -35,6 +35,8 @@ func main() {
 	var kindContainerName string
 	var controlPlaneTailscaleIP string
 	var controlPlaneHostname string
+	var controlPlaneMode string
+	var controlPlaneSSHUser string
 	var sshPrivateKeyPath string
 	var sshPort int
 	var adminUsername string
@@ -43,8 +45,10 @@ func main() {
 
 	// Bootstrap configuration flags
 	flag.StringVar(&kindContainerName, "kind-container", "stargate-demo-control-plane", "Name of the Kind control plane Docker container.")
-	flag.StringVar(&controlPlaneTailscaleIP, "control-plane-ip", "", "Tailscale IP of the Kind control plane (auto-detected if not provided).")
-	flag.StringVar(&controlPlaneHostname, "control-plane-hostname", "stargate-demo-control-plane", "Hostname of the Kind control plane.")
+	flag.StringVar(&controlPlaneTailscaleIP, "control-plane-ip", "", "Tailscale IP or hostname of the control plane (auto-detected for Kind if not provided).")
+	flag.StringVar(&controlPlaneHostname, "control-plane-hostname", "stargate-demo-control-plane", "Hostname of the control plane.")
+	flag.StringVar(&controlPlaneMode, "control-plane-mode", "kind", "Mode to access control plane: 'kind' (docker exec) or 'tailscale' (SSH via tailscale).")
+	flag.StringVar(&controlPlaneSSHUser, "control-plane-ssh-user", "azureuser", "SSH user for control plane when using tailscale mode.")
 	flag.StringVar(&sshPrivateKeyPath, "ssh-private-key", filepath.Join(os.Getenv("HOME"), ".ssh", "id_rsa"), "Path to SSH private key for server bootstrap.")
 	flag.IntVar(&sshPort, "ssh-port", 22, "SSH port for server bootstrap.")
 	flag.StringVar(&adminUsername, "admin-username", "ubuntu", "Admin username for SSH.")
@@ -74,6 +78,8 @@ func main() {
 		KindContainerName:       kindContainerName,
 		ControlPlaneTailscaleIP: controlPlaneTailscaleIP,
 		ControlPlaneHostname:    controlPlaneHostname,
+		ControlPlaneMode:        controlPlaneMode,
+		ControlPlaneSSHUser:     controlPlaneSSHUser,
 		SSHPrivateKeyPath:       sshPrivateKeyPath,
 		SSHPort:                 sshPort,
 		AdminUsername:           adminUsername,
