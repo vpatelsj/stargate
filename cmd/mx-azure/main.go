@@ -16,7 +16,8 @@ import (
 func main() {
 	// Define CLI flags
 	subscriptionID := flag.String("subscription-id", os.Getenv("AZURE_SUBSCRIPTION_ID"), "Azure Subscription ID (env: AZURE_SUBSCRIPTION_ID)")
-	location := flag.String("location", "eastus", "Azure region for resources")
+	location := flag.String("location", "canadacentral", "Azure region for resources")
+	zone := flag.String("zone", "1", "Azure availability zone (1, 2, or 3)")
 	resourceGroup := flag.String("resource-group", "mx-azure-rg", "Name of the resource group")
 	vnetName := flag.String("vnet-name", "mx-vnet", "Name of the virtual network")
 	vnetAddressSpace := flag.String("vnet-address-space", "10.0.0.0/16", "Address space for the VNet")
@@ -28,7 +29,7 @@ func main() {
 	vmName := flag.String("vm-name", "mx-vm", "Name of the virtual machine")
 	adminUsername := flag.String("admin-username", "azureuser", "Admin username for the VM")
 	sshPublicKeyPath := flag.String("ssh-public-key-path", "", "Path to SSH public key file (required)")
-	vmSize := flag.String("vm-size", "Standard_D2s_v3", "Azure VM size")
+	vmSize := flag.String("vm-size", "Standard_D2s_v5", "Azure VM size (try Standard_B2s if quota issues)")
 	imagePublisher := flag.String("image-publisher", "Canonical", "VM image publisher")
 	imageOffer := flag.String("image-offer", "0001-com-ubuntu-server-jammy", "VM image offer")
 	imageSKU := flag.String("image-sku", "22_04-lts-gen2", "VM image SKU")
@@ -93,12 +94,7 @@ func main() {
 	// SECURITY: tailscaleAuthKey is embedded in cloud-init but never logged
 	// Cloud-init custom data is encrypted at rest by Azure
 	logger.Info("rendering cloud-init configuration")
-	cloudInitData, err := cloudinit.RenderBase64(cloudinit.Config{
-		Hostname:          *vmName,
-		AdminUsername:     *adminUsername,
-		TailscaleAuthKey:  *tailscaleAuthKey,
-		KubernetesVersion: *kubernetesVersion,
-	})
+	cloudInitData, err := cloudinit.RenderMXCloudInitBase64(*adminUsername, *tailscaleAuthKey, *kubernetesVersion)
 	if err != nil {
 		logger.Error("failed to render cloud-init", "error", err)
 		os.Exit(1)
@@ -107,6 +103,7 @@ func main() {
 	// Build VM configuration
 	vmConfig := azure.VMConfig{
 		Location:         *location,
+		Zone:             *zone,
 		ResourceGroup:    *resourceGroup,
 		VNetName:         *vnetName,
 		VNetAddressSpace: *vnetAddressSpace,

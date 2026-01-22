@@ -16,6 +16,7 @@ import (
 // VMConfig holds configuration for creating a virtual machine
 type VMConfig struct {
 	Location         string
+	Zone             string // Azure availability zone (e.g., "1", "2", "3")
 	ResourceGroup    string
 	VNetName         string
 	VNetAddressSpace string
@@ -41,6 +42,15 @@ func isNotFound(err error) bool {
 		return respErr.StatusCode == http.StatusNotFound
 	}
 	return false
+}
+
+// zonesFromConfig converts a zone string to the Azure Zones slice format.
+// Returns nil if zone is empty (non-zonal deployment).
+func zonesFromConfig(zone string) []*string {
+	if zone == "" {
+		return nil
+	}
+	return []*string{to.Ptr(zone)}
 }
 
 // EnsureResourceGroup creates a resource group if it doesn't exist.
@@ -416,6 +426,7 @@ func (c *Clients) EnsureVM(ctx context.Context, cfg VMConfig, nicID, publicIPAdd
 
 	vmParams := armcompute.VirtualMachine{
 		Location: to.Ptr(cfg.Location),
+		Zones:    zonesFromConfig(cfg.Zone),
 		Properties: &armcompute.VirtualMachineProperties{
 			HardwareProfile: &armcompute.HardwareProfile{
 				VMSize: to.Ptr(armcompute.VirtualMachineSizeTypes(cfg.VMSize)),
