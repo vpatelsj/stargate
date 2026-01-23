@@ -41,12 +41,13 @@ type OperationReconciler struct {
 	AdminUsername           string // Default admin username
 
 	// AKS configuration (for aks mode)
-	AKSAPIServer       string // AKS API server URL (auto-detected from kubeconfig if empty)
-	AKSClusterName     string // Cluster name for node labels
-	AKSResourceGroup   string // Cluster resource group for node labels
-	AKSClusterDNS      string // Cluster DNS IP (default 10.0.0.10)
-	AKSSubscriptionID  string // Azure subscription ID for provider-id
-	AKSVMResourceGroup string // Resource group containing the worker VMs
+	AKSAPIServer          string // AKS API server URL (auto-detected from kubeconfig if empty)
+	AKSClusterName        string // Cluster name for node labels
+	AKSResourceGroup      string // Cluster resource group for node labels
+	AKSClusterDNS         string // Cluster DNS IP (default 10.0.0.10)
+	AKSSubscriptionID     string // Azure subscription ID for provider-id
+	AKSVMResourceGroup    string // Resource group containing the worker VMs
+	AKSAPIServerPrivateIP string // Private IP to use instead of public FQDN (via Tailscale mesh)
 
 	// Runtime fields (populated automatically)
 	Clientset    *kubernetes.Clientset // For creating SA tokens
@@ -575,6 +576,13 @@ func (r *OperationReconciler) buildAKSBootstrapScript(kubernetesVersion, nodeIP,
 		vmResourceGroup = resourceGroup
 	}
 
+	// Use private IP for API server if configured (for Tailscale mesh connectivity)
+	// The AKS router proxies port 6443 to the AKS API server
+	apiServer := r.AKSAPIServer
+	if r.AKSAPIServerPrivateIP != "" {
+		apiServer = fmt.Sprintf("https://%s:6443", r.AKSAPIServerPrivateIP)
+	}
+
 	// Construct Azure provider-id so cloud-controller-manager won't delete the node
 	providerID := fmt.Sprintf("azure:///subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/virtualMachines/%s",
 		subscriptionID, vmResourceGroup, vmName)
@@ -781,7 +789,8 @@ if ! command -v containerd >/dev/null; then
   apt-get update
   apt-get install -y apt-transport-https ca-certificates curl gnupg
   mkdir -p /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  rm -f /etc/apt/keyrings/docker.gpg
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
   echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
   apt-get update
   apt-get install -y containerd.io
@@ -790,7 +799,8 @@ fi
 # Install kubelet if not present
 if ! command -v kubelet >/dev/null; then
   echo "Installing kubelet..."
-  curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.33/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  rm -f /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.33/deb/Release.key | gpg --batch --yes --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
   echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.33/deb/ /" > /etc/apt/sources.list.d/kubernetes.list
   apt-get update
   apt-get install -y kubelet kubectl
@@ -857,13 +867,26 @@ systemctl daemon-reload
 systemctl enable --now containerd
 systemctl enable --now kubelet
 
+# Final verification - ensure kubelet is installed and running
+echo "=== Verifying bootstrap success ==="
+if ! command -v kubelet >/dev/null; then
+  echo "ERROR: kubelet binary not found after installation"
+  exit 1
+fi
+
+if ! systemctl is-active --quiet kubelet; then
+  echo "ERROR: kubelet service is not running"
+  systemctl status kubelet --no-pager || true
+  exit 1
+fi
+
 echo "=== AKS Node Join complete for $NODE_NAME ==="
 echo "Provider ID: $PROVIDER_ID"
-echo "The node should appear in the cluster shortly. Monitor with: kubectl get nodes"
+echo "kubelet is installed and running successfully"
 `,
 		nodeIP,
 		saToken,
-		r.AKSAPIServer,
+		apiServer,
 		r.CACertBase64,
 		clusterDNS,
 		clusterName,

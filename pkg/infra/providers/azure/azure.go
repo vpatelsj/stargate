@@ -36,6 +36,9 @@ type Config struct {
 	AdminUsername    string
 	SSHPublicKeyPath string
 	TailscaleAuthKey string
+
+	// AKS router config (optional) - for provisioning a router in existing AKS VNet
+	AKSRouter *providers.AKSRouterConfig
 }
 
 // Provider provisions Azure VMs with base cloud-init (tailscale only) and returns node addresses.
@@ -98,15 +101,23 @@ func NewProvider(ctx context.Context, cfg Config) (*Provider, error) {
 // CreateNodes provisions the requested VMs and returns their addresses.
 // Creates router first to get its private IP for workers.
 func (p *Provider) CreateNodes(ctx context.Context, specs []providers.NodeSpec) ([]providers.NodeInfo, error) {
-	if err := p.ensureResourceGroup(ctx); err != nil {
-		return nil, err
-	}
-	if err := p.ensureVNet(ctx); err != nil {
-		return nil, err
-	}
-	subnetID, err := p.ensureSubnet(ctx)
-	if err != nil {
-		return nil, err
+	// Check if we're only creating an AKS router (no DC infrastructure needed)
+	onlyAKSRouter := len(specs) == 1 && specs[0].Role == providers.RoleAKSRouter
+
+	var subnetID string
+	if !onlyAKSRouter {
+		// Only set up DC infrastructure if we're not just creating an AKS router
+		if err := p.ensureResourceGroup(ctx); err != nil {
+			return nil, err
+		}
+		if err := p.ensureVNet(ctx); err != nil {
+			return nil, err
+		}
+		var err error
+		subnetID, err = p.ensureSubnet(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	sshKey, err := os.ReadFile(p.cfg.SSHPublicKeyPath)
@@ -114,16 +125,19 @@ func (p *Provider) CreateNodes(ctx context.Context, specs []providers.NodeSpec) 
 		return nil, fmt.Errorf("read SSH public key: %w", err)
 	}
 
-	// Separate router and workers
-	var routerSpecs, workerSpecs []providers.NodeSpec
+	// Separate router, workers, and AKS router specs
+	var routerSpecs, workerSpecs, aksRouterSpecs []providers.NodeSpec
 	for _, spec := range specs {
 		role := spec.Role
 		if role == "" {
 			role = providers.RoleWorker
 		}
-		if role == providers.RoleRouter {
+		switch role {
+		case providers.RoleRouter:
 			routerSpecs = append(routerSpecs, spec)
-		} else {
+		case providers.RoleAKSRouter:
+			aksRouterSpecs = append(aksRouterSpecs, spec)
+		default:
 			workerSpecs = append(workerSpecs, spec)
 		}
 	}
@@ -131,7 +145,19 @@ func (p *Provider) CreateNodes(ctx context.Context, specs []providers.NodeSpec) 
 	var nodes []providers.NodeInfo
 	var routerIP string
 
-	// Create routers first
+	// Create AKS router first if specified (uses different VNet)
+	for range aksRouterSpecs {
+		if p.cfg.AKSRouter == nil {
+			return nil, fmt.Errorf("AKS router spec provided but no AKS router config in provider")
+		}
+		aksNode, err := p.createAKSRouter(ctx, string(sshKey))
+		if err != nil {
+			return nil, fmt.Errorf("create AKS router: %w", err)
+		}
+		nodes = append(nodes, aksNode)
+	}
+
+	// Create DC routers
 	for _, spec := range routerSpecs {
 		nicName := fmt.Sprintf("%s-nic", spec.Name)
 		pipName := fmt.Sprintf("%s-pip", spec.Name)
@@ -176,9 +202,15 @@ func (p *Provider) CreateNodes(ctx context.Context, specs []providers.NodeSpec) 
 		})
 	}
 
-	// Create route table for workers to reach Tailscale network via router
+	// Create route table for workers to reach Tailscale network and AKS CIDRs via router
+	// If AKS router is configured, also add routes for AKS CIDRs
+	var aksRouteCIDRs []string
+	if p.cfg.AKSRouter != nil && len(p.cfg.AKSRouter.RouteCIDRs) > 0 {
+		aksRouteCIDRs = p.cfg.AKSRouter.RouteCIDRs
+	}
+
 	if routerIP != "" && len(workerSpecs) > 0 {
-		if err := p.ensureRouteTable(ctx, subnetID, routerIP); err != nil {
+		if err := p.ensureRouteTable(ctx, subnetID, routerIP, aksRouteCIDRs); err != nil {
 			return nil, fmt.Errorf("route table: %w", err)
 		}
 	}
@@ -192,7 +224,7 @@ func (p *Provider) CreateNodes(ctx context.Context, specs []providers.NodeSpec) 
 			return nil, fmt.Errorf("NIC %s: %w", nicName, err)
 		}
 
-		cloudInit, err := buildWorkerCloudInit(spec.Name, p.cfg.AdminUsername, string(sshKey), routerIP)
+		cloudInit, err := buildWorkerCloudInit(spec.Name, p.cfg.AdminUsername, string(sshKey), routerIP, aksRouteCIDRs)
 		if err != nil {
 			return nil, err
 		}
@@ -216,6 +248,71 @@ func (p *Provider) CreateNodes(ctx context.Context, specs []providers.NodeSpec) 
 	}
 
 	return nodes, nil
+}
+
+// createAKSRouter provisions a Tailscale subnet router in an existing AKS VNet.
+// This enables worker nodes to reach the AKS control plane through the Tailscale mesh.
+func (p *Provider) createAKSRouter(ctx context.Context, sshKey string) (providers.NodeInfo, error) {
+	cfg := p.cfg.AKSRouter
+	if cfg == nil {
+		return providers.NodeInfo{}, fmt.Errorf("AKS router config is nil")
+	}
+
+	// Ensure the subnet exists in the AKS VNet (in the AKS resource group)
+	subnetID, err := p.ensureSubnetInVNet(ctx, cfg.ResourceGroup, cfg.VNetName, cfg.SubnetName, cfg.SubnetCIDR)
+	if err != nil {
+		return providers.NodeInfo{}, fmt.Errorf("ensure AKS router subnet: %w", err)
+	}
+
+	nicName := fmt.Sprintf("%s-nic", cfg.Name)
+	pipName := fmt.Sprintf("%s-pip", cfg.Name)
+
+	// Create public IP in the AKS resource group
+	pipID, err := p.ensurePublicIPInRG(ctx, cfg.ResourceGroup, pipName)
+	if err != nil {
+		return providers.NodeInfo{}, fmt.Errorf("public IP %s: %w", pipName, err)
+	}
+
+	// Create NIC with IP forwarding in the AKS resource group
+	nicID, err := p.ensureNICWithIPForwardingInRG(ctx, cfg.ResourceGroup, nicName, subnetID, pipID)
+	if err != nil {
+		return providers.NodeInfo{}, fmt.Errorf("NIC %s: %w", nicName, err)
+	}
+
+	// Build cloud-init that advertises all AKS CIDRs to Tailscale and sets up API proxy
+	var cloudInit string
+	if len(cfg.RouteCIDRs) > 0 {
+		cloudInit, err = buildAKSRouterCloudInit(cfg.Name, p.cfg.AdminUsername, sshKey, p.cfg.TailscaleAuthKey, cfg.RouteCIDRs, cfg.APIServerFQDN)
+	} else {
+		// Fallback to single VNet CIDR
+		cloudInit, err = buildRouterCloudInit(cfg.Name, p.cfg.AdminUsername, sshKey, p.cfg.TailscaleAuthKey, cfg.VNetCIDR)
+	}
+	if err != nil {
+		return providers.NodeInfo{}, err
+	}
+
+	// Create VM in the AKS resource group
+	if err := p.ensureVMInRG(ctx, cfg.ResourceGroup, cfg.Name, nicID, cloudInit, sshKey); err != nil {
+		return providers.NodeInfo{}, fmt.Errorf("VM %s: %w", cfg.Name, err)
+	}
+
+	pubIP, err := p.getPublicIPAddressInRG(ctx, cfg.ResourceGroup, pipName)
+	if err != nil {
+		return providers.NodeInfo{}, fmt.Errorf("get public IP %s: %w", pipName, err)
+	}
+
+	privIP, err := p.getPrivateIPInRG(ctx, cfg.ResourceGroup, nicName)
+	if err != nil {
+		return providers.NodeInfo{}, fmt.Errorf("get private IP %s: %w", nicName, err)
+	}
+
+	return providers.NodeInfo{
+		Name:        cfg.Name,
+		Role:        providers.RoleAKSRouter,
+		PublicIP:    pubIP,
+		PrivateIP:   privIP,
+		TailnetFQDN: cfg.Name,
+	}, nil
 }
 
 func baseCloudInitHeader(vmName, adminUser, sshPublicKey string) string {
@@ -270,17 +367,89 @@ runcmd:
 	return cloudInit, nil
 }
 
-func buildWorkerCloudInit(vmName, adminUser, sshPublicKey, routerIP string) (string, error) {
+// buildAKSRouterCloudInit creates cloud-init for an AKS router that:
+// 1. Advertises multiple CIDRs (VNet, Pod, Service) to Tailscale
+// 2. Sets up a proxy to the AKS API server
+func buildAKSRouterCloudInit(vmName, adminUser, sshPublicKey, tailscaleAuthKey string, routeCIDRs []string, apiServerFQDN string) (string, error) {
+	if tailscaleAuthKey == "" {
+		return "", fmt.Errorf("missing tailscale auth key for router %s", vmName)
+	}
+	if len(routeCIDRs) == 0 {
+		return "", fmt.Errorf("no route CIDRs provided for AKS router %s", vmName)
+	}
+
+	routes := strings.Join(routeCIDRs, ",")
+
+	cloudInit := baseCloudInitHeader(vmName, adminUser, sshPublicKey)
+	cloudInit += fmt.Sprintf(`
+write_files:
+  - path: /tmp/configure-router.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -ex
+      sysctl -w net.ipv4.ip_forward=1
+      sed -i 's/^#*net.ipv4.ip_forward.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+      curl -fsSL https://tailscale.com/install.sh | sh
+      tailscale up --authkey %s --hostname %s --advertise-routes=%s --accept-routes
+      # MASQUERADE for LAN traffic going to Tailscale network
+      iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE
+      mkdir -p /etc/iptables
+      iptables-save > /etc/iptables/rules.v4 || true
+`, tailscaleAuthKey, vmName, routes)
+
+	// Add AKS API proxy if FQDN is provided
+	if apiServerFQDN != "" {
+		cloudInit += fmt.Sprintf(`
+  - path: /etc/systemd/system/aks-proxy.service
+    content: |
+      [Unit]
+      Description=AKS API Server Proxy
+      After=network.target
+      [Service]
+      Type=simple
+      ExecStart=/usr/bin/socat TCP-LISTEN:6443,fork,reuseaddr TCP:%s:443
+      Restart=always
+      RestartSec=5
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - apt-get update && apt-get install -y socat
+  - /tmp/configure-router.sh
+  - systemctl daemon-reload
+  - systemctl enable --now aks-proxy
+`, apiServerFQDN)
+	} else {
+		cloudInit += `
+runcmd:
+  - /tmp/configure-router.sh
+`
+	}
+
+	cloudInit = strings.ReplaceAll(cloudInit, "\t", "    ")
+	return cloudInit, nil
+}
+
+func buildWorkerCloudInit(vmName, adminUser, sshPublicKey, routerIP string, extraRoutes []string) (string, error) {
 	cloudInit := baseCloudInitHeader(vmName, adminUser, sshPublicKey)
 
-	// If router IP is provided, set up route for Tailscale CGNAT traffic
+	// If router IP is provided, set up routes for Tailscale CGNAT and any extra CIDRs (e.g., AKS)
 	if routerIP != "" {
+		// Build route commands - Tailscale CGNAT + any extra routes (AKS CIDRs, etc.)
+		allRoutes := []string{"100.64.0.0/10"}
+		allRoutes = append(allRoutes, extraRoutes...)
+
+		routeCmds := ""
+		for _, cidr := range allRoutes {
+			routeCmds += fmt.Sprintf("  - ip route add %s via %s || true\n", cidr, routerIP)
+			routeCmds += fmt.Sprintf("  - echo \"%s via %s\" >> /etc/network/routes.conf || true\n", cidr, routerIP)
+		}
+
 		cloudInit += fmt.Sprintf(`
 runcmd:
-  - ip route add 100.64.0.0/10 via %s || true
-  - echo "100.64.0.0/10 via %s" >> /etc/network/routes.conf || true
-  - echo "worker initialized with Tailscale route via router %s"
-`, routerIP, routerIP, routerIP)
+%s  - echo "worker initialized with routes via router %s"
+`, routeCmds, routerIP)
 	} else {
 		cloudInit += `
 runcmd:
@@ -568,10 +737,32 @@ func (p *Provider) ensureNICWithIPForwarding(ctx context.Context, name, subnetID
 	return *resp.ID, nil
 }
 
-// ensureRouteTable creates a route table with Tailscale CGNAT route and associates it with the subnet
-func (p *Provider) ensureRouteTable(ctx context.Context, subnetID, routerIP string) error {
+// ensureRouteTable creates a route table with Tailscale CGNAT route and optional extra routes (e.g., AKS CIDRs),
+// then associates it with the subnet
+func (p *Provider) ensureRouteTable(ctx context.Context, subnetID, routerIP string, extraRouteCIDRs []string) error {
 	routeTableName := fmt.Sprintf("%s-route-table", p.cfg.ResourceGroup)
-	routeName := "tailscale-route"
+
+	// Build routes: Tailscale CGNAT + any extra CIDRs
+	routes := []*armnetwork.Route{{
+		Name: to.Ptr("tailscale-route"),
+		Properties: &armnetwork.RoutePropertiesFormat{
+			AddressPrefix:    to.Ptr("100.64.0.0/10"),
+			NextHopType:      to.Ptr(armnetwork.RouteNextHopTypeVirtualAppliance),
+			NextHopIPAddress: to.Ptr(routerIP),
+		},
+	}}
+
+	// Add extra routes (e.g., AKS VNet, Pod, Service CIDRs)
+	for i, cidr := range extraRouteCIDRs {
+		routes = append(routes, &armnetwork.Route{
+			Name: to.Ptr(fmt.Sprintf("extra-route-%d", i)),
+			Properties: &armnetwork.RoutePropertiesFormat{
+				AddressPrefix:    to.Ptr(cidr),
+				NextHopType:      to.Ptr(armnetwork.RouteNextHopTypeVirtualAppliance),
+				NextHopIPAddress: to.Ptr(routerIP),
+			},
+		})
+	}
 
 	// Check if route table exists
 	existing, err := p.routeTableClient.Get(ctx, p.cfg.ResourceGroup, routeTableName, nil)
@@ -581,20 +772,23 @@ func (p *Provider) ensureRouteTable(ctx context.Context, subnetID, routerIP stri
 
 	var routeTableID string
 	if err == nil && existing.ID != nil {
-		routeTableID = *existing.ID
+		// Route table exists - update it with new routes
+		existing.Properties.Routes = routes
+		poller, err := p.routeTableClient.BeginCreateOrUpdate(ctx, p.cfg.ResourceGroup, routeTableName, existing.RouteTable, nil)
+		if err != nil {
+			return fmt.Errorf("update route table: %w", err)
+		}
+		resp, err := poller.PollUntilDone(ctx, &azruntime.PollUntilDoneOptions{Frequency: 10 * time.Second})
+		if err != nil {
+			return fmt.Errorf("poll route table update: %w", err)
+		}
+		routeTableID = *resp.ID
 	} else {
-		// Create route table with route
+		// Create route table with routes
 		poller, err := p.routeTableClient.BeginCreateOrUpdate(ctx, p.cfg.ResourceGroup, routeTableName, armnetwork.RouteTable{
 			Location: to.Ptr(p.cfg.Location),
 			Properties: &armnetwork.RouteTablePropertiesFormat{
-				Routes: []*armnetwork.Route{{
-					Name: to.Ptr(routeName),
-					Properties: &armnetwork.RoutePropertiesFormat{
-						AddressPrefix:    to.Ptr("100.64.0.0/10"),
-						NextHopType:      to.Ptr(armnetwork.RouteNextHopTypeVirtualAppliance),
-						NextHopIPAddress: to.Ptr(routerIP),
-					},
-				}},
+				Routes: routes,
 			},
 		}, nil)
 		if err != nil {
@@ -641,4 +835,186 @@ func (p *Provider) ensureRouteTable(ctx context.Context, subnetID, routerIP stri
 	}
 
 	return nil
+}
+
+// ensureSubnetInVNet creates or gets a subnet in a specific VNet and resource group.
+func (p *Provider) ensureSubnetInVNet(ctx context.Context, resourceGroup, vnetName, subnetName, subnetCIDR string) (string, error) {
+	subnet, err := p.subnetClient.Get(ctx, resourceGroup, vnetName, subnetName, nil)
+	if err == nil {
+		if subnet.ID == nil {
+			return "", errors.New("subnet has no ID")
+		}
+		return *subnet.ID, nil
+	}
+	if !isNotFound(err) {
+		return "", err
+	}
+
+	poller, err := p.subnetClient.BeginCreateOrUpdate(ctx, resourceGroup, vnetName, subnetName, armnetwork.Subnet{
+		Properties: &armnetwork.SubnetPropertiesFormat{AddressPrefix: to.Ptr(subnetCIDR)},
+	}, nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := poller.PollUntilDone(ctx, &azruntime.PollUntilDoneOptions{Frequency: 10 * time.Second})
+	if err != nil {
+		return "", err
+	}
+	if resp.ID == nil {
+		return "", errors.New("subnet has no ID")
+	}
+	return *resp.ID, nil
+}
+
+// ensurePublicIPInRG creates a public IP in a specific resource group.
+func (p *Provider) ensurePublicIPInRG(ctx context.Context, resourceGroup, name string) (string, error) {
+	existing, err := p.pipClient.Get(ctx, resourceGroup, name, nil)
+	if err == nil {
+		if existing.ID == nil {
+			return "", errors.New("public IP has no ID")
+		}
+		return *existing.ID, nil
+	}
+	if !isNotFound(err) {
+		return "", err
+	}
+
+	poller, err := p.pipClient.BeginCreateOrUpdate(ctx, resourceGroup, name, armnetwork.PublicIPAddress{
+		Location: to.Ptr(p.cfg.Location),
+		Zones:    []*string{to.Ptr(p.cfg.Zone)},
+		SKU:      &armnetwork.PublicIPAddressSKU{Name: to.Ptr(armnetwork.PublicIPAddressSKUNameStandard)},
+		Properties: &armnetwork.PublicIPAddressPropertiesFormat{
+			PublicIPAllocationMethod: to.Ptr(armnetwork.IPAllocationMethodStatic),
+			PublicIPAddressVersion:   to.Ptr(armnetwork.IPVersionIPv4),
+		},
+	}, nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := poller.PollUntilDone(ctx, &azruntime.PollUntilDoneOptions{Frequency: 10 * time.Second})
+	if err != nil {
+		return "", err
+	}
+	if resp.ID == nil {
+		return "", errors.New("public IP has no ID")
+	}
+	return *resp.ID, nil
+}
+
+// ensureNICWithIPForwardingInRG creates a NIC with IP forwarding in a specific resource group.
+func (p *Provider) ensureNICWithIPForwardingInRG(ctx context.Context, resourceGroup, name, subnetID, publicIPID string) (string, error) {
+	existing, err := p.nicClient.Get(ctx, resourceGroup, name, nil)
+	if err == nil {
+		if existing.ID == nil {
+			return "", errors.New("NIC has no ID")
+		}
+		return *existing.ID, nil
+	}
+	if !isNotFound(err) {
+		return "", err
+	}
+
+	ipProps := &armnetwork.InterfaceIPConfigurationPropertiesFormat{
+		Subnet:                    &armnetwork.Subnet{ID: to.Ptr(subnetID)},
+		PrivateIPAllocationMethod: to.Ptr(armnetwork.IPAllocationMethodDynamic),
+	}
+	if publicIPID != "" {
+		ipProps.PublicIPAddress = &armnetwork.PublicIPAddress{ID: to.Ptr(publicIPID)}
+	}
+
+	poller, err := p.nicClient.BeginCreateOrUpdate(ctx, resourceGroup, name, armnetwork.Interface{
+		Location: to.Ptr(p.cfg.Location),
+		Properties: &armnetwork.InterfacePropertiesFormat{
+			EnableIPForwarding: to.Ptr(true),
+			IPConfigurations: []*armnetwork.InterfaceIPConfiguration{{
+				Name:       to.Ptr("ipconfig1"),
+				Properties: ipProps,
+			}},
+		},
+	}, nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := poller.PollUntilDone(ctx, &azruntime.PollUntilDoneOptions{Frequency: 10 * time.Second})
+	if err != nil {
+		return "", err
+	}
+	if resp.ID == nil {
+		return "", errors.New("NIC has no ID")
+	}
+	return *resp.ID, nil
+}
+
+// ensureVMInRG creates a VM in a specific resource group.
+func (p *Provider) ensureVMInRG(ctx context.Context, resourceGroup, vmName, nicID, cloudInit, sshPublicKey string) error {
+	_, err := p.vmClient.Get(ctx, resourceGroup, vmName, nil)
+	if err == nil {
+		return nil
+	}
+	if !isNotFound(err) {
+		return err
+	}
+
+	customData := base64.StdEncoding.EncodeToString([]byte(cloudInit))
+	sshKeyPath := filepath.Join("/home", p.cfg.AdminUsername, ".ssh", "authorized_keys")
+
+	poller, err := p.vmClient.BeginCreateOrUpdate(ctx, resourceGroup, vmName, armcompute.VirtualMachine{
+		Location: to.Ptr(p.cfg.Location),
+		Zones:    []*string{to.Ptr(p.cfg.Zone)},
+		Properties: &armcompute.VirtualMachineProperties{
+			HardwareProfile: &armcompute.HardwareProfile{VMSize: to.Ptr(armcompute.VirtualMachineSizeTypes(p.cfg.VMSize))},
+			StorageProfile: &armcompute.StorageProfile{ImageReference: &armcompute.ImageReference{
+				Publisher: to.Ptr("Canonical"),
+				Offer:     to.Ptr("0001-com-ubuntu-server-jammy"),
+				SKU:       to.Ptr("22_04-lts-gen2"),
+				Version:   to.Ptr("latest"),
+			}},
+			OSProfile: &armcompute.OSProfile{
+				ComputerName:  to.Ptr(vmName),
+				AdminUsername: to.Ptr(p.cfg.AdminUsername),
+				CustomData:    to.Ptr(customData),
+				LinuxConfiguration: &armcompute.LinuxConfiguration{
+					DisablePasswordAuthentication: to.Ptr(true),
+					SSH:                           &armcompute.SSHConfiguration{PublicKeys: []*armcompute.SSHPublicKey{{Path: to.Ptr(sshKeyPath), KeyData: to.Ptr(sshPublicKey)}}},
+				},
+			},
+			NetworkProfile: &armcompute.NetworkProfile{NetworkInterfaces: []*armcompute.NetworkInterfaceReference{{
+				ID:         to.Ptr(nicID),
+				Properties: &armcompute.NetworkInterfaceReferenceProperties{Primary: to.Ptr(true)},
+			}}},
+		},
+	}, nil)
+	if err != nil {
+		return err
+	}
+
+	_, err = poller.PollUntilDone(ctx, &azruntime.PollUntilDoneOptions{Frequency: 30 * time.Second})
+	return err
+}
+
+// getPublicIPAddressInRG gets the IP address from a public IP in a specific resource group.
+func (p *Provider) getPublicIPAddressInRG(ctx context.Context, resourceGroup, name string) (string, error) {
+	pip, err := p.pipClient.Get(ctx, resourceGroup, name, nil)
+	if err != nil {
+		return "", err
+	}
+	if pip.Properties == nil || pip.Properties.IPAddress == nil {
+		return "", fmt.Errorf("public IP %s has no address yet", name)
+	}
+	return *pip.Properties.IPAddress, nil
+}
+
+// getPrivateIPInRG gets the private IP from a NIC in a specific resource group.
+func (p *Provider) getPrivateIPInRG(ctx context.Context, resourceGroup, name string) (string, error) {
+	nic, err := p.nicClient.Get(ctx, resourceGroup, name, nil)
+	if err != nil {
+		return "", err
+	}
+	if nic.Properties == nil || len(nic.Properties.IPConfigurations) == 0 || nic.Properties.IPConfigurations[0].Properties == nil || nic.Properties.IPConfigurations[0].Properties.PrivateIPAddress == nil {
+		return "", fmt.Errorf("NIC %s has no private IP yet", name)
+	}
+	return *nic.Properties.IPConfigurations[0].Properties.PrivateIPAddress, nil
 }

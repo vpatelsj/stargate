@@ -50,6 +50,7 @@ func main() {
 	var aksClusterDNS string
 	var aksSubscriptionID string
 	var aksVMResourceGroup string
+	var aksAPIServerPrivateIP string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8081", "The address the metric endpoint binds to.")
 
@@ -70,6 +71,7 @@ func main() {
 	flag.StringVar(&aksClusterDNS, "aks-cluster-dns", "10.0.0.10", "AKS cluster DNS service IP.")
 	flag.StringVar(&aksSubscriptionID, "aks-subscription-id", "", "Azure subscription ID for provider-id.")
 	flag.StringVar(&aksVMResourceGroup, "aks-vm-resource-group", "", "Resource group containing the worker VMs.")
+	flag.StringVar(&aksAPIServerPrivateIP, "aks-api-server-private-ip", "", "Private IP of AKS API server (via Tailscale mesh). When set, kubelet connects through this IP instead of public FQDN.")
 
 	opts := zap.Options{
 		Development: true,
@@ -127,6 +129,7 @@ func main() {
 		AKSClusterDNS:           aksClusterDNS,
 		AKSSubscriptionID:       aksSubscriptionID,
 		AKSVMResourceGroup:      aksVMResourceGroup,
+		AKSAPIServerPrivateIP:   aksAPIServerPrivateIP,
 		Clientset:               clientset,
 		CACertBase64:            caCertBase64,
 	}).SetupWithManager(mgr); err != nil {

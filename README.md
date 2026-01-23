@@ -557,11 +557,40 @@ spec:
 EOF
 ```
 
-### 5. Provision Worker VMs
+### 5. Provision AKS Router VM
+
+First, deploy a router VM inside the AKS VNet. This VM:
+- Joins Tailscale and advertises routes to the worker VNet
+- Acts as an SSH jump host to reach worker VMs
+- Enables the controller to bootstrap workers via SSH proxy
 
 ```bash
 export DEPLOY_NUM=$(date +%y%m%d%H%M)
 
+bin/prep-dc-inventory \
+  --provider azure \
+  --role aks-router \
+  --subscription-id "$AZURE_SUBSCRIPTION_ID" \
+  --aks-cluster-name "$AKS_CLUSTER_NAME" \
+  --aks-cluster-rg "$AKS_RESOURCE_GROUP" \
+  --aks-router-name stargate-aks-router-$DEPLOY_NUM \
+  --aks-subnet-cidr "10.237.0.0/24" \
+  --admin-username adminuser \
+  --ssh-public-key "$HOME/.ssh/id_rsa.pub" \
+  --location canadacentral
+```
+
+This command:
+- Auto-detects the AKS VNet and managed resource group (MC_*)
+- Creates a new subnet (10.237.0.0/24) in the AKS VNet for the router
+- Provisions a router VM with Tailscale that advertises routes
+- Creates a route table for traffic from AKS to worker VNets
+
+### 6. Provision Worker VMs
+
+Now provision the worker VMs in a separate VNet:
+
+```bash
 bin/prep-dc-inventory \
   --provider azure \
   --subscription-id "$AZURE_SUBSCRIPTION_ID" \
@@ -569,15 +598,17 @@ bin/prep-dc-inventory \
   --location canadacentral \
   --zone 1 \
   --vnet-name stargate-aks-vnet \
-  --vnet-cidr 10.60.0.0/16 \
+  --vnet-cidr 10.70.0.0/16 \
   --subnet-name stargate-aks-subnet \
-  --subnet-cidr 10.60.1.0/24 \
-  --router-name stargate-aks-router-$DEPLOY_NUM \
+  --subnet-cidr 10.70.1.0/24 \
+  --router-name stargate-dc-router-$DEPLOY_NUM \
   --vm stargate-aks-vm$DEPLOY_NUM-1 \
   --vm stargate-aks-vm$DEPLOY_NUM-2 \
   --vm-size Standard_D2s_v5 \
   --admin-username adminuser \
   --ssh-public-key "$HOME/.ssh/id_rsa.pub" \
+  --aks-cluster-name "$AKS_CLUSTER_NAME" \
+  --aks-cluster-rg "$AKS_RESOURCE_GROUP" \
   --tailscale-auth-key "$TAILSCALE_AUTH_KEY" \
   --tailscale-client-id "$TAILSCALE_CLIENT_ID" \
   --tailscale-client-secret "$TAILSCALE_CLIENT_SECRET" \
@@ -585,7 +616,7 @@ bin/prep-dc-inventory \
   --namespace aks-workers
 ```
 
-### 6. Create Secrets and ProvisioningProfile
+### 7. Create Secrets and ProvisioningProfile
 
 ```bash
 # Create namespace
@@ -612,7 +643,7 @@ spec:
 EOF
 ```
 
-### 7. Start the Controller in AKS Mode
+### 8. Start the Controller in AKS Mode
 
 The controller automatically detects the API server and CA certificate from the kubeconfig,
 and creates ServiceAccount tokens for each node bootstrap.
@@ -627,7 +658,7 @@ bin/azure-controller \
   --admin-username=adminuser &
 ```
 
-### 8. Bootstrap Workers
+### 9. Bootstrap Workers
 
 ```bash
 for server in $(kubectl get servers -n aks-workers -o jsonpath='{.items[*].metadata.name}'); do
@@ -647,7 +678,7 @@ EOF
 done
 ```
 
-### 9. Verify Workers Joined
+### 10. Verify Workers Joined
 
 ```bash
 kubectl get nodes -o wide
