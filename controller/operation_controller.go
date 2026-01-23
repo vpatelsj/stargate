@@ -49,6 +49,13 @@ type OperationReconciler struct {
 	AKSVMResourceGroup    string // Resource group containing the worker VMs
 	AKSAPIServerPrivateIP string // Private IP to use instead of public FQDN (via Tailscale mesh)
 
+	// Routing configuration for hybrid connectivity
+	DCRouterTailscaleIP  string // Tailscale IP of the DC router (for route updates)
+	AKSRouterTailscaleIP string // Tailscale IP of the AKS router (for route updates)
+	AzureRouteTableName  string // Azure route table name for pod CIDR routes
+	AzureVNetName        string // Azure VNet name containing the subnets
+	AzureSubnetName      string // Azure subnet name where AKS nodes reside
+
 	// Runtime fields (populated automatically)
 	Clientset    *kubernetes.Clientset // For creating SA tokens
 	CACertBase64 string                // Fetched from rest config
@@ -174,6 +181,12 @@ func (r *OperationReconciler) handlePending(ctx context.Context, operation *api.
 		return r.updateOperationStatus(ctx, operation, api.OperationPhaseFailed, fmt.Sprintf("Bootstrap failed: %v", err))
 	}
 
+	// Configure routing for the new node (DC router, AKS router, Azure route tables)
+	if err := r.configureNodeRouting(ctx, server, cfg); err != nil {
+		logger.Error(err, "Failed to configure routing (node will function but may have connectivity issues)", "server", server.Name)
+		// Don't fail the operation, just log the warning - routing can be fixed manually
+	}
+
 	// Bootstrap succeeded - update server status
 	logger.Info("Bootstrap succeeded", "server", server.Name)
 	server.Status.State = "ready"
@@ -294,6 +307,7 @@ func (r *OperationReconciler) bootstrapServer(ctx context.Context, server *api.S
 		if err != nil {
 			return fmt.Errorf("get SA token for AKS bootstrap: %w", err)
 		}
+		log.FromContext(ctx).Info("Building AKS bootstrap script", "nodeIP", target, "vmName", server.Name)
 		script = r.buildAKSBootstrapScript(cfg.kubernetesVersion, target, server.Name, saToken)
 	} else {
 		// Get control plane Tailscale IP if not set
@@ -601,7 +615,28 @@ RESOURCE_GROUP="%s"
 PROVIDER_ID="%s"
 
 echo "=== AKS Node Join for $NODE_NAME ==="
+echo "DEBUG: NODE_IP is '$NODE_IP'"
 echo "Provider ID: $PROVIDER_ID"
+
+# Stop existing services to ensure clean reconfiguration
+echo "Stopping existing kubelet and containerd if running..."
+systemctl stop kubelet 2>/dev/null || true
+systemctl stop containerd 2>/dev/null || true
+
+# Clean up stale CNI interfaces from previous kubenet configuration
+# These cause routing conflicts if left behind after repave
+echo "Cleaning up stale CNI interfaces..."
+ip link delete cni0 2>/dev/null || true
+ip link delete cbr0 2>/dev/null || true
+ip link delete flannel.1 2>/dev/null || true
+ip link delete docker0 2>/dev/null || true
+# Remove any stale routes that reference deleted interfaces
+ip route flush cache 2>/dev/null || true
+
+# Clean up any stale CNI state
+rm -rf /var/lib/cni/networks/* 2>/dev/null || true
+rm -rf /var/lib/cni/cache/* 2>/dev/null || true
+rm -f /etc/cni/net.d/*.conf /etc/cni/net.d/*.conflist 2>/dev/null || true
 
 # Link resolv.conf
 ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf || true
@@ -655,6 +690,7 @@ oom_score = 0
     [plugins."io.containerd.grpc.v1.cri".cni]
         bin_dir = "/opt/cni/bin"
         conf_dir = "/etc/cni/net.d"
+        # Note: conf_template is not used - Cilium manages its own CNI config
     [plugins."io.containerd.grpc.v1.cri".registry]
         config_path = "/etc/containerd/certs.d"
     [plugins."io.containerd.grpc.v1.cri".registry.headers]
@@ -759,23 +795,14 @@ chmod 0600 /var/lib/kubelet/kubeconfig
 
 # NOTE: kubelet.service is created AFTER package installation to prevent apt from overwriting it
 
-# Create bridge CNI config
-# Use a unique subnet per node (based on last octet of node IP or just use .1.0)
-cat > /etc/cni/net.d/10-bridge.conf <<'CNI_CONFIG'
-{
-    "cniVersion": "0.3.1",
-    "name": "bridge",
-    "type": "bridge",
-    "bridge": "cni0",
-    "isGateway": true,
-    "ipMasq": true,
-    "ipam": {
-        "type": "host-local",
-        "subnet": "10.244.1.0/24",
-        "routes": [{ "dst": "0.0.0.0/0" }]
-    }
-}
-CNI_CONFIG
+# CNI Configuration
+# Cilium will install its own CNI config when the cilium-agent pod starts
+# We just need to ensure the CNI directory exists and is clean
+mkdir -p /etc/cni/net.d
+# Remove any existing CNI configs to let Cilium take over
+rm -f /etc/cni/net.d/*.conf /etc/cni/net.d/*.conflist 2>/dev/null || true
+# Create a placeholder to prevent containerd from failing before Cilium starts
+echo '{"cniVersion":"0.3.1","name":"waiting-for-cilium","type":"loopback"}' > /etc/cni/net.d/99-loopback.conf
 
 # Create empty azure.json for cloud-provider
 AZURE_JSON_PATH="/etc/kubernetes/azure.json"
@@ -807,12 +834,14 @@ if ! command -v kubelet >/dev/null; then
   apt-mark hold kubelet kubectl
 fi
 
-# Install CNI plugins if not present
-if [ ! -f /opt/cni/bin/bridge ]; then
-  echo "Installing CNI plugins..."
+# Install basic CNI plugins (loopback is needed, Cilium brings its own cilium-cni)
+mkdir -p /opt/cni/bin
+if [ ! -f /opt/cni/bin/loopback ]; then
+  echo "Installing loopback CNI plugin..."
   CNI_VERSION="v1.3.0"
   curl -L "https://github.com/containernetworking/plugins/releases/download/${CNI_VERSION}/cni-plugins-linux-amd64-${CNI_VERSION}.tgz" | tar -C /opt/cni/bin -xz
 fi
+# Cilium will install cilium-cni binary when the DaemonSet starts
 
 # Load kernel modules
 modprobe overlay || true
@@ -850,8 +879,9 @@ WantedBy=multi-user.target
 KUBELET_SVC
 
 # Kubelet environment with provider-id and node labels
+# NOTE: kubernetes.azure.com/ebpf-dataplane=cilium is required for Cilium DaemonSet to schedule on this node
 cat > /etc/default/kubelet <<KUBELET_ENV
-KUBELET_EXTRA_ARGS=--provider-id=${PROVIDER_ID} --node-labels=kubernetes.azure.com/cluster=MC_${RESOURCE_GROUP}_${CLUSTER_NAME},kubernetes.azure.com/agentpool=stargate,kubernetes.azure.com/mode=user,kubernetes.azure.com/role=agent,kubernetes.azure.com/managed=false,kubernetes.azure.com/stargate=true
+KUBELET_EXTRA_ARGS=--provider-id=${PROVIDER_ID} --node-ip=${NODE_IP} --node-labels=kubernetes.azure.com/cluster=MC_${RESOURCE_GROUP}_${CLUSTER_NAME},kubernetes.azure.com/agentpool=stargate,kubernetes.azure.com/mode=user,kubernetes.azure.com/role=agent,kubernetes.azure.com/managed=false,kubernetes.azure.com/stargate=true,kubernetes.azure.com/ebpf-dataplane=cilium
 KUBELET_ENV
 
 # Verify kubelet.service was written correctly
@@ -861,11 +891,73 @@ if [ $(wc -c < /lib/systemd/system/kubelet.service) -lt 500 ]; then
   exit 1
 fi
 
-# Enable and start services
+# Enable and restart services (force restart even if already running)
 echo "Starting containerd and kubelet..."
 systemctl daemon-reload
-systemctl enable --now containerd
-systemctl enable --now kubelet
+systemctl enable containerd
+systemctl enable kubelet
+systemctl restart containerd
+sleep 3
+systemctl restart kubelet
+
+# Wait for node to register and patch it with a unique PodCIDR
+# Since AKS doesn't auto-allocate PodCIDRs to external nodes, we must set it ourselves
+# Use the last two octets of the node IP to generate a unique /24 subnet in 10.244.0.0/16
+echo "Waiting for node to register..."
+echo "DEBUG at wait: NODE_IP='$NODE_IP'"
+NODE_REGISTERED=false
+for i in {1..60}; do
+  if kubectl --kubeconfig=/var/lib/kubelet/kubeconfig get node "$NODE_NAME" &>/dev/null; then
+    echo "Node registered, allocating PodCIDR..."
+    NODE_REGISTERED=true
+    # Generate unique PodCIDR based on node IP (e.g., 10.70.1.5 -> 10.244.70.0/24)
+    # Use third octet of node IP to avoid collision with AKS nodes (which use 10.244.0-3.x)
+    THIRD_OCTET=$(echo "$NODE_IP" | cut -d. -f3)
+    FOURTH_OCTET=$(echo "$NODE_IP" | cut -d. -f4)
+    echo "DEBUG: THIRD=$THIRD_OCTET FOURTH=$FOURTH_OCTET"
+    # Combine to create unique subnet: 10.244.<third*10 + fourth mod 256>.0/24
+    # NOTE: %% is needed to escape the % for Go's fmt.Sprintf
+    UNIQUE_OCTET=$(( (THIRD_OCTET * 10 + FOURTH_OCTET) %% 200 + 50 ))
+    POD_CIDR="10.244.${UNIQUE_OCTET}.0/24"
+    echo "DEBUG: UNIQUE_OCTET=$UNIQUE_OCTET POD_CIDR=$POD_CIDR"
+    
+    echo "Patching node $NODE_NAME with PodCIDR: $POD_CIDR"
+    kubectl --kubeconfig=/var/lib/kubelet/kubeconfig patch node "$NODE_NAME" --type='json' \
+      -p="[{\"op\":\"add\",\"path\":\"/spec/podCIDR\",\"value\":\"${POD_CIDR}\"},{\"op\":\"add\",\"path\":\"/spec/podCIDRs\",\"value\":[\"${POD_CIDR}\"]}]" || true
+    
+    # Restart containerd to pick up the new PodCIDR in the CNI template
+    echo "Restarting containerd to apply new PodCIDR..."
+    systemctl restart containerd
+    sleep 5
+    systemctl restart kubelet
+    break
+  fi
+  echo "Waiting for node registration... attempt $i/60"
+  sleep 2
+done
+
+if [ "$NODE_REGISTERED" != "true" ]; then
+  echo "ERROR: Node failed to register after 120 seconds"
+  echo "Checking kubelet logs..."
+  journalctl -u kubelet --no-pager -n 30 || true
+  exit 1
+fi
+
+# Final cleanup: remove any stale routes from previous PodCIDR assignments
+# This prevents routing conflicts when nodes get reassigned different PodCIDRs
+echo "Cleaning up stale pod routes..."
+for iface in cni0 cbr0 flannel.1; do
+  ip route show | grep "dev $iface" | while read route; do
+    ip route del $route 2>/dev/null || true
+  done
+done
+# Remove routes to other pods' CIDRs that might conflict with new assignment
+for cidr in 10.244.0.0/24 10.244.1.0/24 10.244.2.0/24 10.244.3.0/24; do
+  # Only delete if it points to a local interface (not via router)
+  if ip route show $cidr | grep -v "via" | grep -q "dev"; then
+    ip route del $cidr 2>/dev/null || true
+  fi
+done
 
 # Final verification - ensure kubelet is installed and running
 echo "=== Verifying bootstrap success ==="
@@ -927,6 +1019,10 @@ func (r *OperationReconciler) runRemoteBootstrap(ctx context.Context, host, rout
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("ssh bootstrap failed: %w\nOutput: %s", err, buf.String())
 	}
+
+	// Log script output for debugging
+	os.WriteFile("/tmp/bootstrap-output.log", buf.Bytes(), 0644)
+	log.FromContext(ctx).Info("Bootstrap script output written to /tmp/bootstrap-output.log", "bytes", len(buf.String()))
 
 	return nil
 }
@@ -1033,5 +1129,132 @@ func (r *OperationReconciler) InitializeAKSCredentials(cfg interface{}) error {
 		}
 	}
 
+	return nil
+}
+
+// configureNodeRouting sets up routing for a newly bootstrapped node
+// This configures:
+// 1. DC router: adds route for node's pod CIDR via the node IP
+// 2. Azure route table: adds route for pod CIDR via AKS router
+func (r *OperationReconciler) configureNodeRouting(ctx context.Context, server *api.Server, cfg *bootstrapConfig) error {
+	logger := log.FromContext(ctx)
+
+	// Calculate the pod CIDR for this node (same logic as in bootstrap script)
+	nodeIP := server.Spec.IPv4
+	parts := strings.Split(nodeIP, ".")
+	if len(parts) != 4 {
+		return fmt.Errorf("invalid node IP format: %s", nodeIP)
+	}
+	thirdOctet, _ := strconv.Atoi(parts[2])
+	fourthOctet, _ := strconv.Atoi(parts[3])
+	uniqueOctet := (thirdOctet*10+fourthOctet)%200 + 50
+	podCIDR := fmt.Sprintf("10.244.%d.0/24", uniqueOctet)
+
+	logger.Info("Configuring routing for node", "server", server.Name, "nodeIP", nodeIP, "podCIDR", podCIDR)
+
+	// Configure DC router route
+	if r.DCRouterTailscaleIP != "" {
+		if err := r.configureDCRouterRoute(ctx, nodeIP, podCIDR, cfg); err != nil {
+			logger.Error(err, "Failed to configure DC router route")
+			// Continue with other configurations
+		}
+	}
+
+	// Configure Azure route table
+	if r.AzureRouteTableName != "" && r.AKSVMResourceGroup != "" {
+		if err := r.configureAzureRouteTable(ctx, server.Name, podCIDR); err != nil {
+			logger.Error(err, "Failed to configure Azure route table")
+			// Continue - routing can be fixed manually
+		}
+	}
+
+	return nil
+}
+
+// configureDCRouterRoute adds a route on the DC router for the node's pod CIDR
+func (r *OperationReconciler) configureDCRouterRoute(ctx context.Context, nodeIP, podCIDR string, cfg *bootstrapConfig) error {
+	logger := log.FromContext(ctx)
+
+	// Build SSH command to add route on DC router
+	// Route format: ip route add <podCIDR> via <nodeIP>
+	routeCmd := fmt.Sprintf(`
+		# Add route for pod CIDR via node IP (if not exists)
+		if ! ip route show %s | grep -q "via %s"; then
+			ip route add %s via %s dev eth0 || ip route replace %s via %s dev eth0
+			echo "Added route: %s via %s"
+		else
+			echo "Route already exists: %s via %s"
+		fi
+	`, podCIDR, nodeIP, podCIDR, nodeIP, podCIDR, nodeIP, podCIDR, nodeIP, podCIDR, nodeIP)
+
+	sshArgs := []string{
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "ConnectTimeout=10",
+		"-i", cfg.sshPrivateKeyPath,
+		"-p", strconv.Itoa(cfg.sshPort),
+		fmt.Sprintf("%s@%s", cfg.adminUsername, r.DCRouterTailscaleIP),
+		"sudo", "bash", "-c", routeCmd,
+	}
+
+	cmd := exec.CommandContext(ctx, "ssh", sshArgs...)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to configure DC router route: %w (output: %s)", err, buf.String())
+	}
+
+	logger.Info("Configured DC router route", "podCIDR", podCIDR, "via", nodeIP, "output", buf.String())
+	return nil
+}
+
+// configureAzureRouteTable adds a route in the Azure route table for the node's pod CIDR
+func (r *OperationReconciler) configureAzureRouteTable(ctx context.Context, nodeName, podCIDR string) error {
+	logger := log.FromContext(ctx)
+
+	// Use az CLI to add route
+	// Route goes via the AKS router which will forward to DC router via Tailscale
+	routeName := fmt.Sprintf("pod-cidr-%s", strings.ReplaceAll(nodeName, "-", ""))
+
+	// Check if route already exists
+	checkCmd := exec.CommandContext(ctx, "az", "network", "route-table", "route", "show",
+		"--resource-group", r.AKSVMResourceGroup,
+		"--route-table-name", r.AzureRouteTableName,
+		"--name", routeName,
+		"--output", "json",
+	)
+	if err := checkCmd.Run(); err == nil {
+		logger.Info("Azure route already exists", "routeName", routeName)
+		return nil
+	}
+
+	// Add the route - next hop is the AKS router private IP
+	aksRouterIP := r.AKSAPIServerPrivateIP // Reuse the AKS router IP
+	if aksRouterIP == "" {
+		logger.Info("Skipping Azure route table update - AKS router IP not configured")
+		return nil
+	}
+
+	addCmd := exec.CommandContext(ctx, "az", "network", "route-table", "route", "create",
+		"--resource-group", r.AKSVMResourceGroup,
+		"--route-table-name", r.AzureRouteTableName,
+		"--name", routeName,
+		"--address-prefix", podCIDR,
+		"--next-hop-type", "VirtualAppliance",
+		"--next-hop-ip-address", aksRouterIP,
+		"--output", "json",
+	)
+
+	var buf bytes.Buffer
+	addCmd.Stdout = &buf
+	addCmd.Stderr = &buf
+
+	if err := addCmd.Run(); err != nil {
+		return fmt.Errorf("failed to create Azure route: %w (output: %s)", err, buf.String())
+	}
+
+	logger.Info("Created Azure route", "routeName", routeName, "podCIDR", podCIDR, "nextHop", aksRouterIP)
 	return nil
 }

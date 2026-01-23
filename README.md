@@ -655,8 +655,28 @@ bin/azure-controller \
   --aks-resource-group="$AKS_RESOURCE_GROUP" \
   --aks-subscription-id="$AZURE_SUBSCRIPTION_ID" \
   --aks-vm-resource-group="stargate-vapa-aks-workers-$DEPLOY_NUM" \
+  --aks-api-server-private-ip="$AKS_ROUTER_PRIVATE_IP" \
+  --dc-router-tailscale-ip="$DC_ROUTER_TAILSCALE_IP" \
+  --azure-route-table-name="stargate-workers-rt" \
   --admin-username=adminuser &
 ```
+
+#### Routing Configuration Flags
+
+When operating in AKS mode with external datacenter nodes, the controller can automatically configure routing:
+
+| Flag | Description |
+|------|-------------|
+| `--dc-router-tailscale-ip` | Tailscale IP of the DC router. The controller will SSH to this router to add routes for node pod CIDRs. |
+| `--aks-router-tailscale-ip` | Tailscale IP of the AKS router (for future use). |
+| `--azure-route-table-name` | Name of the Azure route table where pod CIDR routes should be added. |
+| `--azure-vnet-name` | Azure VNet name containing the subnets. |
+| `--azure-subnet-name` | Azure subnet name where AKS nodes reside. |
+| `--aks-api-server-private-ip` | Private IP of the AKS router (used as next-hop for Azure routes). |
+
+These flags enable automatic configuration of:
+1. **DC Router Routes**: Adds `ip route add <pod-cidr> via <node-ip>` on the DC router for each bootstrapped node
+2. **Azure Route Tables**: Creates routes in Azure to direct pod CIDR traffic to the AKS router, which forwards via Tailscale to the DC router
 
 ### 9. Bootstrap Workers
 

@@ -1,0 +1,115 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: goldpinger
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: goldpinger
+  namespace: goldpinger
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: goldpinger
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: goldpinger
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: goldpinger
+subjects:
+  - kind: ServiceAccount
+    name: goldpinger
+    namespace: goldpinger
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: goldpinger
+  namespace: goldpinger
+  labels:
+    app: goldpinger
+spec:
+  selector:
+    matchLabels:
+      app: goldpinger
+  template:
+    metadata:
+      labels:
+        app: goldpinger
+    spec:
+      serviceAccountName: goldpinger
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+        - operator: Exists
+          effect: NoExecute
+      containers:
+        - name: goldpinger
+          image: docker.io/bloomberg/goldpinger:latest
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "8080"
+            - name: PING_TIMEOUT
+              value: "3s"
+            - name: CHECK_TIMEOUT
+              value: "10s"
+            - name: CHECK_ALL_TIMEOUT
+              value: "20s"
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          ports:
+            - containerPort: 8080
+              name: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            limits:
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: goldpinger
+  namespace: goldpinger
+  labels:
+    app: goldpinger
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+  selector:
+    app: goldpinger

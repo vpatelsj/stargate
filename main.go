@@ -52,6 +52,13 @@ func main() {
 	var aksVMResourceGroup string
 	var aksAPIServerPrivateIP string
 
+	// Routing configuration flags
+	var dcRouterTailscaleIP string
+	var aksRouterTailscaleIP string
+	var azureRouteTableName string
+	var azureVNetName string
+	var azureSubnetName string
+
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8081", "The address the metric endpoint binds to.")
 
 	// Bootstrap configuration flags
@@ -72,6 +79,13 @@ func main() {
 	flag.StringVar(&aksSubscriptionID, "aks-subscription-id", "", "Azure subscription ID for provider-id.")
 	flag.StringVar(&aksVMResourceGroup, "aks-vm-resource-group", "", "Resource group containing the worker VMs.")
 	flag.StringVar(&aksAPIServerPrivateIP, "aks-api-server-private-ip", "", "Private IP of AKS API server (via Tailscale mesh). When set, kubelet connects through this IP instead of public FQDN.")
+
+	// Routing configuration flags
+	flag.StringVar(&dcRouterTailscaleIP, "dc-router-tailscale-ip", "", "Tailscale IP of the DC router for route updates.")
+	flag.StringVar(&aksRouterTailscaleIP, "aks-router-tailscale-ip", "", "Tailscale IP of the AKS router for route updates.")
+	flag.StringVar(&azureRouteTableName, "azure-route-table-name", "", "Azure route table name for pod CIDR routes.")
+	flag.StringVar(&azureVNetName, "azure-vnet-name", "", "Azure VNet name containing the subnets.")
+	flag.StringVar(&azureSubnetName, "azure-subnet-name", "", "Azure subnet name where AKS nodes reside.")
 
 	opts := zap.Options{
 		Development: true,
@@ -130,6 +144,11 @@ func main() {
 		AKSSubscriptionID:       aksSubscriptionID,
 		AKSVMResourceGroup:      aksVMResourceGroup,
 		AKSAPIServerPrivateIP:   aksAPIServerPrivateIP,
+		DCRouterTailscaleIP:     dcRouterTailscaleIP,
+		AKSRouterTailscaleIP:    aksRouterTailscaleIP,
+		AzureRouteTableName:     azureRouteTableName,
+		AzureVNetName:           azureVNetName,
+		AzureSubnetName:         azureSubnetName,
 		Clientset:               clientset,
 		CACertBase64:            caCertBase64,
 	}).SetupWithManager(mgr); err != nil {
