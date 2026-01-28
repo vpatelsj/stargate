@@ -1,0 +1,103 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: servers.stargate.io
+spec:
+  group: stargate.io
+  names:
+    kind: Server
+    listKind: ServerList
+    plural: servers
+    singular: server
+    shortNames:
+      - srv
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - mac
+              properties:
+                mac:
+                  type: string
+                  description: MAC address of the server's primary NIC
+                provider:
+                  description: Provider indicates which controller should manage this server (e.g., "azure" or "qemu")
+                  type: string
+                ipv4:
+                  type: string
+                  description: IPv4 address of the server
+                routerIP:
+                  type: string
+                  description: Private IP of the subnet router for SSH proxy access (workers behind router)
+                bmc:
+                  type: object
+                  properties:
+                    address:
+                      type: string
+                      description: Address of the BMC (IP or hostname)
+                    credentialSecretRef:
+                      type: string
+                      description: Reference to Secret containing BMC credentials
+                inventory:
+                  type: object
+                  properties:
+                    sku:
+                      type: string
+                      description: SKU of the server
+                    location:
+                      type: string
+                      description: Location within the datacenter
+                    serialNumber:
+                      type: string
+                      description: Serial number of the server
+            status:
+              type: object
+              properties:
+                state:
+                  type: string
+                  description: "State of the server: pending, provisioning, ready, error"
+                currentOS:
+                  type: string
+                  description: Current OS version running on the server
+                appliedProvisioningProfile:
+                  type: string
+                  description: Name of the last successfully applied ProvisioningProfile
+                lastUpdated:
+                  type: string
+                  format: date-time
+                  description: Last time the status was updated
+                message:
+                  type: string
+                  description: Additional status information
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: State
+          type: string
+          jsonPath: .status.state
+        - name: OS
+          type: string
+          jsonPath: .status.currentOS
+        - name: Profile
+          type: string
+          jsonPath: .status.appliedProvisioningProfile
+        - name: IPv4
+          type: string
+          jsonPath: .spec.ipv4
