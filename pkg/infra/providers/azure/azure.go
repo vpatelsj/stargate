@@ -276,6 +276,25 @@ func (p *Provider) CreateNodes(ctx context.Context, specs []providers.NodeSpec) 
 		aksRouteCIDRs = p.cfg.AKSRouter.RouteCIDRs
 	}
 
+	// IMPORTANT: Always include the broad pod CIDR (10.244.0.0/16) for Azure route table
+	// and worker cloud-init routes. This is needed because:
+	// 1. The RouteCIDRs may only contain per-node pod CIDRs (10.244.0.0/24, etc.) to avoid
+	//    Tailscale routing conflicts (where DC worker pods would route back through Tailscale)
+	// 2. But the Azure route table and worker routes need the full pod CIDR so that DC workers
+	//    can reach any AKS pod (current or future) via the DC router
+	// The DC router then uses Tailscale to reach the AKS router, which has more specific routes.
+	podCIDRBroad := "10.244.0.0/16"
+	hasPodCIDR := false
+	for _, cidr := range aksRouteCIDRs {
+		if cidr == podCIDRBroad || strings.HasPrefix(cidr, "10.244.") {
+			hasPodCIDR = true
+			break
+		}
+	}
+	if !hasPodCIDR && len(aksRouteCIDRs) > 0 {
+		aksRouteCIDRs = append(aksRouteCIDRs, podCIDRBroad)
+	}
+
 	// Build per-worker pod CIDR routes once we have private IPs
 	workerRoutes := make([]route, 0, len(workerSpecs))
 
