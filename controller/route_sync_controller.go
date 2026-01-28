@@ -16,7 +16,9 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
 	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -113,12 +115,20 @@ func (r *RouteSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if podCIDR == "" && isAKSNode(&node) {
 		// AKS nodes with Azure CNI Overlay don't set spec.podCIDR
 		// The pod CIDR is in CiliumNode.spec.ipam.podCIDRs instead
-		// For route sync, we can skip these since routes are handled via
-		// the stargate-router-rt when we DO have the podCIDR from CiliumNode
-		logger.V(1).Info("AKS node has no spec.podCIDR (Azure CNI Overlay mode), checking CiliumNode")
-		// Try to get podCIDR from CiliumNode via kubectl (simple approach)
-		// In a full implementation, we'd import the Cilium CRD types
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		logger.V(1).Info("AKS node has no spec.podCIDR (Azure CNI Overlay mode), fetching from CiliumNode")
+
+		// Fetch podCIDR from CiliumNode
+		ciliumPodCIDR, err := r.getCiliumNodePodCIDR(ctx, node.Name)
+		if err != nil {
+			logger.V(1).Info("Could not get CiliumNode podCIDR, will retry", "error", err.Error())
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		if ciliumPodCIDR == "" {
+			logger.V(1).Info("CiliumNode has no podCIDR yet, will retry")
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		podCIDR = ciliumPodCIDR
+		logger.Info("Got podCIDR from CiliumNode", "podCIDR", podCIDR)
 	}
 	if podCIDR == "" {
 		logger.Info("Node has no pod CIDR yet, will retry")
@@ -431,6 +441,30 @@ func (r *RouteSyncReconciler) ensureRouterRouteForAKSNode(ctx context.Context, n
 	}
 
 	routeName := fmt.Sprintf("aks-node-%s", sanitizeRouteName(nodeName))
+
+	// First check if a route for this podCIDR already exists (might have different name)
+	routeTable, err := r.routeTableClient.Get(ctx, r.AKSResourceGroup, routeTableName, nil)
+	if err == nil && routeTable.Properties != nil && routeTable.Properties.Routes != nil {
+		for _, existingRoute := range routeTable.Properties.Routes {
+			if existingRoute.Properties != nil && existingRoute.Properties.AddressPrefix != nil &&
+				*existingRoute.Properties.AddressPrefix == podCIDR {
+				// Route exists - check if it has the right next hop
+				if existingRoute.Properties.NextHopIPAddress != nil &&
+					*existingRoute.Properties.NextHopIPAddress == nodeIP {
+					// Route already exists with correct config
+					return nil
+				}
+				// Route exists but with wrong next hop or different name - delete it first
+				if existingRoute.Name != nil && *existingRoute.Name != routeName {
+					delPoller, err := r.routesClient.BeginDelete(ctx, r.AKSResourceGroup, routeTableName, *existingRoute.Name, nil)
+					if err == nil {
+						_, _ = delPoller.PollUntilDone(ctx, nil)
+					}
+				}
+				break
+			}
+		}
+	}
 
 	poller, err := r.routesClient.BeginCreateOrUpdate(ctx, r.AKSResourceGroup, routeTableName, routeName,
 		armnetwork.Route{
@@ -784,7 +818,7 @@ func (r *RouteSyncReconciler) updateDCRouterTailscaleRoutes(ctx context.Context,
 		return fmt.Errorf("Tailscale client not configured")
 	}
 
-	// Get current routes for DC router
+	// Get DC router device
 	devices, err := r.tsClient.ListDevices(ctx)
 	if err != nil {
 		return fmt.Errorf("list devices: %w", err)
@@ -802,11 +836,17 @@ func (r *RouteSyncReconciler) updateDCRouterTailscaleRoutes(ctx context.Context,
 		return fmt.Errorf("DC router not found in Tailscale devices")
 	}
 
+	// Fetch current routes from the dedicated routes endpoint (more accurate than device list)
+	currentRoutes, err := r.tsClient.GetDeviceRoutes(ctx, dcRouterDevice.ID)
+	if err != nil {
+		return fmt.Errorf("get device routes: %w", err)
+	}
+
 	// Build route list including the DC subnet and all known pod CIDRs
 	routes := []string{r.DCSubnetCIDR}
 
-	// Add existing routes
-	for _, route := range dcRouterDevice.EnabledRoutes {
+	// Add existing enabled routes (using the accurate routes endpoint data)
+	for _, route := range currentRoutes.EnabledRoutes {
 		if route != newPodCIDR && route != r.DCSubnetCIDR {
 			routes = append(routes, route)
 		}
@@ -839,7 +879,7 @@ func (r *RouteSyncReconciler) updateAKSRouterTailscaleRoutes(ctx context.Context
 		return fmt.Errorf("Tailscale client not configured")
 	}
 
-	// Get current routes for AKS router
+	// Get AKS router device
 	devices, err := r.tsClient.ListDevices(ctx)
 	if err != nil {
 		return fmt.Errorf("list devices: %w", err)
@@ -857,12 +897,18 @@ func (r *RouteSyncReconciler) updateAKSRouterTailscaleRoutes(ctx context.Context
 		return fmt.Errorf("AKS router not found in Tailscale devices")
 	}
 
+	// Fetch current routes from the dedicated routes endpoint (more accurate than device list)
+	currentRoutes, err := r.tsClient.GetDeviceRoutes(ctx, aksRouterDevice.ID)
+	if err != nil {
+		return fmt.Errorf("get device routes: %w", err)
+	}
+
 	// Build route list: AKS node subnet + all known AKS pod CIDRs
 	// The AKS node subnet (10.224.0.0/16) allows DC router to reach AKS node IPs
 	routes := []string{"10.224.0.0/16"} // TODO: Make configurable
 
-	// Add existing routes
-	for _, route := range aksRouterDevice.EnabledRoutes {
+	// Add existing enabled routes (using the accurate routes endpoint data)
+	for _, route := range currentRoutes.EnabledRoutes {
 		if route != newPodCIDR && route != "10.224.0.0/16" {
 			routes = append(routes, route)
 		}
@@ -884,4 +930,43 @@ func (r *RouteSyncReconciler) updateAKSRouterTailscaleRoutes(ctx context.Context
 	}
 
 	return nil
+}
+
+// getCiliumNodePodCIDR fetches the podCIDR from a CiliumNode resource.
+// CiliumNode stores the pod CIDR in spec.ipam.podCIDRs for Azure CNI Overlay mode.
+func (r *RouteSyncReconciler) getCiliumNodePodCIDR(ctx context.Context, nodeName string) (string, error) {
+	// Define CiliumNode GVK
+	ciliumNodeGVK := schema.GroupVersionKind{
+		Group:   "cilium.io",
+		Version: "v2",
+		Kind:    "CiliumNode",
+	}
+
+	// Create unstructured object
+	ciliumNode := &unstructured.Unstructured{}
+	ciliumNode.SetGroupVersionKind(ciliumNodeGVK)
+
+	// Fetch CiliumNode
+	key := client.ObjectKey{Name: nodeName}
+	if err := r.Get(ctx, key, ciliumNode); err != nil {
+		return "", fmt.Errorf("get CiliumNode %s: %w", nodeName, err)
+	}
+
+	// Extract spec.ipam.podCIDRs
+	spec, found, err := unstructured.NestedMap(ciliumNode.Object, "spec")
+	if err != nil || !found {
+		return "", fmt.Errorf("CiliumNode %s has no spec", nodeName)
+	}
+
+	ipam, found, err := unstructured.NestedMap(spec, "ipam")
+	if err != nil || !found {
+		return "", fmt.Errorf("CiliumNode %s has no spec.ipam", nodeName)
+	}
+
+	podCIDRs, found, err := unstructured.NestedStringSlice(ipam, "podCIDRs")
+	if err != nil || !found || len(podCIDRs) == 0 {
+		return "", fmt.Errorf("CiliumNode %s has no spec.ipam.podCIDRs", nodeName)
+	}
+
+	return podCIDRs[0], nil
 }
