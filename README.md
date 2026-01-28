@@ -1,772 +1,336 @@
 # Stargate - Multi-Cloud Baremetal Kubernetes Provisioning
 
+Stargate enables provisioning baremetal or VM-based Kubernetes workers across multiple datacenters and joining them to a centralized AKS control plane. Workers in remote datacenters communicate with AKS via Tailscale subnet routers, enabling seamless cross-network pod connectivity.
+
+## Features
+
+- **Multi-Datacenter Worker Provisioning**: Bootstrap bare-metal or VM workers in remote datacenters as Kubernetes nodes, joining them to a managed AKS control plane
+- **Declarative Infrastructure**: Use Kubernetes CRDs (Server, Operation, ProvisioningProfile) to define and manage infrastructure as code
+- **Automatic Route Reconciliation**: The Azure controller continuously syncs routes between Azure VNets, Tailscale, and Kubernetes to ensure pod-to-pod connectivity
+- **Cilium CNI Integration**: Works with AKS Cilium overlay networking for scalable pod networking across datacenters
+- **TLS Bootstrap**: Workers automatically bootstrap with proper certificates using Kubernetes TLS bootstrap flow
+
+## How It Works
+
+### Route Reconciliation
+
+The Azure controller performs continuous route reconciliation across three layers:
+
+1. **Azure VNet Route Tables**: Maintains routes in the AKS VNet route table so that traffic destined for DC worker pod CIDRs (e.g., 10.244.55.0/24) is forwarded to the AKS router VM, which tunnels it over Tailscale to the DC router.
+
+2. **Tailscale Subnet Routes**: Automatically approves and manages Tailscale subnet routes via the Tailscale API. The AKS router advertises AKS pod/service CIDRs, while the DC router advertises the worker subnet and worker pod CIDRs.
+
+3. **Kubernetes Node PodCIDRs**: Patches CiliumNode resources with correct podCIDR allocations so Cilium knows how to route traffic to DC workers. Each worker gets a unique /24 from the 10.244.0.0/16 range.
+
+This three-layer sync ensures that:
+- Pods on AKS nodes can reach pods on DC workers
+- Pods on DC workers can reach pods on AKS nodes  
+- Pods on DC workers can reach each other
+- All routing is automatic and self-healing
+
 ## Architecture
 
 ```mermaid
 flowchart LR
   subgraph TS[Tailscale Network]
-    subgraph Local[Local Machine]
-      CP["MX Control Plane\nCRDs: Server, Operation, ProvisioningProfile"]
+    subgraph Jumpbox[Jumpbox VM]
       AZC["Azure Controller"]
-      QC["QEMU Controller"]
     end
 
-    AZR["Azure subnet router\n(only TS member in Azure DC)"]
-    QR["QEMU subnet router\n(only TS member in QEMU DC)"]
+    subgraph AKS[Azure AKS Cluster]
+      CP["Control Plane(Managed by Azure)"]
+      AKSNodes["AKS Nodes(10.244.0.0/16 pods)"]
+      AKSR["AKS Router(Tailscale subnet router)"]
+    end
+
+    subgraph DC[Remote Datacenter]
+      DCR["DC Router(Tailscale subnet router)"]
+      W1["Worker 1(10.244.x.0/24 pods)"]
+      W2["Worker 2(10.244.y.0/24 pods)"]
+    end
   end
 
-  subgraph AzureDC[Azure Datacenter]
-    AVM1[Worker VM 1]
-    AVM2[Worker VM 2]
-    AVM3[Worker VM ...]
-  end
-
-  subgraph QemuDC[QEMU Datacenter]
-    QVM1[Worker VM 1]
-    QVM2[Worker VM ...]
-  end
-
-  CP -- watches CRs --> AZC
-  CP -- watches CRs --> QC
-
-  AZC -. tailscale mgmt .- AZR
-  QC  -. tailscale mgmt .- QR
-
-  AZC -- provision/repave via router --> AZR
-  QC  -- provision/repave via router --> QR
-
-  AZR --- AVM1
-  AZR --- AVM2
-  AZR --- AVM3
-
-  QR --- QVM1
-  QR --- QVM2
+  AZC -- watches CRDs --> CP
+  AZC -- provisions workers via SSH --> DCR
+  
+  AKSR -.- AZC
+  AZC -.- DCR
+  
+  AKSNodes --- AKSR
+  DCR --- W1
+  DCR --- W2
+  
+  W1 & W2 -- join cluster --> CP
 ```
 
-Only one device per datacenter joins Tailscale as the subnet router; the worker VMs stay on the local subnet behind that router.
+### Key Concepts
 
-### Network Addressing Model (canonical)
+- **AKS Control Plane**: Managed Kubernetes control plane in Azure
+- **AKS Router**: VM in AKS VNet that joins Tailscale and advertises AKS pod/service CIDRs
+- **Jumpbox**: VM outside of AKS and DC that runs the Azure controller, connected to both networks via Tailscale
+- **DC Router**: VM in remote datacenter that joins Tailscale and advertises worker subnet
+- **Workers**: VMs provisioned via Stargate CRDs, bootstrap as Kubernetes nodes
 
-- One subnet per datacenter (example Azure: 10.50.<dc>.0/24; QEMU default: 192.168.100.0/24).
-- One dedicated router VM per datacenter joins Tailscale and advertises that subnet; workers stay on LAN only.
-- Router holds the gateway address (e.g., .1); workers consume .10+. Avoid overlapping subnets across DCs.
-- Controllers reach workers through the router over the advertised subnet; workers never join the tailnet.
+### Network Addressing
+
+| Component | CIDR | Description |
+|-----------|------|-------------|
+| AKS Pods | 10.244.0.0/16 | Pod network (Cilium overlay) |
+| AKS Services | 10.0.0.0/16 | Service ClusterIP range |
+| AKS VNet | 10.224.0.0/12 | Azure VNet address space |
+| DC Workers | 10.50.1.0/24 | Worker VM subnet |
+| Worker Pods | 10.244.50-69.0/24 | Per-worker pod CIDRs |
 
 ## Prerequisites
 
-- Docker
-- Kind
+- Azure CLI (authenticated via `az login`)
 - kubectl
 - Tailscale (installed and authenticated)
-- Azure CLI (authenticated)
 - Go 1.21+
+- SSH key pair (`~/.ssh/id_rsa`)
+
+### Required Environment Variables
+
+```bash
+export TAILSCALE_AUTH_KEY="tskey-auth-..."           # Tailscale auth key for routers
+export TAILSCALE_CLIENT_ID="..."                      # Tailscale OAuth client ID
+export TAILSCALE_CLIENT_SECRET="tskey-client-..."     # Tailscale OAuth client secret
+export TAILSCALE_API_KEY="tsapi-..."                  # Tailscale API key (for cleanup)
+```
+
+> **Note:** Generate `TAILSCALE_API_KEY` at https://login.tailscale.com/admin/settings/keys
 
 ## Quick Start
 
-### 1. Set Environment Variables
+### Option 1: Automated Deployment (Recommended)
+
+Deploy a complete E2E cluster with one command:
 
 ```bash
-export TAILSCALE_AUTH_KEY="tskey-auth-..."           # Tailscale auth key for the subnet router (one per DC)
-export TAILSCALE_CLIENT_ID="..."                      # Tailscale OAuth client ID (for route approval & cleanup)
-export TAILSCALE_CLIENT_SECRET="tskey-client-..."     # Tailscale OAuth client secret (for route approval & cleanup)
-export AZURE_SUBSCRIPTION_ID="..."                    # Azure subscription ID
-```
+# Build binaries
+make build
 
-> **Note:** `TAILSCALE_CLIENT_ID` and `TAILSCALE_CLIENT_SECRET` are required for automatic subnet route approval via the Tailscale API. Without these, you must manually approve routes in the Tailscale admin console.
-
-### 2. Build All Binaries
-
-```bash
-make clean-all && make build
-```
-
-### 3. Create Kind Cluster with Tailscale
-
-```bash
-./scripts/create-mx-cluster.sh
+# Deploy cluster (creates AKS + 2 DC workers)
+./scripts/deploy-aks-e2e.sh stargate-aks-e2e-1 canadacentral
 ```
 
 This script:
-- Creates a Kind cluster named `stargate-demo`
-- Installs Tailscale inside the control-plane container
-- Configures the API server to be accessible via Tailscale IP
-- Installs Flannel CNI
-- Installs Stargate CRDs
-- Creates `azure-dc` namespace with required secrets (`azure-ssh-credentials`, `tailscale-auth`)
-- Creates default `ProvisioningProfile` (`azure-k8s-worker`) in `azure-dc` namespace
+1. Creates an AKS cluster with Cilium CNI
+2. Provisions an AKS router (Tailscale subnet router in AKS VNet)
+3. Creates a DC resource group with router + worker VMs
+4. Configures Azure route tables for bidirectional pod routing
+5. Bootstraps workers as Kubernetes nodes
+6. Deploys Goldpinger for connectivity testing
 
-### 4. Provision VMs
-
-You can provision VMs using **Azure** and **local QEMU** providers:
-
-#### Option A: Azure VMs
+**Cleanup:**
 
 ```bash
-# Generate unique deployment number (YYMMDDHHmm format)
-export DEPLOY_NUM=$(date +%y%m%d%H%M)
-
-bin/prep-dc-inventory \
-  --provider azure \
-  --subscription-id "$AZURE_SUBSCRIPTION_ID" \
-  --resource-group stargate-vapa-$DEPLOY_NUM \
-  --location canadacentral \
-  --zone 1 \
-  --vnet-name stargate-vnet \
-  --vnet-cidr 10.50.0.0/16 \
-  --subnet-name stargate-subnet \
-  --subnet-cidr 10.50.1.0/24 \
-  --router-name stargate-azure-router-$DEPLOY_NUM \
-  --vm stargate-azure-vm$DEPLOY_NUM-1 \
-  --vm stargate-azure-vm$DEPLOY_NUM-2 \
-  --vm stargate-azure-vm$DEPLOY_NUM-3 \
-  --vm-size Standard_D2s_v5 \
-  --admin-username adminuser \
-  --ssh-public-key "$HOME/.ssh/id_rsa.pub" \
-  --tailscale-auth-key "$TAILSCALE_AUTH_KEY" \
-  --tailscale-client-id "$TAILSCALE_CLIENT_ID" \
-  --tailscale-client-secret "$TAILSCALE_CLIENT_SECRET" \
-  --namespace azure-dc
+./scripts/cleanup-aks-e2e.sh stargate-aks-e2e-1
 ```
 
-The `--tailscale-client-id` and `--tailscale-client-secret` flags enable automatic subnet route approval via the Tailscale API. If omitted, routes will be advertised but require manual approval in the admin console.
+### Option 2: Step-by-Step Deployment
 
-#### Option B: Local QEMU VMs (requires root and KVM)
+For detailed manual deployment, follow [docs/deployment-log-e2e-11.md](docs/deployment-log-e2e-11.md).
 
-```bash
-# Generate unique deployment number
-export DEPLOY_NUM=$(date +%y%m%d%H%M)
+## Stargate CRDs
 
-sudo -E bin/prep-dc-inventory \
-  --provider qemu \
-  --router-name stargate-qemu-router-$DEPLOY_NUM \
-  --vm stargate-qemu-vm$DEPLOY_NUM-1 \
-  --vm stargate-qemu-vm$DEPLOY_NUM-2 \
-  --admin-username ubuntu \
-  --ssh-public-key "$HOME/.ssh/id_rsa.pub" \
-  --tailscale-auth-key "$TAILSCALE_AUTH_KEY" \
-  --tailscale-client-id "$TAILSCALE_CLIENT_ID" \
-  --tailscale-client-secret "$TAILSCALE_CLIENT_SECRET" \
-  --namespace simulator-dc \
-  --qemu-subnet-cidr 192.168.100.0/24 \
-  --qemu-cpus 2 \
-  --qemu-memory 4096 \
-  --qemu-disk 20
-```
-
-> **Note:** Use `sudo -E` to preserve environment variables when running as root.
-
-This command:
-- Creates a bridge network (192.168.100.0/24) for QEMU VMs
-- Provisions a **router VM** that joins Tailscale and advertises the subnet
-- Provisions **worker VMs** on the local subnet (no Tailscale, accessed via router)
-- Automatically approves subnet routes via Tailscale API
-- Verifies connectivity via the router
-- Creates `Server` CRs in the `simulator-dc` namespace
-
-### 5. Build and Run Controllers
-
-```bash
-make start-controllers
-```
-
-This builds `bin/azure-controller` and `bin/qemu-controller`, then starts them (qemu controller runs under sudo). Logs: `/tmp/stargate-azure-controller.log` and `/tmp/stargate-qemu-controller.log`. If sudo prompts, run `sudo -v` first.
-
-
-### 6. Bootstrap VMs as Kubernetes Workers
-
-Create an `Operation` for each VM to trigger the bootstrap:
-
-#### For Azure VMs:
-
-```bash
-for server in $(kubectl get servers -n azure-dc -o jsonpath='{.items[*].metadata.name}'); do
-kubectl apply -f - <<EOF
-apiVersion: stargate.io/v1alpha1
-kind: Operation
-metadata:
-  name: bootstrap-${server}
-  namespace: azure-dc
-spec:
-  serverRef:
-    name: ${server}
-  provisioningProfileRef:
-    name: azure-k8s-worker
-  operation: repave
-EOF
-done
-```
-
-#### For QEMU VMs:
-
-```bash
-for server in $(kubectl get servers -n simulator-dc -o jsonpath='{.items[*].metadata.name}'); do
-kubectl apply -f - <<EOF
-apiVersion: stargate.io/v1alpha1
-kind: Operation
-metadata:
-  name: bootstrap-${server}
-  namespace: simulator-dc
-spec:
-  serverRef:
-    name: ${server}
-  provisioningProfileRef:
-    name: qemu-k8s-worker
-  operation: repave
-EOF
-done
-```
-
-### 7. Verify Cluster
-
-```bash
-kubectl get nodes -o wide
-kubectl get operations -n azure-dc    # For Azure
-kubectl get operations -n simulator-dc  # For QEMU
-kubectl get servers -n azure-dc       # For Azure
-kubectl get servers -n simulator-dc   # For QEMU
-```
-
-## Deploy MX Cluster in Azure
-
-The `mx-azure` tool provides a standalone way to deploy an MX cluster directly in Azure with a single VM that bootstraps as a Kubernetes control plane.
-
-### Prerequisites
-
-- Azure CLI authenticated (`az login`)
-- Tailscale installed and authenticated
-- SSH key pair (`~/.ssh/id_rsa.pub`)
-
-### 1. Set Environment Variables
-
-```bash
-export AZURE_SUBSCRIPTION_ID="..."           # Azure subscription ID
-export TAILSCALE_AUTH_KEY="tskey-auth-..."   # Tailscale auth key for the VM
-```
-
-### 2. Build the Tool
-
-```bash
-make build
-```
-
-### 3. Provision the MX Cluster
-
-```bash
-bin/mx-azure provision \
-  --subscription-id "$AZURE_SUBSCRIPTION_ID" \
-  --location canadacentral \
-  --zone 1 \
-  --resource-group stargate-vapa-mx-cluster \
-  --vnet-name mx-vnet \
-  --vnet-address-space 10.0.0.0/16 \
-  --subnet-name mx-subnet \
-  --subnet-prefix 10.0.1.0/24 \
-  --vm-name stargate-vapa-mx-cp \
-  --vm-size Standard_D2s_v5 \
-  --admin-username azureuser \
-  --ssh-public-key-path ~/.ssh/id_rsa.pub \
-  --tailscale-auth-key "$TAILSCALE_AUTH_KEY" \
-  --kubernetes-version 1.29
-```
-
-This command:
-- Creates a resource group with VNet, subnet, NSG, and public IP
-- Provisions a VM with cloud-init that:
-  - Installs Tailscale and joins your tailnet
-  - Installs kubeadm, kubelet, and kubectl
-  - Bootstraps a single-node Kubernetes cluster
-- Adds an SSH config entry for easy access via Tailscale
-
-### 4. Verify the Cluster
-
-Wait for the VM to appear in [Tailscale Admin Console](https://login.tailscale.com/admin/machines), then verify:
-
-```bash
-# Check bootstrap logs
-tailscale ssh azureuser@stargate-vapa-mx-cp -- sudo tail -f /var/log/mx-bootstrap.log
-
-# Verify Kubernetes is ready
-tailscale ssh azureuser@stargate-vapa-mx-cp -- sudo kubectl get nodes
-```
-
-### 5. Access the Cluster Locally (Optional)
-
-Copy the kubeconfig to your local machine:
-
-```bash
-tailscale ssh azureuser@stargate-vapa-mx-cp -- sudo cat /etc/kubernetes/admin.conf > ~/.kube/mx-azure.conf
-export KUBECONFIG=~/.kube/mx-azure.conf
-kubectl get nodes
-```
-
-### 6. Add Worker Nodes to the MX Cluster
-
-You can add worker nodes using `prep-dc-inventory` and the azure-controller.
-
-#### 6a. Provision Worker VMs
-
-This command provisions worker VMs and automatically installs Stargate CRDs on the MX cluster:
-
-```bash
-export DEPLOY_NUM=$(date +%y%m%d%H%M)
-
-bin/prep-dc-inventory \
-  --provider azure \
-  --subscription-id "$AZURE_SUBSCRIPTION_ID" \
-  --resource-group stargate-vapa-workers-$DEPLOY_NUM \
-  --location canadacentral \
-  --zone 1 \
-  --vnet-name stargate-vnet \
-  --vnet-cidr 10.50.0.0/16 \
-  --subnet-name stargate-subnet \
-  --subnet-cidr 10.50.1.0/24 \
-  --router-name stargate-azure-router-$DEPLOY_NUM \
-  --vm stargate-azure-vm$DEPLOY_NUM-1 \
-  --vm stargate-azure-vm$DEPLOY_NUM-2 \
-  --vm stargate-azure-vm$DEPLOY_NUM-3 \
-  --vm-size Standard_D2s_v5 \
-  --admin-username adminuser \
-  --ssh-public-key "$HOME/.ssh/id_rsa.pub" \
-  --tailscale-auth-key "$TAILSCALE_AUTH_KEY" \
-  --tailscale-client-id "$TAILSCALE_CLIENT_ID" \
-  --tailscale-client-secret "$TAILSCALE_CLIENT_SECRET" \
-  --kubeconfig ~/.kube/mx-azure.conf \
-  --namespace azure-dc
-```
-
-#### 6b. Create Secrets and ProvisioningProfile
-
-```bash
-# Create secrets for SSH access
-kubectl create secret generic azure-ssh-credentials \
-  --namespace azure-dc \
-  --from-literal=username=adminuser \
-  --from-file=privateKey=$HOME/.ssh/id_rsa
-
-# Create ProvisioningProfile
-kubectl apply -f - <<EOF
-apiVersion: stargate.io/v1alpha1
-kind: ProvisioningProfile
-metadata:
-  name: azure-k8s-worker
-  namespace: azure-dc
-spec:
-  kubernetesVersion: "1.29"
-  containerRuntime: containerd
-  sshCredentialsSecretRef: azure-ssh-credentials
-  adminUsername: adminuser
-EOF
-```
-
-#### 6c. Start the Controller in Tailscale Mode
-
-Get the control plane's Tailscale IP:
-
-```bash
-CP_IP=$(tailscale ssh azureuser@stargate-vapa-mx-cp -- tailscale ip -4)
-echo "Control plane IP: $CP_IP"
-```
-
-Start the controller:
-
-```bash
-KUBECONFIG=~/.kube/mx-azure.conf bin/azure-controller \
-  --control-plane-mode=tailscale \
-  --control-plane-ip=$CP_IP \
-  --control-plane-hostname=stargate-vapa-mx-cp \
-  --control-plane-ssh-user=azureuser \
-  --admin-username=adminuser
-```
-
-#### 6d. Bootstrap Workers
-
-Create Operations to trigger the bootstrap:
-
-```bash
-for server in $(kubectl get servers -n azure-dc -o jsonpath='{.items[*].metadata.name}'); do
-  kubectl apply -f - <<EOF
-apiVersion: stargate.io/v1alpha1
-kind: Operation
-metadata:
-  name: bootstrap-${server}
-  namespace: azure-dc
-spec:
-  serverRef:
-    name: ${server}
-  provisioningProfileRef:
-    name: azure-k8s-worker
-  operation: repave
-EOF
-done
-```
-
-#### 6e. Verify Workers Joined
-
-```bash
-kubectl get nodes -o wide
-kubectl get operations -n azure-dc
-kubectl get servers -n azure-dc
-```
-
-### 7. Check Cluster Status
-
-```bash
-bin/mx-azure status \
-  --subscription-id "$AZURE_SUBSCRIPTION_ID" \
-  --resource-group stargate-vapa-mx-cluster
-```
-
-### 8. Destroy the Cluster
-
-```bash
-bin/mx-azure destroy \
-  --subscription-id "$AZURE_SUBSCRIPTION_ID" \
-  --resource-group stargate-vapa-mx-cluster \
-  --yes
-```
-
-## Add External Workers to an Existing AKS Cluster
-
-You can add external VMs as worker nodes to an existing AKS cluster. The controller automatically:
-- Detects the API server URL from kubeconfig
-- Extracts the CA certificate from kubeconfig  
-- Creates ServiceAccount tokens programmatically for each node bootstrap
-
-### Prerequisites
-
-- An existing AKS cluster
-- Azure CLI authenticated (`az login`)
-- Tailscale installed and authenticated
-- SSH key pair for worker VM access
-
-### 1. Get AKS Cluster Kubeconfig
-
-```bash
-# Set your AKS cluster details
-export AKS_RESOURCE_GROUP="your-aks-resource-group"
-export AKS_CLUSTER_NAME="your-aks-cluster-name"
-export AZURE_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-
-# Get admin kubeconfig (saves to ~/.kube/config or use --file to save elsewhere)
-az aks get-credentials --resource-group $AKS_RESOURCE_GROUP --name $AKS_CLUSTER_NAME --admin
-
-# If you saved kubeconfig to a different file, set KUBECONFIG
-# export KUBECONFIG=~/.kube/your-aks-cluster.conf
-```
-
-### 2. Create ServiceAccount for Node Bootstrap
-
-The controller uses the Kubernetes TokenRequest API to generate short-lived tokens for each node bootstrap.
-Create the ServiceAccount that will be used:
-
-```bash
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: kubelet-bootstrap
-  namespace: kube-system
-EOF
-```
-
-### 3. Create RBAC for Node Bootstrap
-
-```bash
-# Grant the ServiceAccount permissions to bootstrap nodes
-kubectl apply -f - <<EOF
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: kubelet-bootstrap
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: system:node-bootstrapper
-subjects:
-- kind: ServiceAccount
-  name: kubelet-bootstrap
-  namespace: kube-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: kubelet-bootstrap-node-autoapprove
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: system:certificates.k8s.io:certificatesigningrequests:nodeclient
-subjects:
-- kind: ServiceAccount
-  name: kubelet-bootstrap
-  namespace: kube-system
-EOF
-```
-
-### 4. Deploy Tailscale Subnet Router in AKS (Optional)
-
-If you want to access the AKS pod network from your Tailscale network:
-
-```bash
-# Create namespace and auth secret
-kubectl create namespace tailscale
-kubectl create secret generic tailscale-auth \
-  --namespace tailscale \
-  --from-literal=authkey="$TAILSCALE_AUTH_KEY"
-
-# Get the pod and service CIDRs
-POD_CIDR=$(az aks show -g $AKS_RESOURCE_GROUP -n $AKS_CLUSTER_NAME --query "networkProfile.podCidr" -o tsv)
-SERVICE_CIDR=$(az aks show -g $AKS_RESOURCE_GROUP -n $AKS_CLUSTER_NAME --query "networkProfile.serviceCidr" -o tsv)
-echo "Pod CIDR: $POD_CIDR, Service CIDR: $SERVICE_CIDR"
-
-# Deploy Tailscale subnet router
-cat <<EOF | kubectl apply -f -
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: tailscale-router
-  namespace: tailscale
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: tailscale-router
-  template:
-    metadata:
-      labels:
-        app: tailscale-router
-    spec:
-      serviceAccountName: default
-      containers:
-      - name: tailscale
-        image: tailscale/tailscale:latest
-        securityContext:
-          capabilities:
-            add: ["NET_ADMIN"]
-        env:
-        - name: TS_AUTHKEY
-          valueFrom:
-            secretKeyRef:
-              name: tailscale-auth
-              key: authkey
-        - name: TS_ROUTES
-          value: "${POD_CIDR},${SERVICE_CIDR}"
-        - name: TS_ACCEPT_ROUTES
-          value: "true"
-        - name: TS_USERSPACE
-          value: "false"
-EOF
-```
-
-### 5. Provision AKS Router VM
-
-First, deploy a router VM inside the AKS VNet. This VM:
-- Joins Tailscale and advertises routes to the worker VNet
-- Acts as an SSH jump host to reach worker VMs
-- Enables the controller to bootstrap workers via SSH proxy
-
-```bash
-export DEPLOY_NUM=$(date +%y%m%d%H%M)
-
-bin/prep-dc-inventory \
-  --provider azure \
-  --role aks-router \
-  --subscription-id "$AZURE_SUBSCRIPTION_ID" \
-  --aks-cluster-name "$AKS_CLUSTER_NAME" \
-  --aks-cluster-rg "$AKS_RESOURCE_GROUP" \
-  --aks-router-name stargate-aks-router-$DEPLOY_NUM \
-  --aks-subnet-cidr "10.237.0.0/24" \
-  --admin-username adminuser \
-  --ssh-public-key "$HOME/.ssh/id_rsa.pub" \
-  --location canadacentral
-```
-
-This command:
-- Auto-detects the AKS VNet and managed resource group (MC_*)
-- Creates a new subnet (10.237.0.0/24) in the AKS VNet for the router
-- Provisions a router VM with Tailscale that advertises routes
-- Creates a route table for traffic from AKS to worker VNets
-
-### 6. Provision Worker VMs
-
-Now provision the worker VMs in a separate VNet:
-
-```bash
-bin/prep-dc-inventory \
-  --provider azure \
-  --subscription-id "$AZURE_SUBSCRIPTION_ID" \
-  --resource-group stargate-vapa-aks-workers-$DEPLOY_NUM \
-  --location canadacentral \
-  --zone 1 \
-  --vnet-name stargate-aks-vnet \
-  --vnet-cidr 10.70.0.0/16 \
-  --subnet-name stargate-aks-subnet \
-  --subnet-cidr 10.70.1.0/24 \
-  --router-name stargate-dc-router-$DEPLOY_NUM \
-  --vm stargate-aks-vm$DEPLOY_NUM-1 \
-  --vm stargate-aks-vm$DEPLOY_NUM-2 \
-  --vm-size Standard_D2s_v5 \
-  --admin-username adminuser \
-  --ssh-public-key "$HOME/.ssh/id_rsa.pub" \
-  --aks-cluster-name "$AKS_CLUSTER_NAME" \
-  --aks-cluster-rg "$AKS_RESOURCE_GROUP" \
-  --tailscale-auth-key "$TAILSCALE_AUTH_KEY" \
-  --tailscale-client-id "$TAILSCALE_CLIENT_ID" \
-  --tailscale-client-secret "$TAILSCALE_CLIENT_SECRET" \
-  --kubeconfig ~/.kube/config \
-  --namespace aks-workers
-```
-
-### 7. Create Secrets and ProvisioningProfile
-
-```bash
-# Create namespace
-kubectl create namespace aks-workers
-
-# Create SSH credentials secret
-kubectl create secret generic aks-ssh-credentials \
-  --namespace aks-workers \
-  --from-literal=username=adminuser \
-  --from-file=privateKey=$HOME/.ssh/id_rsa
-
-# Create ProvisioningProfile
-kubectl apply -f - <<EOF
-apiVersion: stargate.io/v1alpha1
-kind: ProvisioningProfile
-metadata:
-  name: aks-worker
-  namespace: aks-workers
-spec:
-  kubernetesVersion: "1.29"
-  containerRuntime: containerd
-  sshCredentialsSecretRef: aks-ssh-credentials
-  adminUsername: adminuser
-EOF
-```
-
-### 8. Start the Controller in AKS Mode
-
-The controller automatically detects the API server and CA certificate from the kubeconfig,
-and creates ServiceAccount tokens for each node bootstrap.
-
-```bash
-bin/azure-controller \
-  --control-plane-mode=aks \
-  --aks-cluster-name="$AKS_CLUSTER_NAME" \
-  --aks-resource-group="$AKS_RESOURCE_GROUP" \
-  --aks-subscription-id="$AZURE_SUBSCRIPTION_ID" \
-  --aks-vm-resource-group="stargate-vapa-aks-workers-$DEPLOY_NUM" \
-  --aks-api-server-private-ip="$AKS_ROUTER_PRIVATE_IP" \
-  --dc-router-tailscale-ip="$DC_ROUTER_TAILSCALE_IP" \
-  --azure-route-table-name="stargate-workers-rt" \
-  --admin-username=adminuser &
-```
-
-#### Routing Configuration Flags
-
-When operating in AKS mode with external datacenter nodes, the controller can automatically configure routing:
-
-| Flag | Description |
-|------|-------------|
-| `--dc-router-tailscale-ip` | Tailscale IP of the DC router. The controller will SSH to this router to add routes for node pod CIDRs. |
-| `--aks-router-tailscale-ip` | Tailscale IP of the AKS router (for future use). |
-| `--azure-route-table-name` | Name of the Azure route table where pod CIDR routes should be added. |
-| `--azure-vnet-name` | Azure VNet name containing the subnets. |
-| `--azure-subnet-name` | Azure subnet name where AKS nodes reside. |
-| `--aks-api-server-private-ip` | Private IP of the AKS router (used as next-hop for Azure routes). |
-
-These flags enable automatic configuration of:
-1. **DC Router Routes**: Adds `ip route add <pod-cidr> via <node-ip>` on the DC router for each bootstrapped node
-2. **Azure Route Tables**: Creates routes in Azure to direct pod CIDR traffic to the AKS router, which forwards via Tailscale to the DC router
-
-### 9. Bootstrap Workers
-
-```bash
-for server in $(kubectl get servers -n aks-workers -o jsonpath='{.items[*].metadata.name}'); do
-  kubectl apply -f - <<EOF
-apiVersion: stargate.io/v1alpha1
-kind: Operation
-metadata:
-  name: bootstrap-${server}
-  namespace: aks-workers
-spec:
-  serverRef:
-    name: ${server}
-  provisioningProfileRef:
-    name: aks-worker
-  operation: repave
-EOF
-done
-```
-
-### 10. Verify Workers Joined
-
-```bash
-kubectl get nodes -o wide
-kubectl get operations -n aks-workers
-```
-
-The external VMs should appear as nodes in your AKS cluster with labels indicating they are managed by Stargate.
-
-## Cleanup
-
-### Full Cleanup
-
-Cleans up everything: Kind cluster, Tailscale devices, Azure resource groups, and local processes.
-
-```bash
-make clean-all
-```
-
-## Custom Resource Definitions (CRDs)
+Stargate uses three Custom Resource Definitions:
 
 ### Server
 
-Represents a physical or virtual machine that can be provisioned.
+Represents a baremetal or VM server in a datacenter:
 
 ```yaml
 apiVersion: stargate.io/v1alpha1
 kind: Server
 metadata:
-  name: my-server
+  name: worker-1
+  namespace: azure-dc
 spec:
-  ipv4: 100.x.x.x          # Tailscale IP
-  provisioningProfile: azure-k8s-worker
-status:
-  state: ready             # pending, provisioning, ready, error
-  os: k8s-1.34
+  hostname: worker-1
+  ipAddress: 10.50.1.5
+  macAddress: "60:45:bd:5c:3f:6f"
+  routerIP: 100.79.116.34  # Tailscale IP of DC router
 ```
 
 ### ProvisioningProfile
 
-Defines how servers should be provisioned.
+Defines how to provision a server as a Kubernetes worker:
 
 ```yaml
 apiVersion: stargate.io/v1alpha1
 kind: ProvisioningProfile
 metadata:
   name: azure-k8s-worker
+  namespace: azure-dc
 spec:
-  kubernetesVersion: "1.34"
+  kubernetesVersion: "1.33"
+  containerRuntime: containerd
   sshCredentialsSecretRef: azure-ssh-credentials
   tailscaleAuthKeySecretRef: tailscale-auth
+  adminUsername: ubuntu
 ```
 
 ### Operation
 
-Triggers a provisioning operation on a server.
+Triggers an action on a server (e.g., repave):
 
 ```yaml
 apiVersion: stargate.io/v1alpha1
 kind: Operation
 metadata:
-  name: bootstrap-my-server
+  name: worker-1-repave
+  namespace: azure-dc
 spec:
   serverRef:
-    name: my-server
+    name: worker-1
   provisioningProfileRef:
     name: azure-k8s-worker
-  operation: repave        # repave is the only supported operation
-status:
-  phase: Succeeded         # Pending, Running, Succeeded, Failed
-  message: "Bootstrap completed successfully"
+  operation: repave
 ```
+
+## Tools
+
+### prep-dc-inventory
+
+Provisions infrastructure for AKS integration:
+
+```bash
+# Provision AKS router (Tailscale subnet router in AKS VNet)
+./bin/prep-dc-inventory \
+  -role aks-router \
+  -resource-group myaks-rg \
+  -aks-cluster-name myaks \
+  -aks-router-name myaks-router \
+  -aks-subnet-cidr 10.237.0.0/24 \
+  -location canadacentral
+
+# Provision DC infrastructure (router + workers)
+./bin/prep-dc-inventory \
+  -role dc \
+  -resource-group myaks-dc \
+  -aks-cluster-name myaks \
+  -router-name myaks-dc-router \
+  -vm myaks-worker-1 \
+  -vm myaks-worker-2 \
+  -location canadacentral
+```
+
+### azure-controller
+
+Controller that watches Operation CRDs and provisions workers:
+
+```bash
+./bin/azure-controller \
+  -control-plane-mode aks \
+  -enable-route-sync \
+  -aks-api-server "https://myaks.hcp.canadacentral.azmk8s.io:443" \
+  -aks-cluster-name myaks \
+  -aks-resource-group myaks-rg \
+  -aks-node-resource-group MC_myaks-rg_myaks_canadacentral \
+  -aks-subscription-id $SUBSCRIPTION_ID \
+  -aks-vm-resource-group myaks-dc \
+  -dc-router-tailscale-ip 100.x.x.x \
+  -aks-router-tailscale-ip 100.y.y.y \
+  -aks-router-private-ip 10.237.0.4 \
+  -azure-vnet-name aks-vnet-xxxxx \
+  -dc-subnet-cidr 10.50.0.0/16
+```
+
+**Controller Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-control-plane-mode` | `aks` or `self-hosted` |
+| `-enable-route-sync` | Enable Azure route table sync |
+| `-aks-api-server` | AKS API server URL |
+| `-aks-cluster-name` | AKS cluster name |
+| `-aks-resource-group` | AKS cluster resource group |
+| `-aks-node-resource-group` | AKS managed resource group (MC_*) |
+| `-aks-vm-resource-group` | DC worker VMs resource group |
+| `-dc-router-tailscale-ip` | DC router Tailscale IP |
+| `-aks-router-tailscale-ip` | AKS router Tailscale IP |
+| `-aks-router-private-ip` | AKS router private IP (route next hop) |
+| `-azure-vnet-name` | AKS VNet name |
+| `-dc-subnet-cidr` | DC network CIDR |
+
+## Connectivity Verification
+
+After deployment, use Goldpinger to verify pod-to-pod connectivity:
+
+```bash
+# Port-forward to Goldpinger
+kubectl port-forward -n goldpinger svc/goldpinger 8080:8080 &
+
+# Check connectivity
+curl -s http://localhost:8080/check_all | jq '.responses | to_entries[] | "\(.key) -> OK: \(.value.OK)"'
+```
+
+Expected output shows all pods can reach each other:
+```
+"goldpinger-xxx -> OK: true"
+"goldpinger-yyy -> OK: true"
+"goldpinger-zzz -> OK: true"
+"goldpinger-www -> OK: true"
+```
+
+## Development
+
+### Build
+
+```bash
+make build          # Build all binaries
+make clean-all      # Clean and rebuild
+```
+
+### Test
+
+```bash
+make test           # Run unit tests
+```
+
+### Project Structure
+
+```
+├── api/v1alpha1/          # CRD type definitions
+├── cmd/
+│   ├── azure/             # Azure CLI tool
+│   ├── infra-prep/        # prep-dc-inventory tool
+│   ├── mx-azure/          # MX cluster provisioner
+│   ├── qemu-controller/   # QEMU VM controller
+│   └── simulator/         # Local simulator
+├── config/
+│   ├── crd/bases/         # CRD manifests
+│   └── samples/           # Sample resources
+├── controller/            # Controller implementations
+├── docs/                  # Deployment logs and documentation
+├── pkg/
+│   ├── infra/providers/   # Infrastructure providers (Azure, QEMU)
+│   ├── qemu/              # QEMU VM management
+│   └── tailscale/         # Tailscale API client
+└── scripts/               # Deployment and cleanup scripts
+```
+
+## Troubleshooting
+
+### Workers not joining cluster
+
+1. Check controller logs: `tail -f /tmp/azure-controller.log`
+2. Verify SSH connectivity: `ssh -J ubuntu@<dc-router-ts-ip> ubuntu@10.50.1.5`
+3. Check Operation status: `kubectl get operations -n azure-dc`
+
+### Pod connectivity issues
+
+1. Verify routes: `az network route-table route list -g MC_xxx --route-table-name stargate-workers-rt -o table`
+2. Check Tailscale routes: `tailscale status`
+3. Test from worker: `ssh worker-1 -- ping <aks-pod-ip>`
+
+### Tailscale routes not approved
+
+Routes should auto-approve via OAuth. If not:
+1. Check `TAILSCALE_CLIENT_ID` and `TAILSCALE_CLIENT_SECRET` are set
+2. Manually approve in [Tailscale Admin Console](https://login.tailscale.com/admin/machines)
+
+## License
+
+MIT
