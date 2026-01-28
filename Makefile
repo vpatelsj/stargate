@@ -23,7 +23,7 @@ all: build
 build: azure-controller qemu-controller mockapi simulator prep-dc-inventory azure mx-azure
 
 azure-controller:
-	$(GOBUILD) -o $(AZURE_CONTROLLER_BIN) ./main.go
+	$(GOBUILD) -o $(AZURE_CONTROLLER_BIN) ./cmd/azure-controller/main.go
 
 qemu-controller:
 	$(GOBUILD) -o $(QEMU_CONTROLLER_BIN) ./cmd/qemu-controller/main.go
