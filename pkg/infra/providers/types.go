@@ -35,4 +35,5 @@ type NodeInfo struct {
 	TailnetFQDN string
 	TailscaleIP string // Tailscale IPv4 address (router only in subnet mode)
 	RouterIP    string // Private IP of the router for workers behind it
+	PodCIDR     string // Expected pod CIDR for this node (derived from private IP)
 }

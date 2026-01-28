@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -51,6 +52,12 @@ type Provider struct {
 	nicClient        *armnetwork.InterfacesClient
 	vmClient         *armcompute.VirtualMachinesClient
 	routeTableClient *armnetwork.RouteTablesClient
+}
+
+// route holds a CIDR and the next hop IP for route table construction.
+type route struct {
+	Prefix  string
+	NextHop string
 }
 
 // NewProvider initializes Azure clients.
@@ -209,11 +216,8 @@ func (p *Provider) CreateNodes(ctx context.Context, specs []providers.NodeSpec) 
 		aksRouteCIDRs = p.cfg.AKSRouter.RouteCIDRs
 	}
 
-	if routerIP != "" && len(workerSpecs) > 0 {
-		if err := p.ensureRouteTable(ctx, subnetID, routerIP, aksRouteCIDRs); err != nil {
-			return nil, fmt.Errorf("route table: %w", err)
-		}
-	}
+	// Build per-worker pod CIDR routes once we have private IPs
+	workerRoutes := make([]route, 0, len(workerSpecs))
 
 	// Create workers with router IP for Tailscale routing
 	for _, spec := range workerSpecs {
@@ -238,13 +242,26 @@ func (p *Provider) CreateNodes(ctx context.Context, specs []providers.NodeSpec) 
 			return nil, fmt.Errorf("get private IP %s: %w", nicName, err)
 		}
 
+		podCIDR := derivePodCIDR(privIP)
+
 		nodes = append(nodes, providers.NodeInfo{
 			Name:      spec.Name,
 			Role:      providers.RoleWorker,
 			PublicIP:  "",
 			PrivateIP: privIP,
 			RouterIP:  routerIP,
+			PodCIDR:   podCIDR,
 		})
+
+		if podCIDR != "" {
+			workerRoutes = append(workerRoutes, route{Prefix: podCIDR, NextHop: privIP})
+		}
+	}
+
+	if routerIP != "" && len(workerSpecs) > 0 {
+		if err := p.ensureRouteTable(ctx, subnetID, routerIP, aksRouteCIDRs, workerRoutes); err != nil {
+			return nil, fmt.Errorf("route table: %w", err)
+		}
 	}
 
 	return nodes, nil
@@ -578,6 +595,18 @@ func (p *Provider) ensureNIC(ctx context.Context, name, subnetID, publicIPID str
 		if existing.ID == nil {
 			return "", errors.New("NIC has no ID")
 		}
+		// Ensure IP forwarding is enabled for worker NICs so they can route pod traffic
+		if existing.Properties != nil && (existing.Properties.EnableIPForwarding == nil || !*existing.Properties.EnableIPForwarding) {
+			existing.Properties.EnableIPForwarding = to.Ptr(true)
+			poller, err := p.nicClient.BeginCreateOrUpdate(ctx, p.cfg.ResourceGroup, name, existing.Interface, nil)
+			if err != nil {
+				return "", fmt.Errorf("enable IP forwarding on worker NIC: %w", err)
+			}
+			_, err = poller.PollUntilDone(ctx, &azruntime.PollUntilDoneOptions{Frequency: 10 * time.Second})
+			if err != nil {
+				return "", err
+			}
+		}
 		return *existing.ID, nil
 	}
 	if !isNotFound(err) {
@@ -595,6 +624,7 @@ func (p *Provider) ensureNIC(ctx context.Context, name, subnetID, publicIPID str
 	poller, err := p.nicClient.BeginCreateOrUpdate(ctx, p.cfg.ResourceGroup, name, armnetwork.Interface{
 		Location: to.Ptr(p.cfg.Location),
 		Properties: &armnetwork.InterfacePropertiesFormat{
+			EnableIPForwarding: to.Ptr(true),
 			IPConfigurations: []*armnetwork.InterfaceIPConfiguration{{
 				Name:       to.Ptr("ipconfig1"),
 				Properties: ipProps,
@@ -737,9 +767,9 @@ func (p *Provider) ensureNICWithIPForwarding(ctx context.Context, name, subnetID
 	return *resp.ID, nil
 }
 
-// ensureRouteTable creates a route table with Tailscale CGNAT route and optional extra routes (e.g., AKS CIDRs),
-// then associates it with the subnet
-func (p *Provider) ensureRouteTable(ctx context.Context, subnetID, routerIP string, extraRouteCIDRs []string) error {
+// ensureRouteTable creates a route table with Tailscale CGNAT route, optional extra routes (e.g., AKS CIDRs),
+// and per-worker pod CIDR routes, then associates it with the subnet
+func (p *Provider) ensureRouteTable(ctx context.Context, subnetID, routerIP string, extraRouteCIDRs []string, workerRoutes []route) error {
 	routeTableName := fmt.Sprintf("%s-route-table", p.cfg.ResourceGroup)
 
 	// Build routes: Tailscale CGNAT + any extra CIDRs
@@ -760,6 +790,21 @@ func (p *Provider) ensureRouteTable(ctx context.Context, subnetID, routerIP stri
 				AddressPrefix:    to.Ptr(cidr),
 				NextHopType:      to.Ptr(armnetwork.RouteNextHopTypeVirtualAppliance),
 				NextHopIPAddress: to.Ptr(routerIP),
+			},
+		})
+	}
+
+	// Add per-worker pod CIDR routes to keep pod egress symmetric and avoid blackholes
+	for i, wr := range workerRoutes {
+		if wr.Prefix == "" || wr.NextHop == "" {
+			continue
+		}
+		routes = append(routes, &armnetwork.Route{
+			Name: to.Ptr(fmt.Sprintf("worker-pod-route-%d", i)),
+			Properties: &armnetwork.RoutePropertiesFormat{
+				AddressPrefix:    to.Ptr(wr.Prefix),
+				NextHopType:      to.Ptr(armnetwork.RouteNextHopTypeVirtualAppliance),
+				NextHopIPAddress: to.Ptr(wr.NextHop),
 			},
 		})
 	}
@@ -835,6 +880,15 @@ func (p *Provider) ensureRouteTable(ctx context.Context, subnetID, routerIP stri
 	}
 
 	return nil
+}
+
+// derivePodCIDR returns a /24 pod CIDR based on the node's private IP (aligned with host-local setup).
+func derivePodCIDR(privateIP string) string {
+	ip := net.ParseIP(privateIP).To4()
+	if ip == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d.%d.%d.0/24", ip[0], ip[1], ip[2])
 }
 
 // ensureSubnetInVNet creates or gets a subnet in a specific VNet and resource group.

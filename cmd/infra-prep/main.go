@@ -563,7 +563,8 @@ func runAKSRouterConnectivityCheck(nodes []providers.NodeInfo, adminUser string,
 func findRouterTarget(nodes []providers.NodeInfo) string {
 	for _, n := range nodes {
 		if n.Role == providers.RoleRouter {
-			return firstNonEmpty(n.TailnetFQDN, n.TailscaleIP, n.PublicIP)
+			// Prefer Tailscale IP over hostname - hostnames may not resolve from controller
+			return firstNonEmpty(n.TailscaleIP, n.TailnetFQDN, n.PublicIP)
 		}
 	}
 	return ""
