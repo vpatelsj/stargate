@@ -908,10 +908,19 @@ func (r *RouteSyncReconciler) updateAKSRouterTailscaleRoutes(ctx context.Context
 	routes := []string{"10.224.0.0/16"} // TODO: Make configurable
 
 	// Add existing enabled routes (using the accurate routes endpoint data)
+	// IMPORTANT: Filter out broad pod CIDRs like 10.244.0.0/16 - these cause routing
+	// conflicts on the DC router where it routes DC worker pods back through Tailscale
+	// instead of locally. Only specific /24 pod CIDRs should be advertised.
+	logger := log.FromContext(ctx)
 	for _, route := range currentRoutes.EnabledRoutes {
-		if route != newPodCIDR && route != "10.224.0.0/16" {
-			routes = append(routes, route)
+		if route == newPodCIDR || route == "10.224.0.0/16" {
+			continue // Will be added separately
 		}
+		if isBroadPodCIDR(route) {
+			logger.Info("Filtering out broad pod CIDR from AKS router routes", "cidr", route)
+			continue
+		}
+		routes = append(routes, route)
 	}
 
 	// Add the new pod CIDR
@@ -969,4 +978,21 @@ func (r *RouteSyncReconciler) getCiliumNodePodCIDR(ctx context.Context, nodeName
 	}
 
 	return podCIDRs[0], nil
+}
+
+// isBroadPodCIDR returns true if the given CIDR is a broad pod CIDR (e.g., /16 or larger)
+// that should NOT be advertised via Tailscale. Only specific node pod CIDRs (/24) should
+// be advertised to avoid routing conflicts where DC routers route DC worker pods back
+// through Tailscale instead of locally.
+func isBroadPodCIDR(cidr string) bool {
+	// Check if this is a pod CIDR in the typical 10.244.x.x range
+	if !strings.HasPrefix(cidr, "10.244.") {
+		return false
+	}
+	// A broad CIDR ends with /16, /12, /8, etc. (prefix length < 24)
+	// We only want to allow /24 or smaller for pod CIDRs
+	if strings.HasSuffix(cidr, "/16") || strings.HasSuffix(cidr, "/12") || strings.HasSuffix(cidr, "/8") {
+		return true
+	}
+	return false
 }

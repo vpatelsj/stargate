@@ -64,7 +64,7 @@ go build -o bin/mx-azure ./cmd/mx-azure/main.go
 az group create --name stargate-aks-e2e-8 --location canadacentral
 ```
 
-**Status:** ✅ Completed  
+**Status:** ⏳ Pending  
 **Output:**
 ```json
 {
@@ -97,7 +97,7 @@ az aks create \
   --generate-ssh-keys
 ```
 
-**Status:** ✅ Completed  
+**Status:** ⏳ Pending  
 **Output:**
 ```
 provisioningState: Succeeded
@@ -116,7 +116,7 @@ serviceCidr: 10.0.0.0/16
 az aks get-credentials --resource-group stargate-aks-e2e-8 --name stargate-aks-e2e-8 --overwrite-existing
 ```
 
-**Status:** ✅ Completed  
+**Status:** ⏳ Pending  
 **Output:**
 ```
 Merged "stargate-aks-e2e-8" as current context in /home/vapa/.kube/config
@@ -131,7 +131,7 @@ kubectl get nodes
 kubectl cluster-info
 ```
 
-**Status:** ✅ Completed  
+**Status:** ⏳ Pending  
 **Output:**
 ```
 NAME                                STATUS   ROLES    AGE     VERSION
@@ -149,7 +149,7 @@ Kubernetes control plane is running at https://stargate-a-stargate-aks-e2e-44654
 kubectl apply -f config/crd/bases/
 ```
 
-**Status:** ✅ Completed  
+**Status:** ⏳ Pending  
 **Output:**
 ```
 customresourcedefinition.apiextensions.k8s.io/operations.stargate.io created
@@ -165,7 +165,7 @@ customresourcedefinition.apiextensions.k8s.io/servers.stargate.io created
 kubectl create namespace stargate
 ```
 
-**Status:** ✅ Completed  
+**Status:** ⏳ Pending  
 **Output:**
 ```
 namespace/stargate created
@@ -187,7 +187,7 @@ namespace/stargate created
   -location canadacentral
 ```
 
-**Status:** ✅ Completed  
+**Status:** ⏳ Pending  
 **Output:**
 ```
 [aks] detected: VNet=aks-vnet-11486953 RG=MC_stargate-aks-e2e-8_stargate-aks-e2e-8_canadacentral
@@ -207,7 +207,7 @@ AKS router ready and reachable.
 az group create --name stargate-aks-e2e-8-dc --location canadacentral
 ```
 
-**Status:** ✅ Completed  
+**Status:** ⏳ Pending  
 **Output:**
 ```json
 {
@@ -233,7 +233,7 @@ az group create --name stargate-aks-e2e-8-dc --location canadacentral
   -location canadacentral
 ```
 
-**Status:** ✅ Completed  
+**Status:** ⏳ Pending  
 **Output:**
 ```
 [aks] detected CIDRs for worker routing: [10.224.0.0/12 10.244.0.0/16 10.0.0.0/16]
@@ -291,7 +291,7 @@ stringData:
 EOF
 ```
 
-**Status:** ✅ Completed  
+**Status:** ⏳ Pending  
 **Bootstrap Token:**
 ```
 d4y594.w3rja73p8bcjqxav
@@ -346,7 +346,7 @@ spec:
 EOF
 ```
 
-**Status:** ✅ Completed  
+**Status:** ⏳ Pending  
 **Output:**
 ```
 secret/azure-ssh-credentials created
@@ -375,7 +375,7 @@ kubectl create clusterrolebinding kubelet-bootstrap-node \
   --serviceaccount=kube-system:kubelet-bootstrap
 ```
 
-**Status:** ✅ Completed  
+**Status:** ⏳ Pending  
 **Output:**
 ```
 serviceaccount/kubelet-bootstrap created
@@ -419,7 +419,7 @@ spec:
 EOF
 ```
 
-**Status:** ✅ Completed  
+**Status:** ⏳ Pending  
 **Output:**
 ```
 operation.stargate.io/stargate-aks-e2e-8-worker-1-repave created
@@ -1049,6 +1049,53 @@ ssh ubuntu@<AKS_ROUTER_TS_IP> "sudo tailscale status --json" | jq '.Self.Allowed
 - Commands applied:
   - `az network nic update --resource-group STARGATE-AKS-E2E-2-DC --name stargate-aks-e2e-8-worker-1-nic --ip-forwarding true`
   - `az network nic update --resource-group STARGATE-AKS-E2E-2-DC --name stargate-aks-e2e-8-worker-2-nic --ip-forwarding true`
+
+### Finding: AKS Router Advertising Broad 10.244.0.0/16 Caused DC Router Routing Conflict (FIXED)
+
+**Problem:** DC router received the broad `10.244.0.0/16` route via Tailscale from AKS router. This caused Tailscale's routing table (table 52, priority 5270) to catch traffic destined for DC worker pods (e.g., `10.244.65.0/24`) and route it back through Tailscale instead of locally to the workers.
+
+**Diagnosis:**
+```bash
+# DC router was routing DC worker pod IPs via Tailscale instead of locally
+ssh ubuntu@<DC_ROUTER_TS_IP> "ip route get 10.244.65.2"
+# Output: 10.244.65.2 dev tailscale0 table 52 src 100.99.60.122  # WRONG!
+# Should be: 10.244.65.2 via 10.50.1.5 dev eth0
+
+# Tailscale table 52 had the broad /16 from AKS router
+ssh ubuntu@<DC_ROUTER_TS_IP> "ip route show table 52 | grep 10.244"
+# Output: 10.244.0.0/16 dev tailscale0  # This catches ALL pod traffic!
+```
+
+**Root Cause:** `queryAKSNetworkConfig()` in `cmd/infra-prep/main.go` was including the cluster-wide `PodCIDR` (e.g., `10.244.0.0/16`) in the `RouteCIDRs` advertised by the AKS router.
+
+**Fix Applied:**
+1. Updated `queryAKSNetworkConfig()` to NOT include the broad cluster-wide `PodCIDR`
+2. Instead, query Kubernetes nodes for their specific pod CIDRs (e.g., `10.244.0.0/24`, `10.244.1.0/24`)
+3. Updated `route_sync_controller.go` to filter out any broad `/16` pod CIDRs that may exist
+
+**Manual Workaround (applied to e2e-8):**
+```bash
+# Update AKS router to only advertise specific pod CIDRs
+ssh ubuntu@100.83.136.119 "sudo tailscale set --advertise-routes=10.224.0.0/16,10.0.0.0/16,10.244.0.0/24,10.244.1.0/24"
+
+# Verify DC router now routes locally
+ssh ubuntu@100.99.60.122 "ip route get 10.244.65.2"
+# Output: 10.244.65.2 via 10.50.1.5 dev eth0 src 10.50.1.4  # CORRECT!
+```
+
+**Verification:**
+```bash
+# AKS pod -> DC worker pod: ✅ WORKS
+kubectl run test --rm -it --restart=Never --image=busybox -- ping -c 3 10.244.65.2
+# 3 packets transmitted, 3 packets received, 0% packet loss
+
+# DC worker pod -> AKS pod: ✅ WORKS
+kubectl run test --rm -it --restart=Never --image=busybox \
+  --overrides='{"spec":{"nodeName":"stargate-aks-e2e-8-worker-1"}}' -- ping -c 3 10.244.0.156
+# 3 packets transmitted, 3 packets received, 0% packet loss
+```
+
+**Status:** ✅ FIXED (code updated in cmd/infra-prep/main.go and controller/route_sync_controller.go)
 
 ### Finding: DC subnet missing per-pod-CIDR UDRs to workers
 

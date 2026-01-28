@@ -1447,17 +1447,60 @@ func queryAKSNetworkConfig(ctx context.Context, subscriptionID, resourceGroup, c
 	}
 
 	// Build route CIDRs list
+	// Include VNet CIDR for node-to-node connectivity
 	if info.VNetCIDR != "" {
 		info.RouteCIDRs = append(info.RouteCIDRs, info.VNetCIDR)
 	}
-	if info.PodCIDR != "" {
-		info.RouteCIDRs = append(info.RouteCIDRs, info.PodCIDR)
-	}
+	// Include Service CIDR for cluster services
 	if info.ServiceCIDR != "" {
 		info.RouteCIDRs = append(info.RouteCIDRs, info.ServiceCIDR)
 	}
 
+	// IMPORTANT: Do NOT include the cluster-wide PodCIDR (e.g., 10.244.0.0/16)
+	// This causes routing conflicts on the DC router - when DC router receives this
+	// broad route via Tailscale, it will route DC worker pods (e.g., 10.244.65.0/24)
+	// back through Tailscale instead of locally to the workers.
+	//
+	// Instead, query the Kubernetes API for specific AKS node pod CIDRs and include
+	// only those. The route sync controller will handle dynamic updates.
+	nodePodCIDRs, err := getAKSNodePodCIDRs(ctx, resourceGroup, clusterName)
+	if err != nil {
+		// Fall back to NOT advertising any pod CIDRs - route sync will handle it
+		fmt.Printf("[warning] could not get AKS node pod CIDRs: %v (route sync will handle)\n", err)
+	} else {
+		for _, cidr := range nodePodCIDRs {
+			info.RouteCIDRs = append(info.RouteCIDRs, cidr)
+		}
+		fmt.Printf("[aks] discovered AKS node pod CIDRs: %v\n", nodePodCIDRs)
+	}
+
 	return info, nil
+}
+
+// getAKSNodePodCIDRs queries the Kubernetes API to get specific pod CIDRs for each AKS node.
+// This returns per-node /24 CIDRs instead of the cluster-wide /16 to avoid routing conflicts.
+func getAKSNodePodCIDRs(ctx context.Context, resourceGroup, clusterName string) ([]string, error) {
+	// Use kubectl to get node pod CIDRs (requires kubeconfig to be set up)
+	cmd := exec.CommandContext(ctx, "kubectl", "get", "nodes", "-o", "jsonpath={range .items[*]}{.spec.podCIDR}{\"\\n\"}{end}")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("kubectl get nodes: %w", err)
+	}
+
+	var podCIDRs []string
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	for _, line := range lines {
+		cidr := strings.TrimSpace(line)
+		if cidr != "" {
+			podCIDRs = append(podCIDRs, cidr)
+		}
+	}
+
+	if len(podCIDRs) == 0 {
+		return nil, fmt.Errorf("no pod CIDRs found on nodes")
+	}
+
+	return podCIDRs, nil
 }
 
 // ensureAKSRouteToWorkers creates or updates route tables in the AKS VNet:
