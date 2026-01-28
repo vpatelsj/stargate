@@ -1,8 +1,8 @@
 # Stargate AKS E2E Deployment Log
 
-**Cluster Name:** stargate-aks-e2e-3  
-**Resource Group:** stargate-aks-e2e-3  
-**DC Resource Group:** stargate-aks-e2e-3-dc  
+**Cluster Name:** stargate-aks-e2e-4  
+**Resource Group:** stargate-aks-e2e-4  
+**DC Resource Group:** stargate-aks-e2e-4-dc  
 **Location:** canadacentral  
 **Date Started:** 2026-01-27
 
@@ -61,16 +61,16 @@ go build -o bin/mx-azure ./cmd/mx-azure/main.go
 ## Step 1: Create Resource Group
 
 ```bash
-az group create --name stargate-aks-e2e-3 --location canadacentral
+az group create --name stargate-aks-e2e-4 --location canadacentral
 ```
 
 **Status:** ✅ Complete  
 **Output:**
 ```json
 {
-  "id": "/subscriptions/44654aed-2753-4b88-9142-af7132933b6b/resourceGroups/stargate-aks-e2e-3",
+  "id": "/subscriptions/44654aed-2753-4b88-9142-af7132933b6b/resourceGroups/stargate-aks-e2e-4",
   "location": "canadacentral",
-  "name": "stargate-aks-e2e-3",
+  "name": "stargate-aks-e2e-4",
   "properties": { "provisioningState": "Succeeded" }
 }
 ```
@@ -83,8 +83,8 @@ az group create --name stargate-aks-e2e-3 --location canadacentral
 
 ```bash
 az aks create \
-  --resource-group stargate-aks-e2e-3 \
-  --name stargate-aks-e2e-3 \
+  --resource-group stargate-aks-e2e-4 \
+  --name stargate-aks-e2e-4 \
   --kubernetes-version 1.33.5 \
   --node-count 2 \
   --node-vm-size Standard_D2ads_v5 \
@@ -102,7 +102,7 @@ az aks create \
 ```
 provisioningState: Succeeded
 kubernetesVersion: 1.33.5
-fqdn: stargate-a-stargate-aks-e2e-44654a-6tm9kzu1.hcp.canadacentral.azmk8s.io
+fqdn: stargate-a-stargate-aks-e2e-44654a-mdqlpkqe.hcp.canadacentral.azmk8s.io
 ```
 
 ---
@@ -110,13 +110,13 @@ fqdn: stargate-a-stargate-aks-e2e-44654a-6tm9kzu1.hcp.canadacentral.azmk8s.io
 ## Step 3: Get AKS Credentials
 
 ```bash
-az aks get-credentials --resource-group stargate-aks-e2e-3 --name stargate-aks-e2e-3 --overwrite-existing
+az aks get-credentials --resource-group stargate-aks-e2e-4 --name stargate-aks-e2e-4 --overwrite-existing
 ```
 
 **Status:** ✅ Complete  
 **Output:**
 ```
-Merged "stargate-aks-e2e-3" as current context in /home/vapa/.kube/config
+Merged "stargate-aks-e2e-4" as current context in /home/vapa/.kube/config
 ```
 
 ---
@@ -132,10 +132,10 @@ kubectl cluster-info
 **Output:**
 ```
 NAME                                STATUS   ROLES    AGE     VERSION
-aks-nodepool1-39590899-vmss000000   Ready    <none>   3m32s   v1.33.5
-aks-nodepool1-39590899-vmss000001   Ready    <none>   3m14s   v1.33.5
+aks-nodepool1-48033307-vmss000000   Ready    <none>   4m41s   v1.33.5
+aks-nodepool1-48033307-vmss000001   Ready    <none>   4m19s   v1.33.5
 
-Kubernetes control plane is running at https://stargate-a-stargate-aks-e2e-44654a-6tm9kzu1.hcp.canadacentral.azmk8s.io:443
+Kubernetes control plane is running at https://stargate-a-stargate-aks-e2e-44654a-mdqlpkqe.hcp.canadacentral.azmk8s.io:443
 ```
 
 ---
@@ -177,9 +177,9 @@ namespace/stargate created
 ```bash
 ./bin/prep-dc-inventory \
   -role aks-router \
-  -resource-group stargate-aks-e2e-3 \
-  -aks-cluster-name stargate-aks-e2e-3 \
-  -aks-router-name stargate-aks-e2e-3-router \
+  -resource-group stargate-aks-e2e-4 \
+  -aks-cluster-name stargate-aks-e2e-4 \
+  -aks-router-name stargate-aks-e2e-4-router \
   -aks-subnet-cidr 10.237.0.0/24 \
   -location canadacentral
 ```
@@ -187,11 +187,11 @@ namespace/stargate created
 **Status:** ✅ Complete  
 **Output:**
 ```
-[aks] detected: VNet=aks-vnet-11486953 RG=MC_stargate-aks-e2e-3_stargate-aks-e2e-3_canadacentral
+[aks] detected: VNet=aks-vnet-11486953 RG=MC_stargate-aks-e2e-4_stargate-aks-e2e-4_canadacentral
 CIDRs=[10.224.0.0/12 10.244.0.0/16 10.0.0.0/16]
 Routes approved: 10.224.0.0/12, 10.244.0.0/16, 10.0.0.0/16
 AKS router ready and reachable.
-  stargate-aks-e2e-3-router: TailscaleIP=100.72.18.11 PublicIP=40.82.176.22 PrivateIP=10.237.0.4
+  stargate-aks-e2e-4-router: TailscaleIP=100.125.241.110 PublicIP=4.206.202.77 PrivateIP=10.237.0.4
 ```
 
 ---
@@ -201,16 +201,16 @@ AKS router ready and reachable.
 > **Important:** DC infrastructure must be in a **separate** resource group to simulate an actual datacenter.
 
 ```bash
-az group create --name stargate-aks-e2e-3-dc --location canadacentral
+az group create --name stargate-aks-e2e-4-dc --location canadacentral
 ```
 
 **Status:** ✅ Complete  
 **Output:**
 ```json
 {
-  "id": "/subscriptions/44654aed-2753-4b88-9142-af7132933b6b/resourceGroups/stargate-aks-e2e-3-dc",
+  "id": "/subscriptions/44654aed-2753-4b88-9142-af7132933b6b/resourceGroups/stargate-aks-e2e-4-dc",
   "location": "canadacentral",
-  "name": "stargate-aks-e2e-3-dc",
+  "name": "stargate-aks-e2e-4-dc",
   "properties": { "provisioningState": "Succeeded" }
 }
 ```
@@ -222,11 +222,11 @@ az group create --name stargate-aks-e2e-3-dc --location canadacentral
 ```bash
 ./bin/prep-dc-inventory \
   -role dc \
-  -resource-group stargate-aks-e2e-3-dc \
-  -aks-cluster-name stargate-aks-e2e-3 \
-  -router-name stargate-aks-e2e-3-dc-router \
-  -vm stargate-aks-e2e-3-worker-1 \
-  -vm stargate-aks-e2e-3-worker-2 \
+  -resource-group stargate-aks-e2e-4-dc \
+  -aks-cluster-name stargate-aks-e2e-4 \
+  -router-name stargate-aks-e2e-4-dc-router \
+  -vm stargate-aks-e2e-4-worker-1 \
+  -vm stargate-aks-e2e-4-worker-2 \
   -location canadacentral
 ```
 
@@ -234,11 +234,13 @@ az group create --name stargate-aks-e2e-3-dc --location canadacentral
 **Output:**
 ```
 [aks] detected CIDRs for worker routing: [10.224.0.0/12 10.244.0.0/16 10.0.0.0/16]
-[connectivity] router stargate-aks-e2e-3-dc-router tailscale IP: 100.108.227.1
-[tailscale-api] routes enabled for device 411704425048361: [10.50.1.0/24]
+[connectivity] router stargate-aks-e2e-4-dc-router tailscale IP: 100.65.32.1
+[tailscale-api] routes enabled for device 7664459501920177: [10.50.1.0/24]
 [aks-rt] route table created, associated with AKS subnet
-[server-cr] created Server azure-dc/stargate-aks-e2e-3-worker-1 (MAC: 7c:ed:8d:a4:d1:51)
-[server-cr] created Server azure-dc/stargate-aks-e2e-3-worker-2 (MAC: 70:a8:a5:11:05:51)
+[cilium] patched CiliumNode aks-nodepool1-48033307-vmss000000 with podCIDR 10.244.0.0/24
+[cilium] patched CiliumNode aks-nodepool1-48033307-vmss000001 with podCIDR 10.244.1.0/24
+[server-cr] created Server azure-dc/stargate-aks-e2e-4-worker-1 (MAC: 60:45:bd:5b:8f:06)
+[server-cr] created Server azure-dc/stargate-aks-e2e-4-worker-2 (MAC: 60:45:bd:5f:e7:5d)
 Infrastructure ready and reachable.
 ```
 
@@ -373,6 +375,8 @@ kubectl create clusterrolebinding kubelet-bootstrap-node \
 serviceaccount/kubelet-bootstrap created
 clusterrolebinding.rbac.authorization.k8s.io/kubelet-bootstrap created
 clusterrolebinding.rbac.authorization.k8s.io/kubelet-bootstrap-node created
+clusterrole.rbac.authorization.k8s.io/ciliumnode-manager created
+clusterrolebinding.rbac.authorization.k8s.io/kubelet-bootstrap-ciliumnode created
 ```
 
 ---
@@ -385,11 +389,11 @@ kubectl apply -f - <<EOF
 apiVersion: stargate.io/v1alpha1
 kind: Operation
 metadata:
-  name: stargate-aks-e2e-3-worker-1-repave
+  name: stargate-aks-e2e-4-worker-1-repave
   namespace: azure-dc
 spec:
   serverRef:
-    name: stargate-aks-e2e-3-worker-1
+    name: stargate-aks-e2e-4-worker-1
   provisioningProfileRef:
     name: azure-k8s-worker
   operation: repave
@@ -400,11 +404,11 @@ kubectl apply -f - <<EOF
 apiVersion: stargate.io/v1alpha1
 kind: Operation
 metadata:
-  name: stargate-aks-e2e-3-worker-2-repave
+  name: stargate-aks-e2e-4-worker-2-repave
   namespace: azure-dc
 spec:
   serverRef:
-    name: stargate-aks-e2e-3-worker-2
+    name: stargate-aks-e2e-4-worker-2
   provisioningProfileRef:
     name: azure-k8s-worker
   operation: repave
@@ -414,12 +418,12 @@ EOF
 **Status:** ✅ Complete  
 **Output:**
 ```
-operation.stargate.io/stargate-aks-e2e-3-worker-1-repave created
-operation.stargate.io/stargate-aks-e2e-3-worker-2-repave created
+operation.stargate.io/stargate-aks-e2e-4-worker-1-repave created
+operation.stargate.io/stargate-aks-e2e-4-worker-2-repave created
 
 NAME                                 SERVER                        OPERATION   PHASE   AGE
-stargate-aks-e2e-3-worker-1-repave   stargate-aks-e2e-3-worker-1   repave              7s
-stargate-aks-e2e-3-worker-2-repave   stargate-aks-e2e-3-worker-2   repave              3s
+stargate-aks-e2e-4-worker-1-repave   stargate-aks-e2e-4-worker-1   repave              4s
+stargate-aks-e2e-4-worker-2-repave   stargate-aks-e2e-4-worker-2   repave              4s
 ```
 
 ---
@@ -430,37 +434,34 @@ stargate-aks-e2e-3-worker-2-repave   stargate-aks-e2e-3-worker-2   repave       
 > 
 > **Important:** The Server objects must have `routerIP` set to the Tailscale IP (100.105.92.5), not the hostname. If SSH fails with "Could not resolve hostname", patch the servers:
 > ```bash
-> kubectl patch server stargate-aks-e2e-3-worker-1 -n azure-dc --type='merge' -p '{"spec":{"routerIP":"100.105.92.5"}}'
-> kubectl patch server stargate-aks-e2e-3-worker-2 -n azure-dc --type='merge' -p '{"spec":{"routerIP":"100.105.92.5"}}'
+> kubectl patch server stargate-aks-e2e-4-worker-1 -n azure-dc --type='merge' -p '{"spec":{"routerIP":"100.105.92.5"}}'
+> kubectl patch server stargate-aks-e2e-4-worker-2 -n azure-dc --type='merge' -p '{"spec":{"routerIP":"100.105.92.5"}}'
 > ```
 
 ```bash
 ./bin/azure-controller \
   -control-plane-mode aks \
   -aks-api-server "https://stargate-a-stargate-aks-e2e-44654a-j2lo86eb.hcp.canadacentral.azmk8s.io:443" \
-  -aks-cluster-name stargate-aks-e2e-3 \
-  -aks-resource-group stargate-aks-e2e-3 \
+  -aks-cluster-name stargate-aks-e2e-4 \
+  -aks-resource-group stargate-aks-e2e-4 \
   -aks-subscription-id 44654aed-2753-4b88-9142-af7132933b6b \
-  -aks-vm-resource-group stargate-aks-e2e-3-dc \
-  -dc-router-tailscale-ip 100.105.92.5 \
-  -aks-router-tailscale-ip 100.119.186.117
+  -aks-vm-resource-group stargate-aks-e2e-4-dc \
+  -dc-router-tailscale-ip 100.65.32.1 \
+  -aks-router-tailscale-ip 100.125.241.110
 ```
 
-**Status:** ⏳ Pending  
+**Status:** ✅ Complete  
 **Output:**
 ```
-2026-01-27T17:57:26-05:00       INFO    setup   starting manager
-2026-01-27T17:57:26-05:00       INFO    Starting Controller     {"controller": "operation"}
-2026-01-27T17:57:26-05:00       INFO    Starting workers        {"controller": "operation", "worker count": 1}
-2026-01-27T17:57:26-05:00       INFO    Initiating repave via SSH bootstrap     {"server": "stargate-aks-e2e-3-worker-2", "ipv4": "10.50.1.6"}
-2026-01-27T17:57:26-05:00       INFO    Building AKS bootstrap script   {"nodeIP": "10.50.1.6", "vmName": "stargate-aks-e2e-3-worker-2"}
-2026-01-27T17:57:50-05:00       INFO    Bootstrap script output written to /tmp/bootstrap-output.log    {"bytes": 18794}
-2026-01-27T17:57:50-05:00       INFO    Configuring routing for node    {"server": "stargate-aks-e2e-3-worker-2", "nodeIP": "10.50.1.6", "podCIDR": "10.244.66.0/24"}
-2026-01-27T17:57:50-05:00       INFO    Bootstrap succeeded     {"server": "stargate-aks-e2e-3-worker-2"}
-2026-01-27T17:57:51-05:00       INFO    Initiating repave via SSH bootstrap     {"server": "stargate-aks-e2e-3-worker-1", "ipv4": "10.50.1.5"}
-2026-01-27T17:57:51-05:00       INFO    Building AKS bootstrap script   {"nodeIP": "10.50.1.5", "vmName": "stargate-aks-e2e-3-worker-1"}
-...
-2026-01-27T17:58:15-05:00       INFO    Bootstrap succeeded     {"server": "stargate-aks-e2e-3-worker-1"}
+2026-01-27T21:45:47-05:00       INFO    setup   starting manager
+2026-01-27T21:45:47-05:00       INFO    Starting Controller     {"controller": "operation"}
+2026-01-27T21:45:47-05:00       INFO    Starting workers        {"controller": "operation", "worker count": 1}
+2026-01-27T21:45:48-05:00       INFO    Initiating repave via SSH bootstrap     {"server": "stargate-aks-e2e-4-worker-1", "ipv4": "10.50.1.5"}
+2026-01-27T21:47:03-05:00       INFO    Bootstrap script output written to /tmp/bootstrap-output.log    {"bytes": 30570}
+2026-01-27T21:47:04-05:00       INFO    Bootstrap succeeded     {"server": "stargate-aks-e2e-4-worker-1"}
+2026-01-27T21:47:04-05:00       INFO    Initiating repave via SSH bootstrap     {"server": "stargate-aks-e2e-4-worker-2", "ipv4": "10.50.1.6"}
+2026-01-27T21:48:19-05:00       INFO    Bootstrap script output written to /tmp/bootstrap-output.log    {"bytes": 30961}
+2026-01-27T21:48:20-05:00       INFO    Bootstrap succeeded     {"server": "stargate-aks-e2e-4-worker-2"}
 ```
 
 ---
@@ -472,18 +473,18 @@ kubectl get nodes
 kubectl get operations -n azure-dc
 ```
 
-**Status:** ⏳ Pending  
+**Status:** ✅ Complete  
 **Output:**
 ```
 NAME                                STATUS   ROLES    AGE     VERSION
-aks-nodepool1-10551117-vmss000000   Ready    <none>   4h39m   v1.33.5
-aks-nodepool1-10551117-vmss000001   Ready    <none>   4h39m   v1.33.5
-stargate-aks-e2e-3-worker-1         Ready    <none>   18s     v1.33.7
-stargate-aks-e2e-3-worker-2         Ready    <none>   42s     v1.33.7
+aks-nodepool1-48033307-vmss000000   Ready    <none>   22m     v1.33.5
+aks-nodepool1-48033307-vmss000001   Ready    <none>   21m     v1.33.5
+stargate-aks-e2e-4-worker-1         Ready    <none>   2m      v1.33.7
+stargate-aks-e2e-4-worker-2         Ready    <none>   46s     v1.33.7
 
 NAME                                 SERVER                        OPERATION   PHASE       AGE
-stargate-aks-e2e-3-worker-1-repave   stargate-aks-e2e-3-worker-1   repave      Succeeded   69s
-stargate-aks-e2e-3-worker-2-repave   stargate-aks-e2e-3-worker-2   repave      Succeeded   69s
+stargate-aks-e2e-4-worker-1-repave   stargate-aks-e2e-4-worker-1   repave      Succeeded   3m30s
+stargate-aks-e2e-4-worker-2-repave   stargate-aks-e2e-4-worker-2   repave      Succeeded   3m30s
 ```
 
 🎉 **Deployment Complete!** DC workers successfully joined the AKS cluster.
@@ -591,14 +592,14 @@ EOF
 kubectl port-forward -n goldpinger svc/goldpinger 8080:8080
 ```
 
-**Status:** ✅ Complete  
+**Status:** ⏳ Pending  
 **Output:**
 ```
 NAME               READY   STATUS    RESTARTS   AGE   IP             NODE
-goldpinger-bl9fb   1/1     Running   0          14s   10.244.65.10   stargate-aks-e2e-3-worker-1
+goldpinger-bl9fb   1/1     Running   0          14s   10.244.65.10   stargate-aks-e2e-4-worker-1
 goldpinger-jfs94   1/1     Running   0          14s   10.244.1.192   aks-nodepool1-39590899-vmss000001
 goldpinger-pj5mk   1/1     Running   0          14s   10.244.0.60    aks-nodepool1-39590899-vmss000000
-goldpinger-wv7bz   1/1     Running   0          14s   10.244.66.6    stargate-aks-e2e-3-worker-2
+goldpinger-wv7bz   1/1     Running   0          14s   10.244.66.6    stargate-aks-e2e-4-worker-2
 ```
 
 **Connectivity Results:** ✅ All pods can reach each other!
@@ -636,7 +637,7 @@ goldpinger-wv7bz   1/1     Running   0          14s   10.244.66.6    stargate-ak
 
 ### Issue 2: Server routerIP Must Be Tailscale IP
 
-**Problem:** SSH failed with `Could not resolve hostname stargate-aks-e2e-3-dc-router`
+**Problem:** SSH failed with `Could not resolve hostname stargate-aks-e2e-4-dc-router`
 
 **Root Cause:** `findRouterTarget()` in `cmd/infra-prep/main.go` preferred `TailnetFQDN` (hostname) over `TailscaleIP`. The hostname doesn't resolve from machines not on the tailnet.
 
@@ -688,7 +689,7 @@ AKS pod → AKS node → Azure route table → AKS router (10.237.0.4) → Tails
 ```bash
 # 1. Add Azure route table entries for DC worker pod CIDRs
 az network route-table route create \
-  --resource-group MC_stargate-aks-e2e-3_stargate-aks-e2e-3_canadacentral \
+  --resource-group MC_stargate-aks-e2e-4_stargate-aks-e2e-4_canadacentral \
   --route-table-name stargate-workers-rt \
   --name pod-cidr-worker1 \
   --address-prefix 10.244.65.0/24 \
@@ -696,7 +697,7 @@ az network route-table route create \
   --next-hop-ip-address 10.237.0.4
 
 az network route-table route create \
-  --resource-group MC_stargate-aks-e2e-3_stargate-aks-e2e-3_canadacentral \
+  --resource-group MC_stargate-aks-e2e-4_stargate-aks-e2e-4_canadacentral \
   --route-table-name stargate-workers-rt \
   --name pod-cidr-worker2 \
   --address-prefix 10.244.66.0/24 \
@@ -725,7 +726,7 @@ TOKEN=$(curl -s -X POST "https://api.tailscale.com/api/v2/oauth/token" \
 
 # Get DC router device ID
 DEVICE_ID=$(curl -s -X GET "https://api.tailscale.com/api/v2/tailnet/-/devices" \
-  -H "Authorization: Bearer $TOKEN" | jq -r '.devices[] | select(.hostname == "stargate-aks-e2e-3-dc-router") | .id')
+  -H "Authorization: Bearer $TOKEN" | jq -r '.devices[] | select(.hostname == "stargate-aks-e2e-4-dc-router") | .id')
 
 # Enable routes
 curl -s -X POST "https://api.tailscale.com/api/v2/device/$DEVICE_ID/routes" \
@@ -750,8 +751,8 @@ kubectl exec -n kube-system "$CILIUM_POD" -c cilium-agent -- cilium node list
 Name                                IPv4 Address   Endpoint CIDR   IPv6 Address   Endpoint CIDR   Source
 aks-nodepool1-10551117-vmss000000   10.224.0.4     10.4.0.0/16                                    local
 aks-nodepool1-10551117-vmss000001   10.224.0.5                                                    custom-resource
-stargate-aks-e2e-3-worker-1         10.50.1.5                                                     custom-resource  # <-- BLANK!
-stargate-aks-e2e-3-worker-2         10.50.1.6                                                     custom-resource  # <-- BLANK!
+stargate-aks-e2e-4-worker-1         10.50.1.5                                                     custom-resource  # <-- BLANK!
+stargate-aks-e2e-4-worker-2         10.50.1.6                                                     custom-resource  # <-- BLANK!
 ```
 
 **Root Cause:** 
@@ -763,18 +764,18 @@ stargate-aks-e2e-3-worker-2         10.50.1.6                                   
 **Verification:**
 ```bash
 # Check CiliumNode resource - shows empty IPAM
-kubectl get ciliumnode stargate-aks-e2e-3-worker-1 -o yaml
+kubectl get ciliumnode stargate-aks-e2e-4-worker-1 -o yaml
 # Shows: spec.ipam.pools: {}
 
 # Check Kubernetes node has podCIDR (it does)
-kubectl get node stargate-aks-e2e-3-worker-1 -o jsonpath='{.spec.podCIDR}'
+kubectl get node stargate-aks-e2e-4-worker-1 -o jsonpath='{.spec.podCIDR}'
 # Output: 10.244.65.0/24
 ```
 
 **Fix Applied:** Patch CiliumNode resources to include podCIDRs:
 ```bash
-kubectl patch ciliumnode stargate-aks-e2e-3-worker-1 --type=merge -p '{"spec":{"ipam":{"podCIDRs":["10.244.65.0/24"]}}}'
-kubectl patch ciliumnode stargate-aks-e2e-3-worker-2 --type=merge -p '{"spec":{"ipam":{"podCIDRs":["10.244.66.0/24"]}}}'
+kubectl patch ciliumnode stargate-aks-e2e-4-worker-1 --type=merge -p '{"spec":{"ipam":{"podCIDRs":["10.244.65.0/24"]}}}'
+kubectl patch ciliumnode stargate-aks-e2e-4-worker-2 --type=merge -p '{"spec":{"ipam":{"podCIDRs":["10.244.66.0/24"]}}}'
 ```
 
 **Verification after fix:**
@@ -786,8 +787,8 @@ kubectl exec -n kube-system "$CILIUM_POD" -c cilium-agent -- cilium node list
 Name                                IPv4 Address   Endpoint CIDR    IPv6 Address   Endpoint CIDR   Source
 aks-nodepool1-10551117-vmss000000   10.224.0.4     10.4.0.0/16                                     local
 aks-nodepool1-10551117-vmss000001   10.224.0.5                                                     custom-resource
-stargate-aks-e2e-3-worker-1         10.50.1.5      10.244.65.0/24                                  custom-resource  # <-- NOW HAS CIDR!
-stargate-aks-e2e-3-worker-2         10.50.1.6      10.244.66.0/24                                  custom-resource  # <-- NOW HAS CIDR!
+stargate-aks-e2e-4-worker-1         10.50.1.5      10.244.65.0/24                                  custom-resource  # <-- NOW HAS CIDR!
+stargate-aks-e2e-4-worker-2         10.50.1.6      10.244.66.0/24                                  custom-resource  # <-- NOW HAS CIDR!
 ```
 
 **TODO:** Update controller to automatically patch CiliumNode resources with podCIDRs when DC workers join the cluster. The controller should:
@@ -817,7 +818,7 @@ az network vnet subnet show \
 
 # Check router subnet route table on CURRENT cluster (broken)
 az network vnet subnet show \
-  --resource-group MC_stargate-aks-e2e-3_stargate-aks-e2e-3_canadacentral \
+  --resource-group MC_stargate-aks-e2e-4_stargate-aks-e2e-4_canadacentral \
   --vnet-name aks-vnet-11486953 \
   --name stargate-aks-router-subnet -o json | jq '.routeTable'
 # Output:
@@ -851,14 +852,14 @@ AKS Pod (10.244.1.x) → AKS Node (10.224.0.4) → AKS Router (10.237.0.4) → T
 ```bash
 # 1. Create route table for router subnet
 az network route-table create \
-  --resource-group MC_stargate-aks-e2e-3_stargate-aks-e2e-3_canadacentral \
+  --resource-group MC_stargate-aks-e2e-4_stargate-aks-e2e-4_canadacentral \
   --name stargate-router-rt \
   --location canadacentral
 
 # 2. Add routes for AKS node pod CIDRs
 # Node vmss000000 (10.224.0.4) has pods in 10.244.1.0/24
 az network route-table route create \
-  --resource-group MC_stargate-aks-e2e-3_stargate-aks-e2e-3_canadacentral \
+  --resource-group MC_stargate-aks-e2e-4_stargate-aks-e2e-4_canadacentral \
   --route-table-name stargate-router-rt \
   --name pod-cidr-node-0 \
   --address-prefix 10.244.1.0/24 \
@@ -867,7 +868,7 @@ az network route-table route create \
 
 # Node vmss000001 (10.224.0.5) has pods in 10.244.0.0/24
 az network route-table route create \
-  --resource-group MC_stargate-aks-e2e-3_stargate-aks-e2e-3_canadacentral \
+  --resource-group MC_stargate-aks-e2e-4_stargate-aks-e2e-4_canadacentral \
   --route-table-name stargate-router-rt \
   --name pod-cidr-node-1 \
   --address-prefix 10.244.0.0/24 \
@@ -876,7 +877,7 @@ az network route-table route create \
 
 # 3. Associate route table with router subnet
 az network vnet subnet update \
-  --resource-group MC_stargate-aks-e2e-3_stargate-aks-e2e-3_canadacentral \
+  --resource-group MC_stargate-aks-e2e-4_stargate-aks-e2e-4_canadacentral \
   --vnet-name aks-vnet-11486953 \
   --name stargate-aks-router-subnet \
   --route-table stargate-router-rt
@@ -885,7 +886,7 @@ az network vnet subnet update \
 **Verification:**
 ```bash
 az network route-table route list \
-  --resource-group MC_stargate-aks-e2e-3_stargate-aks-e2e-3_canadacentral \
+  --resource-group MC_stargate-aks-e2e-4_stargate-aks-e2e-4_canadacentral \
   --route-table-name stargate-router-rt -o table
 
 # Output:
@@ -932,18 +933,18 @@ AddressPrefix    Name             NextHopIpAddress    NextHopType       Provisio
 ### Finding: DC worker NICs lacked IP forwarding (vs working cluster)
 
 - Working cluster `aks-vapa-dev-1` worker NICs (`stargate-aks-vm2601222214-1-nic`, `-2-nic`) have `enableIPForwarding: true`.
-- Broken cluster NICs (`stargate-aks-e2e-3-worker-1-nic`, `-2-nic`) had `enableIPForwarding: false`; enabling fixed acceptance of non-local pod traffic.
+- Broken cluster NICs (`stargate-aks-e2e-4-worker-1-nic`, `-2-nic`) had `enableIPForwarding: false`; enabling fixed acceptance of non-local pod traffic.
 - Commands applied:
-  - `az network nic update --resource-group STARGATE-AKS-E2E-2-DC --name stargate-aks-e2e-3-worker-1-nic --ip-forwarding true`
-  - `az network nic update --resource-group STARGATE-AKS-E2E-2-DC --name stargate-aks-e2e-3-worker-2-nic --ip-forwarding true`
+  - `az network nic update --resource-group STARGATE-AKS-E2E-2-DC --name stargate-aks-e2e-4-worker-1-nic --ip-forwarding true`
+  - `az network nic update --resource-group STARGATE-AKS-E2E-2-DC --name stargate-aks-e2e-4-worker-2-nic --ip-forwarding true`
 
 ### Finding: DC subnet missing per-pod-CIDR UDRs to workers
 
 - Working DC route table includes /24 pod CIDR routes to each worker (10.244.65.0/24 → worker-1, 10.244.66.0/24 → worker-2) in addition to broader routes.
 - Broken cluster only had broad 10.244.0.0/16 to router; added explicit /24 routes restored AKS→DC pod ping.
 - Commands applied:
-  - `az network route-table route create --resource-group STARGATE-AKS-E2E-2-DC --route-table-name stargate-aks-e2e-3-dc-route-table --name pod-cidr-65 --address-prefix 10.244.65.0/24 --next-hop-type VirtualAppliance --next-hop-ip-address 10.50.1.5`
-  - `az network route-table route create --resource-group STARGATE-AKS-E2E-2-DC --route-table-name stargate-aks-e2e-3-dc-route-table --name pod-cidr-66 --address-prefix 10.244.66.0/24 --next-hop-type VirtualAppliance --next-hop-ip-address 10.50.1.6`
+  - `az network route-table route create --resource-group STARGATE-AKS-E2E-2-DC --route-table-name stargate-aks-e2e-4-dc-route-table --name pod-cidr-65 --address-prefix 10.244.65.0/24 --next-hop-type VirtualAppliance --next-hop-ip-address 10.50.1.5`
+  - `az network route-table route create --resource-group STARGATE-AKS-E2E-2-DC --route-table-name stargate-aks-e2e-4-dc-route-table --name pod-cidr-66 --address-prefix 10.244.66.0/24 --next-hop-type VirtualAppliance --next-hop-ip-address 10.50.1.6`
   - Verification: AKS pod on `aks-nodepool1-10551117-vmss000001` → `10.244.65.3` now succeeds (5/5 ICMP replies).
 
 **Status:** Route table created and associated, but still not working due to Issue 6.
@@ -1066,8 +1067,8 @@ EOF
 Since bootstrap ran before RBAC was added, manually patch CiliumNodes:
 
 ```bash
-kubectl patch ciliumnode stargate-aks-e2e-3-worker-1 --type=merge -p '{"spec":{"ipam":{"podCIDRs":["10.244.65.0/24"]}}}'
-kubectl patch ciliumnode stargate-aks-e2e-3-worker-2 --type=merge -p '{"spec":{"ipam":{"podCIDRs":["10.244.66.0/24"]}}}'
+kubectl patch ciliumnode stargate-aks-e2e-4-worker-1 --type=merge -p '{"spec":{"ipam":{"podCIDRs":["10.244.65.0/24"]}}}'
+kubectl patch ciliumnode stargate-aks-e2e-4-worker-2 --type=merge -p '{"spec":{"ipam":{"podCIDRs":["10.244.66.0/24"]}}}'
 ```
 
 ### Fix 3: Add DC Worker Pod CIDR Routes to AKS Subnet Route Table
@@ -1076,7 +1077,7 @@ The stargate-workers-rt only had `10.50.0.0/16` but needs per-worker pod CIDRs:
 
 ```bash
 az network route-table route create \
-  --resource-group MC_stargate-aks-e2e-3_stargate-aks-e2e-3_canadacentral \
+  --resource-group MC_stargate-aks-e2e-4_stargate-aks-e2e-4_canadacentral \
   --route-table-name stargate-workers-rt \
   --name pod-cidr-worker1 \
   --address-prefix 10.244.65.0/24 \
@@ -1084,7 +1085,7 @@ az network route-table route create \
   --next-hop-ip-address 10.237.0.4
 
 az network route-table route create \
-  --resource-group MC_stargate-aks-e2e-3_stargate-aks-e2e-3_canadacentral \
+  --resource-group MC_stargate-aks-e2e-4_stargate-aks-e2e-4_canadacentral \
   --route-table-name stargate-workers-rt \
   --name pod-cidr-worker2 \
   --address-prefix 10.244.66.0/24 \
@@ -1101,14 +1102,14 @@ The AKS router subnet needs routes to send return traffic back to AKS nodes:
 ```bash
 # Create route table
 az network route-table create \
-  --resource-group MC_stargate-aks-e2e-3_stargate-aks-e2e-3_canadacentral \
+  --resource-group MC_stargate-aks-e2e-4_stargate-aks-e2e-4_canadacentral \
   --name stargate-router-rt \
   --location canadacentral
 
 # Add routes for each AKS node's pod CIDR
 # vmss000000 (10.224.0.5) has pods in 10.244.0.0/24
 az network route-table route create \
-  --resource-group MC_stargate-aks-e2e-3_stargate-aks-e2e-3_canadacentral \
+  --resource-group MC_stargate-aks-e2e-4_stargate-aks-e2e-4_canadacentral \
   --route-table-name stargate-router-rt \
   --name pod-cidr-node-0 \
   --address-prefix 10.244.0.0/24 \
@@ -1117,7 +1118,7 @@ az network route-table route create \
 
 # vmss000001 (10.224.0.4) has pods in 10.244.1.0/24
 az network route-table route create \
-  --resource-group MC_stargate-aks-e2e-3_stargate-aks-e2e-3_canadacentral \
+  --resource-group MC_stargate-aks-e2e-4_stargate-aks-e2e-4_canadacentral \
   --route-table-name stargate-router-rt \
   --name pod-cidr-node-1 \
   --address-prefix 10.244.1.0/24 \
@@ -1126,7 +1127,7 @@ az network route-table route create \
 
 # Associate with router subnet
 az network vnet subnet update \
-  --resource-group MC_stargate-aks-e2e-3_stargate-aks-e2e-3_canadacentral \
+  --resource-group MC_stargate-aks-e2e-4_stargate-aks-e2e-4_canadacentral \
   --vnet-name aks-vnet-XXXXX \
   --name stargate-aks-router-subnet \
   --route-table stargate-router-rt
@@ -1179,7 +1180,7 @@ TOKEN=$(curl -s -X POST "https://api.tailscale.com/api/v2/oauth/token" \
   -d "grant_type=client_credentials" | jq -r '.access_token')
 
 DEVICE_ID=$(curl -s -X GET "https://api.tailscale.com/api/v2/tailnet/-/devices" \
-  -H "Authorization: Bearer $TOKEN" | jq -r '.devices[] | select(.hostname == "stargate-aks-e2e-3-dc-router") | .id')
+  -H "Authorization: Bearer $TOKEN" | jq -r '.devices[] | select(.hostname == "stargate-aks-e2e-4-dc-router") | .id')
 
 curl -s -X POST "https://api.tailscale.com/api/v2/device/$DEVICE_ID/routes" \
   -H "Authorization: Bearer $TOKEN" \
@@ -1218,7 +1219,7 @@ ssh ubuntu@100.72.18.11 "sudo tailscale set --advertise-routes=10.0.0.0/16,10.22
 
 ```bash
 DEVICE_ID=$(curl -s -X GET "https://api.tailscale.com/api/v2/tailnet/-/devices" \
-  -H "Authorization: Bearer $TOKEN" | jq -r '.devices[] | select(.hostname == "stargate-aks-e2e-3-router") | .id')
+  -H "Authorization: Bearer $TOKEN" | jq -r '.devices[] | select(.hostname == "stargate-aks-e2e-4-router") | .id')
 
 curl -s -X POST "https://api.tailscale.com/api/v2/device/$DEVICE_ID/routes" \
   -H "Authorization: Bearer $TOKEN" \
@@ -1239,7 +1240,7 @@ kubectl run ping-test --image=busybox --rm -it --restart=Never \
 
 # DC worker pod -> AKS pod: ✅ WORKS
 kubectl run ping-test --image=busybox --rm -it --restart=Never \
-  --overrides='{"spec":{"nodeName":"stargate-aks-e2e-3-worker-1"}}' \
+  --overrides='{"spec":{"nodeName":"stargate-aks-e2e-4-worker-1"}}' \
   -- ping -c 3 10.244.0.195
 # 3 packets transmitted, 3 packets received, 0% packet loss
 ```
@@ -1278,6 +1279,6 @@ To avoid manual fixes, the following needs to be automated:
 ## Cleanup (when done)
 
 ```bash
-az aks delete --name stargate-aks-e2e-3 --resource-group stargate-aks-e2e-3 --yes --no-wait
-az group delete --name stargate-aks-e2e-3-dc --yes --no-wait
+az aks delete --name stargate-aks-e2e-4 --resource-group stargate-aks-e2e-4 --yes --no-wait
+az group delete --name stargate-aks-e2e-4-dc --yes --no-wait
 ```

@@ -6,6 +6,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/containerservice/armcontainerservice/v4"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 )
@@ -23,6 +24,11 @@ type Clients struct {
 	PublicIPs       *armnetwork.PublicIPAddressesClient
 	Interfaces      *armnetwork.InterfacesClient
 	VirtualMachines *armcompute.VirtualMachinesClient
+	RouteTables     *armnetwork.RouteTablesClient
+	Routes          *armnetwork.RoutesClient
+	ManagedClusters *armcontainerservice.ManagedClustersClient
+	VMSS            *armcompute.VirtualMachineScaleSetsClient
+	VMSSVMs         *armcompute.VirtualMachineScaleSetVMsClient
 }
 
 // NewClients creates Azure ARM clients using DefaultAzureCredential
@@ -78,6 +84,31 @@ func NewClients(subscriptionID string, logger *slog.Logger) (*Clients, error) {
 		return nil, err
 	}
 
+	routeTablesClient, err := armnetwork.NewRouteTablesClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	routesClient, err := armnetwork.NewRoutesClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	managedClustersClient, err := armcontainerservice.NewManagedClustersClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	vmssClient, err := armcompute.NewVirtualMachineScaleSetsClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	vmssVMsClient, err := armcompute.NewVirtualMachineScaleSetVMsClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Clients{
 		Credential:      cred,
 		SubscriptionID:  subscriptionID,
@@ -89,5 +120,10 @@ func NewClients(subscriptionID string, logger *slog.Logger) (*Clients, error) {
 		PublicIPs:       publicIPClient,
 		Interfaces:      nicClient,
 		VirtualMachines: vmClient,
+		RouteTables:     routeTablesClient,
+		Routes:          routesClient,
+		ManagedClusters: managedClustersClient,
+		VMSS:            vmssClient,
+		VMSSVMs:         vmssVMsClient,
 	}, nil
 }

@@ -595,6 +595,10 @@ func (r *OperationReconciler) buildAKSBootstrapScript(kubernetesVersion, nodeIP,
 	// Use private IP for API server if configured (for Tailscale mesh connectivity)
 	// The AKS router proxies port 6443 to the AKS API server
 	apiServer := r.AKSAPIServer
+	// Ensure the API server URL has https:// prefix
+	if !strings.HasPrefix(apiServer, "https://") && !strings.HasPrefix(apiServer, "http://") {
+		apiServer = "https://" + apiServer
+	}
 	if r.AKSAPIServerPrivateIP != "" {
 		apiServer = fmt.Sprintf("https://%s:6443", r.AKSAPIServerPrivateIP)
 	}
@@ -919,7 +923,7 @@ for i in {1..60}; do
     FOURTH_OCTET=$(echo "$NODE_IP" | cut -d. -f4)
     echo "DEBUG: THIRD=$THIRD_OCTET FOURTH=$FOURTH_OCTET"
     # Combine to create unique subnet: 10.244.<third*10 + fourth mod 256>.0/24
-    # NOTE: %% is needed to escape the % for Go's fmt.Sprintf
+    # NOTE: use double percent to escape for Go fmt.Sprintf
     UNIQUE_OCTET=$(( (THIRD_OCTET * 10 + FOURTH_OCTET) %% 200 + 50 ))
     POD_CIDR="10.244.${UNIQUE_OCTET}.0/24"
     echo "DEBUG: UNIQUE_OCTET=$UNIQUE_OCTET POD_CIDR=$POD_CIDR"

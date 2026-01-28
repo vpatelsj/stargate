@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -17,10 +18,12 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/containerservice/armcontainerservice/v4"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 
 	"github.com/vpatelsj/stargate/pkg/infra/providers"
+	"github.com/vpatelsj/stargate/pkg/tailscale"
 )
 
 // Config holds Azure-specific settings for provisioning base VMs (no Kubernetes bootstrap).
@@ -45,6 +48,7 @@ type Config struct {
 // Provider provisions Azure VMs with base cloud-init (tailscale only) and returns node addresses.
 type Provider struct {
 	cfg              Config
+	logger           *slog.Logger
 	rgClient         *armresources.ResourceGroupsClient
 	vnetClient       *armnetwork.VirtualNetworksClient
 	subnetClient     *armnetwork.SubnetsClient
@@ -52,6 +56,11 @@ type Provider struct {
 	nicClient        *armnetwork.InterfacesClient
 	vmClient         *armcompute.VirtualMachinesClient
 	routeTableClient *armnetwork.RouteTablesClient
+	routesClient     *armnetwork.RoutesClient
+	aksClient        *armcontainerservice.ManagedClustersClient
+	vmssClient       *armcompute.VirtualMachineScaleSetsClient
+	vmssVMsClient    *armcompute.VirtualMachineScaleSetVMsClient
+	tsClient         *tailscale.Client
 }
 
 // route holds a CIDR and the next hop IP for route table construction.
@@ -102,7 +111,52 @@ func NewProvider(ctx context.Context, cfg Config) (*Provider, error) {
 		return nil, fmt.Errorf("route table client: %w", err)
 	}
 
-	return &Provider{cfg: cfg, rgClient: rgClient, vnetClient: vnetClient, subnetClient: subnetClient, pipClient: pipClient, nicClient: nicClient, vmClient: vmClient, routeTableClient: routeTableClient}, nil
+	routesClient, err := armnetwork.NewRoutesClient(cfg.SubscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("routes client: %w", err)
+	}
+
+	aksClient, err := armcontainerservice.NewManagedClustersClient(cfg.SubscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("aks client: %w", err)
+	}
+
+	vmssClient, err := armcompute.NewVirtualMachineScaleSetsClient(cfg.SubscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("vmss client: %w", err)
+	}
+
+	vmssVMsClient, err := armcompute.NewVirtualMachineScaleSetVMsClient(cfg.SubscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("vmss vms client: %w", err)
+	}
+
+	// Create Tailscale client (optional - will be nil if no API key configured)
+	logger := slog.Default()
+	var tsClient *tailscale.Client
+	if os.Getenv("TAILSCALE_API_KEY") != "" {
+		tsClient, err = tailscale.NewClient("", "", logger)
+		if err != nil {
+			logger.Warn("failed to create Tailscale client, route approval will be manual", "error", err)
+		}
+	}
+
+	return &Provider{
+		cfg:              cfg,
+		logger:           logger,
+		rgClient:         rgClient,
+		vnetClient:       vnetClient,
+		subnetClient:     subnetClient,
+		pipClient:        pipClient,
+		nicClient:        nicClient,
+		vmClient:         vmClient,
+		routeTableClient: routeTableClient,
+		routesClient:     routesClient,
+		aksClient:        aksClient,
+		vmssClient:       vmssClient,
+		vmssVMsClient:    vmssVMsClient,
+		tsClient:         tsClient,
+	}, nil
 }
 
 // CreateNodes provisions the requested VMs and returns their addresses.
@@ -199,6 +253,12 @@ func (p *Provider) CreateNodes(ctx context.Context, specs []providers.NodeSpec) 
 		}
 
 		routerIP = privIP // Save for workers
+
+		// Enable routes in Tailscale for this router (via API if configured)
+		if err := p.ensureTailscaleRoutes(ctx, spec.Name); err != nil {
+			p.logger.Warn("failed to auto-approve Tailscale routes, manual approval may be required",
+				"router", spec.Name, "error", err)
+		}
 
 		nodes = append(nodes, providers.NodeInfo{
 			Name:        spec.Name,
@@ -323,6 +383,20 @@ func (p *Provider) createAKSRouter(ctx context.Context, sshKey string) (provider
 		return providers.NodeInfo{}, fmt.Errorf("get private IP %s: %w", nicName, err)
 	}
 
+	// Set up route table in the AKS VNet for DC-bound traffic
+	// Routes DC pod CIDRs (10.244.50-70.0/24) through this router
+	if err := p.ensureAKSRouteTable(ctx, cfg, privIP); err != nil {
+		return providers.NodeInfo{}, fmt.Errorf("AKS route table: %w", err)
+	}
+
+	// Enable routes in Tailscale for this router (via API if configured)
+	// This auto-approves the advertised routes instead of requiring manual approval
+	if err := p.ensureTailscaleRoutes(ctx, cfg.Name); err != nil {
+		// Log but don't fail - routes can be approved manually
+		p.logger.Warn("failed to auto-approve Tailscale routes, manual approval may be required",
+			"router", cfg.Name, "error", err)
+	}
+
 	return providers.NodeInfo{
 		Name:        cfg.Name,
 		Role:        providers.RoleAKSRouter,
@@ -394,16 +468,15 @@ write_files:
         ip route add 10.244.$i.0/24 dev tailscale0 2>/dev/null || true
       done
       
-      # Persist routes for reboot
-      cat > /etc/network/if-up.d/stargate-routes <<'ROUTES'
-#!/bin/bash
-if [ "$IFACE" = "tailscale0" ]; then
-  ip route add 10.224.0.0/16 dev tailscale0 2>/dev/null || true
-  for i in $(seq 0 10); do
-    ip route add 10.244.$i.0/24 dev tailscale0 2>/dev/null || true
-  done
-fi
-ROUTES
+      # Persist routes for reboot - write script using echo to avoid YAML heredoc issues
+      mkdir -p /etc/network/if-up.d
+      echo '#!/bin/bash' > /etc/network/if-up.d/stargate-routes
+      echo 'if [ "$IFACE" = "tailscale0" ]; then' >> /etc/network/if-up.d/stargate-routes
+      echo '  ip route add 10.224.0.0/16 dev tailscale0 2>/dev/null || true' >> /etc/network/if-up.d/stargate-routes
+      echo '  for i in $(seq 0 10); do' >> /etc/network/if-up.d/stargate-routes
+      echo '    ip route add 10.244.$i.0/24 dev tailscale0 2>/dev/null || true' >> /etc/network/if-up.d/stargate-routes
+      echo '  done' >> /etc/network/if-up.d/stargate-routes
+      echo 'fi' >> /etc/network/if-up.d/stargate-routes
       chmod +x /etc/network/if-up.d/stargate-routes
 
 runcmd:
@@ -452,15 +525,14 @@ write_files:
         ip route add 10.244.$i.0/24 dev tailscale0 2>/dev/null || true
       done
       
-      # Persist routes for reboot
-      cat > /etc/network/if-up.d/stargate-routes <<'ROUTES'
-#!/bin/bash
-if [ "$IFACE" = "tailscale0" ]; then
-  for i in $(seq 50 70); do
-    ip route add 10.244.$i.0/24 dev tailscale0 2>/dev/null || true
-  done
-fi
-ROUTES
+      # Persist routes for reboot - write script using echo to avoid YAML heredoc issues
+      mkdir -p /etc/network/if-up.d
+      echo '#!/bin/bash' > /etc/network/if-up.d/stargate-routes
+      echo 'if [ "$IFACE" = "tailscale0" ]; then' >> /etc/network/if-up.d/stargate-routes
+      echo '  for i in $(seq 50 70); do' >> /etc/network/if-up.d/stargate-routes
+      echo '    ip route add 10.244.$i.0/24 dev tailscale0 2>/dev/null || true' >> /etc/network/if-up.d/stargate-routes
+      echo '  done' >> /etc/network/if-up.d/stargate-routes
+      echo 'fi' >> /etc/network/if-up.d/stargate-routes
       chmod +x /etc/network/if-up.d/stargate-routes
 `, tailscaleAuthKey, vmName, routes)
 
@@ -921,6 +993,306 @@ func (p *Provider) ensureRouteTable(ctx context.Context, subnetID, routerIP stri
 	poller, err := p.subnetClient.BeginCreateOrUpdate(ctx, p.cfg.ResourceGroup, p.cfg.VNetName, p.cfg.SubnetName, subnet.Subnet, nil)
 	if err != nil {
 		return fmt.Errorf("associate route table with subnet: %w", err)
+	}
+
+	_, err = poller.PollUntilDone(ctx, &azruntime.PollUntilDoneOptions{Frequency: 10 * time.Second})
+	if err != nil {
+		return fmt.Errorf("poll subnet route table association: %w", err)
+	}
+
+	return nil
+}
+
+// ensureTailscaleRoutes enables the advertised routes for a Tailscale router.
+// This uses the Tailscale API to auto-approve routes, avoiding manual approval in the admin console.
+// If TAILSCALE_API_KEY is not set or the device is not yet registered, it logs a warning and returns nil.
+func (p *Provider) ensureTailscaleRoutes(ctx context.Context, hostname string) error {
+	if p.tsClient == nil {
+		p.logger.Info("Tailscale API not configured, routes must be approved manually")
+		return nil
+	}
+
+	log := p.logger.With("operation", "ensureTailscaleRoutes", "hostname", hostname)
+
+	// Wait for the device to register with Tailscale (cloud-init takes some time)
+	var device *tailscale.Device
+	var err error
+	for i := 0; i < 30; i++ { // Wait up to 5 minutes
+		device, err = p.tsClient.FindDeviceByHostname(ctx, hostname)
+		if err == nil {
+			break
+		}
+		log.Info("waiting for device to register with Tailscale", "attempt", i+1)
+		time.Sleep(10 * time.Second)
+	}
+	if err != nil {
+		return fmt.Errorf("device not found after waiting: %w", err)
+	}
+
+	// Enable all advertised routes
+	log.Info("enabling routes for device", "deviceID", device.ID, "advertisedRoutes", device.AdvertisedRoutes)
+	if err := p.tsClient.EnableAllRoutes(ctx, device.ID); err != nil {
+		return fmt.Errorf("enable routes: %w", err)
+	}
+
+	// Get updated device to confirm routes are enabled
+	device, err = p.tsClient.GetDevice(ctx, device.ID)
+	if err != nil {
+		return fmt.Errorf("get updated device: %w", err)
+	}
+
+	log.Info("routes enabled successfully", "enabledRoutes", device.EnabledRoutes)
+	return nil
+}
+
+// ensureAKSRouteTable creates a route table in the AKS VNet that routes DC-bound traffic
+// through the AKS router. This includes:
+// - DC subnet (e.g., 10.50.0.0/16) → router
+// - DC worker pod CIDRs (10.244.50-70.0/24 range) → router
+// - Tailscale CGNAT (100.64.0.0/10) → router
+//
+// The route table is associated with both the AKS router subnet and the AKS node subnet
+// so that AKS nodes can reach DC workers through the router.
+func (p *Provider) ensureAKSRouteTable(ctx context.Context, cfg *providers.AKSRouterConfig, routerIP string) error {
+	routeTableName := "stargate-workers-rt"
+
+	// Build routes for DC-bound traffic
+	routes := []*armnetwork.Route{
+		{
+			Name: to.Ptr("tailscale-route"),
+			Properties: &armnetwork.RoutePropertiesFormat{
+				AddressPrefix:    to.Ptr("100.64.0.0/10"),
+				NextHopType:      to.Ptr(armnetwork.RouteNextHopTypeVirtualAppliance),
+				NextHopIPAddress: to.Ptr(routerIP),
+			},
+		},
+		{
+			Name: to.Ptr("to-dc-workers"),
+			Properties: &armnetwork.RoutePropertiesFormat{
+				AddressPrefix:    to.Ptr("10.50.0.0/16"), // DC worker subnet
+				NextHopType:      to.Ptr(armnetwork.RouteNextHopTypeVirtualAppliance),
+				NextHopIPAddress: to.Ptr(routerIP),
+			},
+		},
+	}
+
+	// Add routes for DC worker pod CIDRs (10.244.50-70.0/24 range)
+	// These are derived from DC worker private IPs using derivePodCIDR formula
+	for i := 50; i <= 70; i++ {
+		routes = append(routes, &armnetwork.Route{
+			Name: to.Ptr(fmt.Sprintf("dc-pod-cidr-%d", i)),
+			Properties: &armnetwork.RoutePropertiesFormat{
+				AddressPrefix:    to.Ptr(fmt.Sprintf("10.244.%d.0/24", i)),
+				NextHopType:      to.Ptr(armnetwork.RouteNextHopTypeVirtualAppliance),
+				NextHopIPAddress: to.Ptr(routerIP),
+			},
+		})
+	}
+
+	// Query AKS nodes and add routes for their pod CIDRs (for DC → AKS traffic)
+	if cfg.ClusterRG != "" && cfg.ClusterName != "" {
+		aksNodeRoutes, err := p.getAKSNodeRoutes(ctx, cfg.ClusterRG, cfg.ClusterName)
+		if err != nil {
+			// Log but don't fail - AKS node routes can be added later
+			fmt.Printf("Warning: could not get AKS node routes: %v\n", err)
+		} else {
+			routes = append(routes, aksNodeRoutes...)
+		}
+	}
+
+	// Check if route table exists
+	existing, err := p.routeTableClient.Get(ctx, cfg.ResourceGroup, routeTableName, nil)
+	if err != nil && !isNotFound(err) {
+		return err
+	}
+
+	var routeTableID string
+	if err == nil && existing.ID != nil {
+		// Route table exists - update it with new routes
+		existing.Properties.Routes = routes
+		poller, err := p.routeTableClient.BeginCreateOrUpdate(ctx, cfg.ResourceGroup, routeTableName, existing.RouteTable, nil)
+		if err != nil {
+			return fmt.Errorf("update AKS route table: %w", err)
+		}
+		resp, err := poller.PollUntilDone(ctx, &azruntime.PollUntilDoneOptions{Frequency: 10 * time.Second})
+		if err != nil {
+			return fmt.Errorf("poll AKS route table update: %w", err)
+		}
+		routeTableID = *resp.ID
+	} else {
+		// Create route table with routes
+		poller, err := p.routeTableClient.BeginCreateOrUpdate(ctx, cfg.ResourceGroup, routeTableName, armnetwork.RouteTable{
+			Location: to.Ptr(p.cfg.Location),
+			Properties: &armnetwork.RouteTablePropertiesFormat{
+				Routes: routes,
+			},
+		}, nil)
+		if err != nil {
+			return fmt.Errorf("create AKS route table: %w", err)
+		}
+
+		resp, err := poller.PollUntilDone(ctx, &azruntime.PollUntilDoneOptions{Frequency: 10 * time.Second})
+		if err != nil {
+			return fmt.Errorf("poll AKS route table creation: %w", err)
+		}
+		if resp.ID == nil {
+			return errors.New("AKS route table has no ID")
+		}
+		routeTableID = *resp.ID
+	}
+
+	// Associate route table with AKS router subnet
+	if err := p.associateRouteTableWithSubnet(ctx, cfg.ResourceGroup, cfg.VNetName, cfg.SubnetName, routeTableID); err != nil {
+		return fmt.Errorf("associate route table with router subnet: %w", err)
+	}
+
+	// Also associate with AKS node subnet (aks-subnet) so AKS nodes can reach DC
+	if err := p.associateRouteTableWithSubnet(ctx, cfg.ResourceGroup, cfg.VNetName, "aks-subnet", routeTableID); err != nil {
+		// Don't fail if aks-subnet doesn't exist or has different name
+		// The route table is still set up for the router subnet
+		_ = err // Ignore error - aks-subnet may have different name
+	}
+
+	return nil
+}
+
+// getAKSNodeRoutes queries AKS VMSS instances and returns routes for their pod CIDRs.
+func (p *Provider) getAKSNodeRoutes(ctx context.Context, clusterRG, clusterName string) ([]*armnetwork.Route, error) {
+	// Get the AKS cluster to find the node resource group
+	cluster, err := p.aksClient.Get(ctx, clusterRG, clusterName, nil)
+	if err != nil {
+		return nil, fmt.Errorf("get AKS cluster: %w", err)
+	}
+
+	if cluster.Properties == nil || cluster.Properties.NodeResourceGroup == nil {
+		return nil, fmt.Errorf("AKS cluster has no node resource group")
+	}
+	nodeRG := *cluster.Properties.NodeResourceGroup
+
+	// List all VMSS in the node resource group and get node IPs
+	var routes []*armnetwork.Route
+	nodeIndex := 0
+
+	pager := p.vmssClient.NewListPager(nodeRG, nil)
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list VMSS: %w", err)
+		}
+
+		for _, vmss := range page.Value {
+			if vmss.Name == nil {
+				continue
+			}
+			vmssName := *vmss.Name
+
+			// List VMs in this VMSS
+			vmPager := p.vmssVMsClient.NewListPager(nodeRG, vmssName, nil)
+			for vmPager.More() {
+				vmPage, err := vmPager.NextPage(ctx)
+				if err != nil {
+					continue // Skip this VMSS if we can't list VMs
+				}
+
+				for _, vm := range vmPage.Value {
+					if vm.Properties == nil || vm.Properties.NetworkProfile == nil {
+						continue
+					}
+
+					// Get private IP from network interface
+					var privateIP string
+					for _, nicRef := range vm.Properties.NetworkProfile.NetworkInterfaces {
+						if nicRef.ID == nil {
+							continue
+						}
+						privateIP, err = p.getPrivateIPFromNICID(ctx, *nicRef.ID)
+						if err != nil {
+							continue
+						}
+						break
+					}
+
+					if privateIP == "" {
+						continue
+					}
+
+					// Pod CIDR is 10.244.X.0/24 where X is node index
+					podCIDR := fmt.Sprintf("10.244.%d.0/24", nodeIndex)
+					routeName := fmt.Sprintf("aks-pod-cidr-%d", nodeIndex)
+
+					routes = append(routes, &armnetwork.Route{
+						Name: to.Ptr(routeName),
+						Properties: &armnetwork.RoutePropertiesFormat{
+							AddressPrefix:    to.Ptr(podCIDR),
+							NextHopType:      to.Ptr(armnetwork.RouteNextHopTypeVirtualAppliance),
+							NextHopIPAddress: to.Ptr(privateIP),
+						},
+					})
+
+					nodeIndex++
+				}
+			}
+		}
+	}
+
+	return routes, nil
+}
+
+// getPrivateIPFromNICID extracts the private IP from a NIC by its Azure resource ID.
+func (p *Provider) getPrivateIPFromNICID(ctx context.Context, nicID string) (string, error) {
+	// Parse NIC ID: /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Network/networkInterfaces/{name}
+	parts := strings.Split(nicID, "/")
+	var rg, name string
+	for i, part := range parts {
+		if part == "resourceGroups" && i+1 < len(parts) {
+			rg = parts[i+1]
+		}
+		if part == "networkInterfaces" && i+1 < len(parts) {
+			name = parts[i+1]
+		}
+	}
+	if rg == "" || name == "" {
+		return "", fmt.Errorf("invalid NIC ID: %s", nicID)
+	}
+
+	nic, err := p.nicClient.Get(ctx, rg, name, nil)
+	if err != nil {
+		return "", err
+	}
+
+	if nic.Properties != nil && len(nic.Properties.IPConfigurations) > 0 {
+		for _, ipConfig := range nic.Properties.IPConfigurations {
+			if ipConfig.Properties != nil && ipConfig.Properties.PrivateIPAddress != nil {
+				return *ipConfig.Properties.PrivateIPAddress, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("no private IP found")
+}
+
+// associateRouteTableWithSubnet associates a route table with a subnet.
+func (p *Provider) associateRouteTableWithSubnet(ctx context.Context, resourceGroup, vnetName, subnetName, routeTableID string) error {
+	subnet, err := p.subnetClient.Get(ctx, resourceGroup, vnetName, subnetName, nil)
+	if err != nil {
+		return fmt.Errorf("get subnet %s: %w", subnetName, err)
+	}
+
+	// Check if already associated
+	if subnet.Properties != nil && subnet.Properties.RouteTable != nil && subnet.Properties.RouteTable.ID != nil {
+		if *subnet.Properties.RouteTable.ID == routeTableID {
+			return nil // Already associated
+		}
+	}
+
+	// Update subnet with route table
+	if subnet.Properties == nil {
+		subnet.Properties = &armnetwork.SubnetPropertiesFormat{}
+	}
+	subnet.Properties.RouteTable = &armnetwork.RouteTable{ID: to.Ptr(routeTableID)}
+
+	poller, err := p.subnetClient.BeginCreateOrUpdate(ctx, resourceGroup, vnetName, subnetName, subnet.Subnet, nil)
+	if err != nil {
+		return fmt.Errorf("associate route table: %w", err)
 	}
 
 	_, err = poller.PollUntilDone(ctx, &azruntime.PollUntilDoneOptions{Frequency: 10 * time.Second})
