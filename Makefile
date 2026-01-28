@@ -1,4 +1,4 @@
-.PHONY: all build run test clean install-crds uninstall-crds mockapi azure-controller qemu-controller simulator \
+.PHONY: all build run test clean install-crds uninstall-crds azure-controller qemu-controller simulator \
         clean-all clean-kind clean-azure clean-tailscale clean-local prep-dc-inventory azure
 
 # Go parameters
@@ -10,26 +10,21 @@ GOMOD=$(GOCMD) mod
 # Binary names
 AZURE_CONTROLLER_BIN=bin/azure-controller
 QEMU_CONTROLLER_BIN=bin/qemu-controller
-MOCKAPI_BIN=bin/mockapi
 SIMULATOR_BIN=bin/simulator
 PREP_DC_INVENTORY_BIN=bin/prep-dc-inventory
 AZURE_BIN=bin/azure
-MX_AZURE_BIN=bin/mx-azure
 
 all: build
 
 ## Build targets
 
-build: azure-controller qemu-controller mockapi simulator prep-dc-inventory azure mx-azure
+build: azure-controller qemu-controller simulator prep-dc-inventory azure
 
 azure-controller:
 	$(GOBUILD) -o $(AZURE_CONTROLLER_BIN) ./cmd/azure-controller/main.go
 
 qemu-controller:
 	$(GOBUILD) -o $(QEMU_CONTROLLER_BIN) ./cmd/qemu-controller/main.go
-
-mockapi:
-	$(GOBUILD) -o $(MOCKAPI_BIN) ./mockapi/main.go
 
 simulator:
 	$(GOBUILD) -o $(SIMULATOR_BIN) ./cmd/simulator/main.go
@@ -40,16 +35,7 @@ prep-dc-inventory:
 azure:
 	$(GOBUILD) -o $(AZURE_BIN) ./cmd/azure/main.go
 
-mx-azure:
-	$(GOBUILD) -o $(MX_AZURE_BIN) ./cmd/mx-azure/main.go
-
 ## Run targets
-
-run-mockapi-west:
-	DC_NAME=dc-west PORT=8080 $(MOCKAPI_BIN)
-
-run-mockapi-east:
-	DC_NAME=dc-east PORT=8081 $(MOCKAPI_BIN)
 
 run-controller:
 	$(AZURE_CONTROLLER_BIN) --dc-api-url=http://localhost:8080
@@ -189,10 +175,7 @@ help:
 	@echo "Available targets:"
 	@echo "  build           - Build all binaries"
 	@echo "  azure-controller - Build the Azure controller"
-	@echo "  mockapi         - Build the mock DC API"
 	@echo "  simulator       - Build the QEMU simulator controller"
-	@echo "  run-mockapi-west - Run mock DC API for dc-west (port 8080)"
-	@echo "  run-mockapi-east - Run mock DC API for dc-east (port 8081)"
 	@echo "  run-controller  - Run the controller"
 	@echo "  run-simulator   - Run the simulator (requires root)"
 	@echo "  install-crds    - Install CRDs to cluster"

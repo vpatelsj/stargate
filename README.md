@@ -295,8 +295,8 @@ make test           # Run unit tests
 ├── api/v1alpha1/          # CRD type definitions
 ├── cmd/
 │   ├── azure/             # Azure CLI tool
+│   ├── azure-controller/  # Main controller binary
 │   ├── infra-prep/        # prep-dc-inventory tool
-│   ├── mx-azure/          # MX cluster provisioner
 │   ├── qemu-controller/   # QEMU VM controller
 │   └── simulator/         # Local simulator
 ├── config/
