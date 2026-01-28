@@ -358,6 +358,13 @@ func main() {
 					die("create AKS route table: %v", err)
 				}
 				fmt.Println("[aks-rt] AKS→worker routing configured successfully.")
+
+				// Patch AKS CiliumNodes with podCIDRs (Azure CNI Overlay doesn't set them)
+				if kubeconfig != "" {
+					if err := patchAKSCiliumNodes(ctx, kubeconfig); err != nil {
+						fmt.Printf("warning: could not patch CiliumNodes: %v\n", err)
+					}
+				}
 			}
 
 			fmt.Println("Infrastructure ready and reachable.")
@@ -1453,9 +1460,10 @@ func queryAKSNetworkConfig(ctx context.Context, subscriptionID, resourceGroup, c
 	return info, nil
 }
 
-// ensureAKSRouteToWorkers creates or updates a route table in the AKS VNet that routes
-// worker VNet traffic through the AKS router. This enables bidirectional connectivity
-// for kubectl exec/logs.
+// ensureAKSRouteToWorkers creates or updates route tables in the AKS VNet:
+// 1. stargate-workers-rt: routes DC worker VNet and pod CIDRs via AKS router (applied to aks-subnet)
+// 2. stargate-router-rt: routes AKS node pod CIDRs to their respective nodes (applied to router subnet)
+// This enables bidirectional pod-to-pod connectivity between AKS and DC workers.
 func ensureAKSRouteToWorkers(ctx context.Context, subscriptionID string, aksInfo *AKSNetworkInfo, workerVNetCIDR string) error {
 	if aksInfo.SubnetID == "" {
 		return fmt.Errorf("AKS subnet ID not available - cannot create route table")
@@ -1473,6 +1481,7 @@ func ensureAKSRouteToWorkers(ctx context.Context, subscriptionID string, aksInfo
 	}
 
 	var aksRouterIP string
+	var aksRouterSubnetID string
 	nicPager := nicClient.NewListPager(aksInfo.NodeResourceGroup, nil)
 	for nicPager.More() {
 		page, err := nicPager.NextPage(ctx)
@@ -1491,6 +1500,9 @@ func ensureAKSRouteToWorkers(ctx context.Context, subscriptionID string, aksInfo
 					for _, ipCfg := range nic.Properties.IPConfigurations {
 						if ipCfg.Properties != nil && ipCfg.Properties.PrivateIPAddress != nil {
 							aksRouterIP = *ipCfg.Properties.PrivateIPAddress
+							if ipCfg.Properties.Subnet != nil && ipCfg.Properties.Subnet.ID != nil {
+								aksRouterSubnetID = *ipCfg.Properties.Subnet.ID
+							}
 							fmt.Printf("[aks-rt] found AKS router NIC %s with IP %s\n", nicName, aksRouterIP)
 							break
 						}
@@ -1508,24 +1520,66 @@ func ensureAKSRouteToWorkers(ctx context.Context, subscriptionID string, aksInfo
 		return fmt.Errorf("could not find stargate router VM in AKS VNet - ensure aks-router was provisioned first")
 	}
 
+	// Collect AKS node IPs and their pod CIDRs for routing
+	// AKS nodes are in VMSS, each gets a /24 from the pod CIDR
+	type aksNodeInfo struct {
+		Name    string
+		IP      string
+		PodCIDR string
+	}
+	var aksNodes []aksNodeInfo
+
+	// List NICs to find AKS node IPs (VMSS NICs have pattern aks-*-vmss*)
+	nicPager = nicClient.NewListPager(aksInfo.NodeResourceGroup, nil)
+	nodeIndex := 0
+	for nicPager.More() {
+		page, err := nicPager.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("list NICs for AKS nodes: %w", err)
+		}
+		for _, nic := range page.Value {
+			nicName := ""
+			if nic.Name != nil {
+				nicName = *nic.Name
+			}
+			// Skip stargate routers, only look for VMSS NICs
+			if strings.HasPrefix(nicName, "stargate-") || strings.HasPrefix(nicName, "aks-router") {
+				continue
+			}
+			// VMSS NICs typically have format like "aks-nodepool1-12345678-vmss_0"
+			if !strings.Contains(nicName, "vmss") {
+				continue
+			}
+			if nic.Properties != nil && len(nic.Properties.IPConfigurations) > 0 {
+				for _, ipCfg := range nic.Properties.IPConfigurations {
+					if ipCfg.Properties != nil && ipCfg.Properties.PrivateIPAddress != nil {
+						nodeIP := *ipCfg.Properties.PrivateIPAddress
+						// Azure CNI Overlay assigns /24 per node starting from 10.244.0.0/24
+						podCIDR := fmt.Sprintf("10.244.%d.0/24", nodeIndex)
+						aksNodes = append(aksNodes, aksNodeInfo{
+							Name:    nicName,
+							IP:      nodeIP,
+							PodCIDR: podCIDR,
+						})
+						fmt.Printf("[aks-rt] found AKS node %s with IP %s, assigning pod CIDR %s\n", nicName, nodeIP, podCIDR)
+						nodeIndex++
+						break
+					}
+				}
+			}
+		}
+	}
+
 	// Create/update route table
 	rtClient, err := armnetwork.NewRouteTablesClient(subscriptionID, cred, nil)
 	if err != nil {
 		return fmt.Errorf("create route table client: %w", err)
 	}
 
-	rtName := "stargate-workers-rt"
-	fmt.Printf("[aks-rt] ensuring route table %s in %s...\n", rtName, aksInfo.NodeResourceGroup)
-
-	// Get subnet to determine existing route table (if any)
+	// Get subnet client
 	subnetClient, err := armnetwork.NewSubnetsClient(subscriptionID, cred, nil)
 	if err != nil {
 		return fmt.Errorf("create subnet client: %w", err)
-	}
-
-	subnet, err := subnetClient.Get(ctx, aksInfo.NodeResourceGroup, aksInfo.VNetName, aksInfo.SubnetName, nil)
-	if err != nil {
-		return fmt.Errorf("get AKS subnet: %w", err)
 	}
 
 	// Get VNet to determine location
@@ -1544,6 +1598,13 @@ func ensureAKSRouteToWorkers(ctx context.Context, subscriptionID string, aksInfo
 		location = *vnet.Location
 	}
 
+	// ========================================
+	// Part 1: Create stargate-workers-rt for AKS subnet
+	// Routes DC worker VNet and pod CIDRs via AKS router
+	// ========================================
+	rtName := "stargate-workers-rt"
+	fmt.Printf("[aks-rt] ensuring route table %s in %s...\n", rtName, aksInfo.NodeResourceGroup)
+
 	pollerRT, err := rtClient.BeginCreateOrUpdate(ctx, aksInfo.NodeResourceGroup, rtName, armnetwork.RouteTable{
 		Location: to.Ptr(location),
 		Properties: &armnetwork.RouteTablePropertiesFormat{
@@ -1560,12 +1621,12 @@ func ensureAKSRouteToWorkers(ctx context.Context, subscriptionID string, aksInfo
 	}
 	fmt.Printf("[aks-rt] route table created: %s\n", *rt.ID)
 
-	// Add route for worker VNet
 	routeClient, err := armnetwork.NewRoutesClient(subscriptionID, cred, nil)
 	if err != nil {
 		return fmt.Errorf("create routes client: %w", err)
 	}
 
+	// Add route for worker VNet
 	routeName := "to-workers"
 	fmt.Printf("[aks-rt] adding route %s -> %s via %s...\n", routeName, workerVNetCIDR, aksRouterIP)
 
@@ -1583,9 +1644,48 @@ func ensureAKSRouteToWorkers(ctx context.Context, subscriptionID string, aksInfo
 	if _, err := pollerRoute.PollUntilDone(ctx, nil); err != nil {
 		return fmt.Errorf("wait for route: %w", err)
 	}
-	fmt.Printf("[aks-rt] route created\n")
+
+	// Add routes for DC worker pod CIDRs (10.244.50-250.0/24 range based on derivePodCIDR logic)
+	// These use the same formula as derivePodCIDR: (third_octet * 10 + fourth_octet) % 200 + 50
+	// For typical DC workers in 10.X.1.5, 10.X.1.6, etc., we need to add their pod CIDRs
+	// We derive based on workerVNetCIDR - extract the third octet
+	workerSubnetParts := strings.Split(workerVNetCIDR, ".")
+	if len(workerSubnetParts) >= 3 {
+		thirdOctet := 1 // Default for /24 worker subnet
+		if len(workerSubnetParts) >= 3 {
+			fmt.Sscanf(workerSubnetParts[2], "%d", &thirdOctet)
+		}
+		// Add routes for workers .5 through .10 (typical worker range)
+		for fourthOctet := 5; fourthOctet <= 10; fourthOctet++ {
+			uniqueOctet := (thirdOctet*10+fourthOctet)%200 + 50
+			podCIDR := fmt.Sprintf("10.244.%d.0/24", uniqueOctet)
+			routeName := fmt.Sprintf("pod-cidr-worker-%d", fourthOctet-4)
+			fmt.Printf("[aks-rt] adding DC worker pod route %s -> %s via %s...\n", routeName, podCIDR, aksRouterIP)
+
+			pollerRoute, err := routeClient.BeginCreateOrUpdate(ctx, aksInfo.NodeResourceGroup, rtName, routeName, armnetwork.Route{
+				Properties: &armnetwork.RoutePropertiesFormat{
+					AddressPrefix:    to.Ptr(podCIDR),
+					NextHopType:      to.Ptr(armnetwork.RouteNextHopTypeVirtualAppliance),
+					NextHopIPAddress: to.Ptr(aksRouterIP),
+				},
+			}, nil)
+			if err != nil {
+				fmt.Printf("[aks-rt] warning: failed to add route %s: %v\n", routeName, err)
+				continue
+			}
+			if _, err := pollerRoute.PollUntilDone(ctx, nil); err != nil {
+				fmt.Printf("[aks-rt] warning: failed to wait for route %s: %v\n", routeName, err)
+			}
+		}
+	}
+	fmt.Printf("[aks-rt] DC worker pod routes added\n")
 
 	// Associate route table with AKS subnet
+	subnet, err := subnetClient.Get(ctx, aksInfo.NodeResourceGroup, aksInfo.VNetName, aksInfo.SubnetName, nil)
+	if err != nil {
+		return fmt.Errorf("get AKS subnet: %w", err)
+	}
+
 	fmt.Printf("[aks-rt] associating route table with subnet %s...\n", aksInfo.SubnetName)
 
 	subnet.Properties.RouteTable = &armnetwork.RouteTable{
@@ -1602,6 +1702,164 @@ func ensureAKSRouteToWorkers(ctx context.Context, subscriptionID string, aksInfo
 	}
 	fmt.Printf("[aks-rt] route table associated with AKS subnet\n")
 
+	// ========================================
+	// Part 2: Create stargate-router-rt for AKS router subnet
+	// Routes AKS node pod CIDRs to their respective nodes (for return traffic)
+	// ========================================
+	if aksRouterSubnetID != "" && len(aksNodes) > 0 {
+		routerRTName := "stargate-router-rt"
+		fmt.Printf("[aks-rt] ensuring route table %s for router subnet...\n", routerRTName)
+
+		pollerRouterRT, err := rtClient.BeginCreateOrUpdate(ctx, aksInfo.NodeResourceGroup, routerRTName, armnetwork.RouteTable{
+			Location: to.Ptr(location),
+			Properties: &armnetwork.RouteTablePropertiesFormat{
+				DisableBgpRoutePropagation: to.Ptr(false),
+			},
+		}, nil)
+		if err != nil {
+			return fmt.Errorf("create router route table: %w", err)
+		}
+
+		routerRT, err := pollerRouterRT.PollUntilDone(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("wait for router route table: %w", err)
+		}
+		fmt.Printf("[aks-rt] router route table created: %s\n", *routerRT.ID)
+
+		// Add routes for each AKS node's pod CIDR
+		for i, node := range aksNodes {
+			routeName := fmt.Sprintf("pod-cidr-node-%d", i)
+			fmt.Printf("[aks-rt] adding AKS node route %s -> %s via %s...\n", routeName, node.PodCIDR, node.IP)
+
+			pollerRoute, err := routeClient.BeginCreateOrUpdate(ctx, aksInfo.NodeResourceGroup, routerRTName, routeName, armnetwork.Route{
+				Properties: &armnetwork.RoutePropertiesFormat{
+					AddressPrefix:    to.Ptr(node.PodCIDR),
+					NextHopType:      to.Ptr(armnetwork.RouteNextHopTypeVirtualAppliance),
+					NextHopIPAddress: to.Ptr(node.IP),
+				},
+			}, nil)
+			if err != nil {
+				fmt.Printf("[aks-rt] warning: failed to add route %s: %v\n", routeName, err)
+				continue
+			}
+			if _, err := pollerRoute.PollUntilDone(ctx, nil); err != nil {
+				fmt.Printf("[aks-rt] warning: failed to wait for route %s: %v\n", routeName, err)
+			}
+		}
+
+		// Extract router subnet name from ID
+		// Format: /subscriptions/.../subnets/<subnet-name>
+		parts := strings.Split(aksRouterSubnetID, "/")
+		routerSubnetName := parts[len(parts)-1]
+
+		fmt.Printf("[aks-rt] associating router route table with subnet %s...\n", routerSubnetName)
+
+		routerSubnet, err := subnetClient.Get(ctx, aksInfo.NodeResourceGroup, aksInfo.VNetName, routerSubnetName, nil)
+		if err != nil {
+			fmt.Printf("[aks-rt] warning: could not get router subnet: %v\n", err)
+		} else {
+			routerSubnet.Properties.RouteTable = &armnetwork.RouteTable{
+				ID: routerRT.ID,
+			}
+
+			pollerRouterSubnet, err := subnetClient.BeginCreateOrUpdate(ctx, aksInfo.NodeResourceGroup, aksInfo.VNetName, routerSubnetName, routerSubnet.Subnet, nil)
+			if err != nil {
+				fmt.Printf("[aks-rt] warning: could not update router subnet: %v\n", err)
+			} else if _, err := pollerRouterSubnet.PollUntilDone(ctx, nil); err != nil {
+				fmt.Printf("[aks-rt] warning: failed to wait for router subnet update: %v\n", err)
+			} else {
+				fmt.Printf("[aks-rt] router route table associated with router subnet\n")
+			}
+		}
+	}
+
+	return nil
+}
+
+// patchAKSCiliumNodes patches CiliumNode resources for AKS nodes to set their podCIDRs.
+// Azure CNI Overlay doesn't set podCIDRs on Node resources, but Cilium needs them for routing.
+// This function assigns unique /24 pod CIDRs from 10.244.0.0/16 to each AKS node.
+func patchAKSCiliumNodes(ctx context.Context, kubeconfig string) error {
+	fmt.Println("[cilium] patching AKS CiliumNodes with podCIDRs...")
+
+	// Build kubeconfig
+	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		return fmt.Errorf("build kubeconfig: %w", err)
+	}
+
+	// Create dynamic client
+	dynClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return fmt.Errorf("create dynamic client: %w", err)
+	}
+
+	// CiliumNode GVR
+	ciliumNodeGVR := schema.GroupVersionResource{
+		Group:    "cilium.io",
+		Version:  "v2",
+		Resource: "ciliumnodes",
+	}
+
+	// List CiliumNodes
+	ciliumNodes, err := dynClient.Resource(ciliumNodeGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list ciliumnodes: %w", err)
+	}
+
+	if len(ciliumNodes.Items) == 0 {
+		fmt.Println("[cilium] no CiliumNodes found, skipping")
+		return nil
+	}
+
+	fmt.Printf("[cilium] found %d CiliumNodes\n", len(ciliumNodes.Items))
+
+	// Assign pod CIDRs to each node (10.244.0.0/24, 10.244.1.0/24, etc.)
+	for i, cn := range ciliumNodes.Items {
+		nodeName := cn.GetName()
+
+		// Check if already has a podCIDR in spec.ipam.podCIDRs
+		spec, ok := cn.Object["spec"].(map[string]interface{})
+		if ok {
+			ipam, ok := spec["ipam"].(map[string]interface{})
+			if ok {
+				podCIDRs, ok := ipam["podCIDRs"].([]interface{})
+				if ok && len(podCIDRs) > 0 {
+					fmt.Printf("[cilium] node %s already has podCIDR: %v, skipping\n", nodeName, podCIDRs)
+					continue
+				}
+			}
+		}
+
+		// Assign a unique /24 from 10.244.X.0/24
+		podCIDR := fmt.Sprintf("10.244.%d.0/24", i)
+
+		// Create patch
+		patch := map[string]interface{}{
+			"spec": map[string]interface{}{
+				"ipam": map[string]interface{}{
+					"podCIDRs": []string{podCIDR},
+				},
+			},
+		}
+
+		patchBytes, err := json.Marshal(patch)
+		if err != nil {
+			fmt.Printf("[cilium] warning: could not marshal patch for %s: %v\n", nodeName, err)
+			continue
+		}
+
+		// Apply patch
+		_, err = dynClient.Resource(ciliumNodeGVR).Patch(ctx, nodeName, "application/merge-patch+json", patchBytes, metav1.PatchOptions{})
+		if err != nil {
+			fmt.Printf("[cilium] warning: could not patch CiliumNode %s: %v\n", nodeName, err)
+			continue
+		}
+
+		fmt.Printf("[cilium] patched CiliumNode %s with podCIDR %s\n", nodeName, podCIDR)
+	}
+
+	fmt.Println("[cilium] CiliumNode patching complete")
 	return nil
 }
 

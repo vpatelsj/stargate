@@ -354,9 +354,19 @@ packages:
 `, vmName, adminUser, sshPublicKey)
 }
 
+// buildRouterCloudInit creates cloud-init for a DC router that:
+// 1. Advertises the DC subnet and expected DC worker pod CIDRs to Tailscale
+// 2. Sets up kernel routes for AKS node subnet and pod CIDRs via tailscale0
 func buildRouterCloudInit(vmName, adminUser, sshPublicKey, tailscaleAuthKey, subnetCIDR string) (string, error) {
 	if tailscaleAuthKey == "" {
 		return "", fmt.Errorf("missing tailscale auth key for router %s", vmName)
+	}
+
+	// Advertise: DC subnet + expected DC worker pod CIDRs (10.244.50-70.0/24 range)
+	// This enables AKS to reach DC worker pods
+	advertiseRoutes := subnetCIDR
+	for i := 50; i <= 70; i++ {
+		advertiseRoutes += fmt.Sprintf(",10.244.%d.0/24", i)
 	}
 
 	cloudInit := baseCloudInitHeader(vmName, adminUser, sshPublicKey)
@@ -375,10 +385,30 @@ write_files:
       iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE
       mkdir -p /etc/iptables
       iptables-save > /etc/iptables/rules.v4 || true
+      
+      # Add kernel routes for AKS node subnet and pod CIDRs via tailscale0
+      # AKS node subnet is typically 10.224.0.0/16
+      ip route add 10.224.0.0/16 dev tailscale0 2>/dev/null || true
+      # AKS pod CIDRs are in 10.244.0-10.0/24 range (first 10 nodes)
+      for i in $(seq 0 10); do
+        ip route add 10.244.$i.0/24 dev tailscale0 2>/dev/null || true
+      done
+      
+      # Persist routes for reboot
+      cat > /etc/network/if-up.d/stargate-routes <<'ROUTES'
+#!/bin/bash
+if [ "$IFACE" = "tailscale0" ]; then
+  ip route add 10.224.0.0/16 dev tailscale0 2>/dev/null || true
+  for i in $(seq 0 10); do
+    ip route add 10.244.$i.0/24 dev tailscale0 2>/dev/null || true
+  done
+fi
+ROUTES
+      chmod +x /etc/network/if-up.d/stargate-routes
 
 runcmd:
   - /tmp/configure-router.sh
-`, tailscaleAuthKey, vmName, subnetCIDR)
+`, tailscaleAuthKey, vmName, advertiseRoutes)
 
 	cloudInit = strings.ReplaceAll(cloudInit, "\t", "    ")
 	return cloudInit, nil
@@ -387,6 +417,7 @@ runcmd:
 // buildAKSRouterCloudInit creates cloud-init for an AKS router that:
 // 1. Advertises multiple CIDRs (VNet, Pod, Service) to Tailscale
 // 2. Sets up a proxy to the AKS API server
+// 3. Sets up kernel routes for DC worker pod CIDRs via tailscale0
 func buildAKSRouterCloudInit(vmName, adminUser, sshPublicKey, tailscaleAuthKey string, routeCIDRs []string, apiServerFQDN string) (string, error) {
 	if tailscaleAuthKey == "" {
 		return "", fmt.Errorf("missing tailscale auth key for router %s", vmName)
@@ -413,6 +444,24 @@ write_files:
       iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE
       mkdir -p /etc/iptables
       iptables-save > /etc/iptables/rules.v4 || true
+      
+      # Add kernel routes for DC worker pod CIDRs via tailscale0
+      # These are in the 10.244.50-250 range based on derivePodCIDR formula
+      # We add routes for the common range used by DC workers
+      for i in $(seq 50 70); do
+        ip route add 10.244.$i.0/24 dev tailscale0 2>/dev/null || true
+      done
+      
+      # Persist routes for reboot
+      cat > /etc/network/if-up.d/stargate-routes <<'ROUTES'
+#!/bin/bash
+if [ "$IFACE" = "tailscale0" ]; then
+  for i in $(seq 50 70); do
+    ip route add 10.244.$i.0/24 dev tailscale0 2>/dev/null || true
+  done
+fi
+ROUTES
+      chmod +x /etc/network/if-up.d/stargate-routes
 `, tailscaleAuthKey, vmName, routes)
 
 	// Add AKS API proxy if FQDN is provided
@@ -882,13 +931,16 @@ func (p *Provider) ensureRouteTable(ctx context.Context, subnetID, routerIP stri
 	return nil
 }
 
-// derivePodCIDR returns a /24 pod CIDR based on the node's private IP (aligned with host-local setup).
+// derivePodCIDR returns a /24 pod CIDR in 10.244.x.0/24 based on the node's private IP.
+// Uses the formula from the bootstrap script: (third_octet*10 + fourth_octet) % 200 + 50
 func derivePodCIDR(privateIP string) string {
 	ip := net.ParseIP(privateIP).To4()
 	if ip == nil {
 		return ""
 	}
-	return fmt.Sprintf("%d.%d.%d.0/24", ip[0], ip[1], ip[2])
+	// Match the bootstrap script's podCIDR derivation formula
+	uniqueOctet := (int(ip[2])*10+int(ip[3]))%200 + 50
+	return fmt.Sprintf("10.244.%d.0/24", uniqueOctet)
 }
 
 // ensureSubnetInVNet creates or gets a subnet in a specific VNet and resource group.
