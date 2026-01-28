@@ -309,6 +309,8 @@ func (r *OperationReconciler) bootstrapServer(ctx context.Context, server *api.S
 		}
 		log.FromContext(ctx).Info("Building AKS bootstrap script", "nodeIP", target, "vmName", server.Name)
 		script = r.buildAKSBootstrapScript(cfg.kubernetesVersion, target, server.Name, saToken)
+		// Debug: write script to file for inspection
+		os.WriteFile("/tmp/aks-bootstrap-debug.sh", []byte(script), 0755)
 	} else {
 		// Get control plane Tailscale IP if not set
 		controlPlaneIP := r.ControlPlaneTailscaleIP
@@ -593,6 +595,10 @@ func (r *OperationReconciler) buildAKSBootstrapScript(kubernetesVersion, nodeIP,
 	// Use private IP for API server if configured (for Tailscale mesh connectivity)
 	// The AKS router proxies port 6443 to the AKS API server
 	apiServer := r.AKSAPIServer
+	// Ensure the API server URL has https:// prefix
+	if !strings.HasPrefix(apiServer, "https://") && !strings.HasPrefix(apiServer, "http://") {
+		apiServer = "https://" + apiServer
+	}
 	if r.AKSAPIServerPrivateIP != "" {
 		apiServer = fmt.Sprintf("https://%s:6443", r.AKSAPIServerPrivateIP)
 	}
@@ -813,6 +819,7 @@ chown root:root "${AZURE_JSON_PATH}"
 # Install containerd if not present
 if ! command -v containerd >/dev/null; then
   echo "Installing containerd..."
+  export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y apt-transport-https ca-certificates curl gnupg
   mkdir -p /etc/apt/keyrings
@@ -820,7 +827,7 @@ if ! command -v containerd >/dev/null; then
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
   echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
   apt-get update
-  apt-get install -y containerd.io
+  apt-get install -y -o Dpkg::Options::="--force-confold" containerd.io
 fi
 
 # Install kubelet if not present
@@ -916,7 +923,7 @@ for i in {1..60}; do
     FOURTH_OCTET=$(echo "$NODE_IP" | cut -d. -f4)
     echo "DEBUG: THIRD=$THIRD_OCTET FOURTH=$FOURTH_OCTET"
     # Combine to create unique subnet: 10.244.<third*10 + fourth mod 256>.0/24
-    # NOTE: %% is needed to escape the % for Go's fmt.Sprintf
+    # NOTE: use double percent to escape for Go fmt.Sprintf
     UNIQUE_OCTET=$(( (THIRD_OCTET * 10 + FOURTH_OCTET) %% 200 + 50 ))
     POD_CIDR="10.244.${UNIQUE_OCTET}.0/24"
     echo "DEBUG: UNIQUE_OCTET=$UNIQUE_OCTET POD_CIDR=$POD_CIDR"
@@ -924,6 +931,45 @@ for i in {1..60}; do
     echo "Patching node $NODE_NAME with PodCIDR: $POD_CIDR"
     kubectl --kubeconfig=/var/lib/kubelet/kubeconfig patch node "$NODE_NAME" --type='json' \
       -p="[{\"op\":\"add\",\"path\":\"/spec/podCIDR\",\"value\":\"${POD_CIDR}\"},{\"op\":\"add\",\"path\":\"/spec/podCIDRs\",\"value\":[\"${POD_CIDR}\"]}]" || true
+
+		echo "Patching CiliumNode $NODE_NAME with PodCIDR: $POD_CIDR"
+		for j in {1..30}; do
+			if kubectl --kubeconfig=/var/lib/kubelet/kubeconfig patch ciliumnode "$NODE_NAME" --type merge -p "{\"spec\":{\"ipam\":{\"podCIDRs\":[\"${POD_CIDR}\"]}}}"; then
+				echo "CiliumNode patched with podCIDR"
+				break
+			fi
+			echo "Waiting for CiliumNode resource... attempt $j/30"
+			sleep 2
+		done
+    
+    # Write Cilium CNI config with host-local IPAM for non-AKS nodes
+    # This is required because AKS uses delegated-plugin IPAM which relies on Azure CNS
+    # For DC workers, we use host-local IPAM with the node's podCIDR
+    echo "Writing Cilium CNI config with host-local IPAM for podCIDR: $POD_CIDR"
+    cat > /etc/cni/net.d/05-cilium.conflist <<CILIUM_CNI
+{
+  "cniVersion": "0.3.1",
+  "name": "cilium",
+  "plugins": [
+    {
+      "type": "cilium-cni",
+      "enable-debug": false,
+      "log-file": "/var/run/cilium/cilium-cni.log",
+      "ipam": {
+        "type": "host-local",
+        "ranges": [
+          [{"subnet": "${POD_CIDR}"}]
+        ],
+        "routes": [
+          {"dst": "0.0.0.0/0"}
+        ]
+      }
+    }
+  ]
+}
+CILIUM_CNI
+    # Remove the placeholder now that we have the real config
+    rm -f /etc/cni/net.d/99-loopback.conf
     
     # Restart containerd to pick up the new PodCIDR in the CNI template
     echo "Restarting containerd to apply new PodCIDR..."

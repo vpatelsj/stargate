@@ -755,3 +755,357 @@ func (c *Clients) DeleteResourceGroup(ctx context.Context, resourceGroup string)
 	log.Info("resource group deleted successfully")
 	return nil
 }
+
+// RouteTableConfig holds configuration for a route table
+type RouteTableConfig struct {
+	ResourceGroup  string
+	RouteTableName string
+	Location       string
+}
+
+// RouteConfig holds configuration for a single route
+type RouteConfig struct {
+	ResourceGroup    string
+	RouteTableName   string
+	RouteName        string
+	AddressPrefix    string // e.g., "10.244.65.0/24"
+	NextHopType      string // "VirtualAppliance" for routing through a VM
+	NextHopIPAddress string // e.g., "10.237.0.4" (router IP)
+}
+
+// EnsureRouteTable creates a route table if it doesn't exist.
+// Returns the route table ID.
+func (c *Clients) EnsureRouteTable(ctx context.Context, cfg RouteTableConfig) (string, error) {
+	log := c.Logger.With("resource", "RouteTable", "name", cfg.RouteTableName, "resourceGroup", cfg.ResourceGroup)
+
+	// Check if route table exists
+	log.Info("checking if route table exists")
+	resp, err := c.RouteTables.Get(ctx, cfg.ResourceGroup, cfg.RouteTableName, nil)
+	if err == nil {
+		log.Info("route table already exists", "id", *resp.ID)
+		return *resp.ID, nil
+	}
+	if !isNotFound(err) {
+		return "", fmt.Errorf("failed to get route table: %w", err)
+	}
+
+	// Create route table
+	log.Info("creating route table")
+	poller, err := c.RouteTables.BeginCreateOrUpdate(ctx, cfg.ResourceGroup, cfg.RouteTableName, armnetwork.RouteTable{
+		Location: to.Ptr(cfg.Location),
+		Tags: map[string]*string{
+			"managedBy": to.Ptr("mx-azure"),
+		},
+		Properties: &armnetwork.RouteTablePropertiesFormat{
+			DisableBgpRoutePropagation: to.Ptr(false),
+		},
+	}, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to start route table creation: %w", err)
+	}
+
+	result, err := poller.PollUntilDone(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create route table: %w", err)
+	}
+
+	log.Info("route table created", "id", *result.ID)
+	return *result.ID, nil
+}
+
+// EnsureRoute creates or updates a route in a route table.
+// This is idempotent - if the route exists with the same config, it's a no-op.
+// Returns the route ID.
+func (c *Clients) EnsureRoute(ctx context.Context, cfg RouteConfig) (string, error) {
+	log := c.Logger.With("resource", "Route", "name", cfg.RouteName,
+		"routeTable", cfg.RouteTableName, "addressPrefix", cfg.AddressPrefix, "nextHop", cfg.NextHopIPAddress)
+
+	// Check if route exists with correct config
+	log.Info("checking if route exists")
+	resp, err := c.Routes.Get(ctx, cfg.ResourceGroup, cfg.RouteTableName, cfg.RouteName, nil)
+	if err == nil {
+		// Route exists - check if config matches
+		if resp.Properties != nil &&
+			resp.Properties.AddressPrefix != nil && *resp.Properties.AddressPrefix == cfg.AddressPrefix &&
+			resp.Properties.NextHopIPAddress != nil && *resp.Properties.NextHopIPAddress == cfg.NextHopIPAddress {
+			log.Info("route already exists with correct config", "id", *resp.ID)
+			return *resp.ID, nil
+		}
+		log.Info("route exists but config differs, updating")
+	} else if !isNotFound(err) {
+		return "", fmt.Errorf("failed to get route: %w", err)
+	}
+
+	// Create or update route
+	log.Info("creating/updating route")
+
+	nextHopType := armnetwork.RouteNextHopTypeVirtualAppliance
+	if cfg.NextHopType == "VnetLocal" {
+		nextHopType = armnetwork.RouteNextHopTypeVnetLocal
+	}
+
+	routeProps := &armnetwork.RoutePropertiesFormat{
+		AddressPrefix: to.Ptr(cfg.AddressPrefix),
+		NextHopType:   to.Ptr(nextHopType),
+	}
+	if cfg.NextHopIPAddress != "" {
+		routeProps.NextHopIPAddress = to.Ptr(cfg.NextHopIPAddress)
+	}
+
+	poller, err := c.Routes.BeginCreateOrUpdate(ctx, cfg.ResourceGroup, cfg.RouteTableName, cfg.RouteName, armnetwork.Route{
+		Properties: routeProps,
+	}, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to start route creation: %w", err)
+	}
+
+	result, err := poller.PollUntilDone(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create route: %w", err)
+	}
+
+	log.Info("route created/updated", "id", *result.ID)
+	return *result.ID, nil
+}
+
+// AssociateRouteTableToSubnet associates a route table with a subnet.
+// This modifies the subnet to use the specified route table.
+func (c *Clients) AssociateRouteTableToSubnet(ctx context.Context, resourceGroup, vnetName, subnetName, routeTableID string) error {
+	log := c.Logger.With("resource", "SubnetRouteTable", "subnet", subnetName, "routeTable", routeTableID)
+
+	// Get current subnet config
+	log.Info("getting current subnet configuration")
+	resp, err := c.Subnets.Get(ctx, resourceGroup, vnetName, subnetName, nil)
+	if err != nil {
+		return fmt.Errorf("failed to get subnet: %w", err)
+	}
+
+	// Check if already associated
+	if resp.Properties.RouteTable != nil && resp.Properties.RouteTable.ID != nil {
+		if *resp.Properties.RouteTable.ID == routeTableID {
+			log.Info("subnet already associated with route table")
+			return nil
+		}
+	}
+
+	// Update subnet with route table
+	log.Info("associating route table with subnet")
+	resp.Properties.RouteTable = &armnetwork.RouteTable{
+		ID: to.Ptr(routeTableID),
+	}
+
+	poller, err := c.Subnets.BeginCreateOrUpdate(ctx, resourceGroup, vnetName, subnetName, resp.Subnet, nil)
+	if err != nil {
+		return fmt.Errorf("failed to start subnet update: %w", err)
+	}
+
+	_, err = poller.PollUntilDone(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to update subnet: %w", err)
+	}
+
+	log.Info("route table associated with subnet")
+	return nil
+}
+
+// AKSNodeInfo holds information about an AKS node for routing purposes
+type AKSNodeInfo struct {
+	Name      string // Node name (e.g., "aks-nodepool1-12345678-vmss000000")
+	PrivateIP string // Node's private IP address
+	PodCIDR   string // Node's pod CIDR (e.g., "10.244.0.0/24")
+}
+
+// GetAKSNodeInfo retrieves information about all nodes in an AKS cluster.
+// This queries the VMSS instances to get private IPs, and uses kubectl-style
+// pod CIDR assignment (sequential based on node index).
+func (c *Clients) GetAKSNodeInfo(ctx context.Context, clusterRG, clusterName string) ([]AKSNodeInfo, error) {
+	log := c.Logger.With("operation", "GetAKSNodeInfo", "cluster", clusterName, "resourceGroup", clusterRG)
+
+	// Get the AKS cluster to find the node resource group
+	log.Info("getting AKS cluster info")
+	cluster, err := c.ManagedClusters.Get(ctx, clusterRG, clusterName, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get AKS cluster: %w", err)
+	}
+
+	if cluster.Properties == nil || cluster.Properties.NodeResourceGroup == nil {
+		return nil, fmt.Errorf("AKS cluster has no node resource group")
+	}
+	nodeRG := *cluster.Properties.NodeResourceGroup
+
+	// Get pod CIDR from cluster config (for calculating per-node CIDRs)
+	var podCIDRBase string
+	if cluster.Properties.NetworkProfile != nil && cluster.Properties.NetworkProfile.PodCidr != nil {
+		podCIDRBase = *cluster.Properties.NetworkProfile.PodCidr
+	} else {
+		podCIDRBase = "10.244.0.0/16" // Default for Azure CNI Overlay
+	}
+	log.Info("using pod CIDR base", "podCIDR", podCIDRBase)
+
+	// List all VMSS in the node resource group
+	log.Info("listing VMSS in node resource group", "nodeRG", nodeRG)
+	var nodes []AKSNodeInfo
+	nodeIndex := 0
+
+	pager := c.VMSS.NewListPager(nodeRG, nil)
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list VMSS: %w", err)
+		}
+
+		for _, vmss := range page.Value {
+			if vmss.Name == nil {
+				continue
+			}
+			vmssName := *vmss.Name
+
+			// List VMs in this VMSS
+			vmPager := c.VMSSVMs.NewListPager(nodeRG, vmssName, nil)
+			for vmPager.More() {
+				vmPage, err := vmPager.NextPage(ctx)
+				if err != nil {
+					log.Info("failed to list VMSS VMs", "vmss", vmssName, "error", err)
+					continue
+				}
+
+				for _, vm := range vmPage.Value {
+					if vm.Properties == nil || vm.Properties.NetworkProfile == nil {
+						continue
+					}
+
+					// Get private IP from network interface
+					var privateIP string
+					for _, nicRef := range vm.Properties.NetworkProfile.NetworkInterfaces {
+						if nicRef.ID == nil {
+							continue
+						}
+						// Parse NIC ID and get the NIC
+						nicID := *nicRef.ID
+						privateIP, err = c.getPrivateIPFromNIC(ctx, nicID)
+						if err != nil {
+							log.Info("failed to get private IP from NIC", "nicID", nicID, "error", err)
+							continue
+						}
+						break
+					}
+
+					if privateIP == "" {
+						continue
+					}
+
+					// Calculate pod CIDR for this node (10.244.X.0/24 where X is node index)
+					podCIDR := fmt.Sprintf("10.244.%d.0/24", nodeIndex)
+
+					nodeName := ""
+					if vm.Name != nil {
+						nodeName = fmt.Sprintf("%s_%s", vmssName, *vm.Name)
+					}
+
+					nodes = append(nodes, AKSNodeInfo{
+						Name:      nodeName,
+						PrivateIP: privateIP,
+						PodCIDR:   podCIDR,
+					})
+
+					log.Info("found AKS node", "name", nodeName, "privateIP", privateIP, "podCIDR", podCIDR)
+					nodeIndex++
+				}
+			}
+		}
+	}
+
+	log.Info("discovered AKS nodes", "count", len(nodes))
+	return nodes, nil
+}
+
+// getPrivateIPFromNIC extracts the private IP address from a NIC by its resource ID.
+func (c *Clients) getPrivateIPFromNIC(ctx context.Context, nicID string) (string, error) {
+	// Parse the NIC ID to get resource group and name
+	// Format: /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Network/networkInterfaces/{name}
+	parts := make(map[string]string)
+	segments := splitResourceID(nicID)
+	for i := 0; i < len(segments)-1; i += 2 {
+		parts[segments[i]] = segments[i+1]
+	}
+
+	rg := parts["resourceGroups"]
+	name := parts["networkInterfaces"]
+	if rg == "" || name == "" {
+		return "", fmt.Errorf("invalid NIC ID format: %s", nicID)
+	}
+
+	nic, err := c.Interfaces.Get(ctx, rg, name, nil)
+	if err != nil {
+		return "", err
+	}
+
+	if nic.Properties != nil && len(nic.Properties.IPConfigurations) > 0 {
+		for _, ipConfig := range nic.Properties.IPConfigurations {
+			if ipConfig.Properties != nil && ipConfig.Properties.PrivateIPAddress != nil {
+				return *ipConfig.Properties.PrivateIPAddress, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no private IP found for NIC %s", name)
+}
+
+// splitResourceID splits an Azure resource ID into its path segments.
+func splitResourceID(resourceID string) []string {
+	// Remove leading slash and split
+	if len(resourceID) > 0 && resourceID[0] == '/' {
+		resourceID = resourceID[1:]
+	}
+	result := []string{}
+	current := ""
+	for _, c := range resourceID {
+		if c == '/' {
+			if current != "" {
+				result = append(result, current)
+				current = ""
+			}
+		} else {
+			current += string(c)
+		}
+	}
+	if current != "" {
+		result = append(result, current)
+	}
+	return result
+}
+
+// SyncAKSNodeRoutes ensures routes exist for all AKS node pod CIDRs.
+// It creates routes in the specified route table for each node's pod CIDR
+// pointing to that node's private IP.
+func (c *Clients) SyncAKSNodeRoutes(ctx context.Context, routeTableRG, routeTableName, clusterRG, clusterName string) error {
+	log := c.Logger.With("operation", "SyncAKSNodeRoutes", "routeTable", routeTableName, "cluster", clusterName)
+
+	// Get AKS node information
+	nodes, err := c.GetAKSNodeInfo(ctx, clusterRG, clusterName)
+	if err != nil {
+		return fmt.Errorf("failed to get AKS node info: %w", err)
+	}
+
+	// Create routes for each node
+	for i, node := range nodes {
+		routeName := fmt.Sprintf("aks-pod-cidr-%d", i)
+
+		log.Info("ensuring route for AKS node", "node", node.Name, "podCIDR", node.PodCIDR, "nextHop", node.PrivateIP)
+
+		_, err := c.EnsureRoute(ctx, RouteConfig{
+			ResourceGroup:    routeTableRG,
+			RouteTableName:   routeTableName,
+			RouteName:        routeName,
+			AddressPrefix:    node.PodCIDR,
+			NextHopType:      "VirtualAppliance",
+			NextHopIPAddress: node.PrivateIP,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create route for node %s: %w", node.Name, err)
+		}
+	}
+
+	log.Info("synced AKS node routes", "count", len(nodes))
+	return nil
+}

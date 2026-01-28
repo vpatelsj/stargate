@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"flag"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -59,6 +60,15 @@ func main() {
 	var azureVNetName string
 	var azureSubnetName string
 
+	// Route sync configuration flags
+	var enableRouteSync bool
+	var aksNodeResourceGroup string
+	var routerSubnetName string
+	var dcSubnetCIDR string
+	var dcPodCIDR string
+	var tailscaleAPIKey string
+	var tailnetName string
+
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8081", "The address the metric endpoint binds to.")
 
 	// Bootstrap configuration flags
@@ -86,6 +96,23 @@ func main() {
 	flag.StringVar(&azureRouteTableName, "azure-route-table-name", "", "Azure route table name for pod CIDR routes.")
 	flag.StringVar(&azureVNetName, "azure-vnet-name", "", "Azure VNet name containing the subnets.")
 	flag.StringVar(&azureSubnetName, "azure-subnet-name", "", "Azure subnet name where AKS nodes reside.")
+
+	// Route sync controller flags
+	var aksRouterPrivateIP string
+	var routerRouteTableName string
+	var tailscaleClientID string
+	var tailscaleClientSecret string
+	flag.BoolVar(&enableRouteSync, "enable-route-sync", false, "Enable the route sync controller to automatically update Azure routes when nodes join.")
+	flag.StringVar(&aksNodeResourceGroup, "aks-node-resource-group", "", "Resource group containing AKS managed infrastructure (MC_*). Required for route sync.")
+	flag.StringVar(&routerSubnetName, "router-subnet-name", "", "Subnet name where the Tailscale router lives.")
+	flag.StringVar(&aksRouterPrivateIP, "aks-router-private-ip", "", "Private IP of the AKS router VM (e.g., 10.237.0.4). Used as next-hop for Azure route tables.")
+	flag.StringVar(&routerRouteTableName, "router-route-table-name", "stargate-router-rt", "Route table name for router subnet (return traffic). Created if doesn't exist.")
+	flag.StringVar(&dcSubnetCIDR, "dc-subnet-cidr", "10.50.0.0/16", "DC subnet CIDR to route through the router.")
+	flag.StringVar(&dcPodCIDR, "dc-pod-cidr", "10.244.50.0/20", "DC pod CIDR range to route through the router.")
+	flag.StringVar(&tailscaleAPIKey, "tailscale-api-key", "", "Tailscale API key for route management (or set TAILSCALE_API_KEY env).")
+	flag.StringVar(&tailscaleClientID, "tailscale-client-id", "", "Tailscale OAuth client ID (or set TAILSCALE_CLIENT_ID env).")
+	flag.StringVar(&tailscaleClientSecret, "tailscale-client-secret", "", "Tailscale OAuth client secret (or set TAILSCALE_CLIENT_SECRET env).")
+	flag.StringVar(&tailnetName, "tailnet-name", "", "Tailscale tailnet name (defaults to API key's tailnet).")
 
 	opts := zap.Options{
 		Development: true,
@@ -154,6 +181,59 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Operation")
 		os.Exit(1)
+	}
+
+	// Set up Route Sync controller (if enabled)
+	if enableRouteSync {
+		// Use env vars if flags not provided
+		tsAPIKey := tailscaleAPIKey
+		if tsAPIKey == "" {
+			tsAPIKey = os.Getenv("TAILSCALE_API_KEY")
+		}
+		tsClientID := tailscaleClientID
+		if tsClientID == "" {
+			tsClientID = os.Getenv("TAILSCALE_CLIENT_ID")
+		}
+		tsClientSecret := tailscaleClientSecret
+		if tsClientSecret == "" {
+			tsClientSecret = os.Getenv("TAILSCALE_CLIENT_SECRET")
+		}
+
+		if err = (&controller.RouteSyncReconciler{
+			Client:                mgr.GetClient(),
+			Scheme:                mgr.GetScheme(),
+			Logger:                slog.Default(),
+			SubscriptionID:        aksSubscriptionID,
+			AKSResourceGroup:      aksNodeResourceGroup,
+			ClusterResourceGroup:  aksResourceGroup,
+			ClusterName:           aksClusterName,
+			RouteTableName:        azureRouteTableName,
+			RouterRouteTableName:  routerRouteTableName,
+			RouterSubnetName:      routerSubnetName,
+			AKSSubnetName:         azureSubnetName,
+			DCSubnetCIDR:          dcSubnetCIDR,
+			DCPodCIDR:             dcPodCIDR,
+			DCResourceGroup:       aksVMResourceGroup,
+			AKSRouterIP:           aksRouterPrivateIP,
+			AKSRouterTSIP:         aksRouterTailscaleIP,
+			DCRouterTSIP:          dcRouterTailscaleIP,
+			SSHPrivateKeyPath:     sshPrivateKeyPath,
+			TailscaleAPIKey:       tsAPIKey,
+			TailscaleClientID:     tsClientID,
+			TailscaleClientSecret: tsClientSecret,
+			TailnetName:           tailnetName,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "RouteSync")
+			os.Exit(1)
+		}
+		setupLog.Info("Route sync controller enabled",
+			"resourceGroup", aksNodeResourceGroup,
+			"routeTable", azureRouteTableName,
+			"routerRouteTable", routerRouteTableName,
+			"aksRouterPrivateIP", aksRouterPrivateIP,
+			"aksRouterTSIP", aksRouterTailscaleIP,
+			"dcRouterTSIP", dcRouterTailscaleIP,
+			"tailscaleOAuth", tsClientID != "")
 	}
 
 	// Add health checks
