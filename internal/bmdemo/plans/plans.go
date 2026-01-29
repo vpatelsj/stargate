@@ -2,6 +2,8 @@
 package plans
 
 import (
+	"google.golang.org/protobuf/proto"
+
 	pb "github.com/vpatelsj/stargate/gen/baremetal/v1"
 )
 
@@ -198,17 +200,28 @@ func NewRegistry() *Registry {
 	return r
 }
 
-// GetPlan retrieves a plan by ID.
-func (r *Registry) GetPlan(planID string) (*pb.Plan, bool) {
-	plan, ok := r.plans[planID]
-	return plan, ok
+// clonePlan returns a deep copy of a plan to prevent callers from mutating shared state.
+func clonePlan(p *pb.Plan) *pb.Plan {
+	if p == nil {
+		return nil
+	}
+	return proto.Clone(p).(*pb.Plan)
 }
 
-// ListPlans returns all available plans.
+// GetPlan retrieves a plan by ID. Returns a deep clone so callers can't mutate registry state.
+func (r *Registry) GetPlan(planID string) (*pb.Plan, bool) {
+	plan, ok := r.plans[planID]
+	if !ok {
+		return nil, false
+	}
+	return clonePlan(plan), true
+}
+
+// ListPlans returns all available plans. Returns deep clones so callers can't mutate registry state.
 func (r *Registry) ListPlans() []*pb.Plan {
 	result := make([]*pb.Plan, 0, len(r.plans))
 	for _, plan := range r.plans {
-		result = append(result, plan)
+		result = append(result, clonePlan(plan))
 	}
 	return result
 }

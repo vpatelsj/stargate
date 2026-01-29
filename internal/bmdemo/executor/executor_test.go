@@ -8,6 +8,7 @@ import (
 	"time"
 
 	pb "github.com/vpatelsj/stargate/gen/baremetal/v1"
+	"github.com/vpatelsj/stargate/internal/bmdemo/lifecycle"
 	"github.com/vpatelsj/stargate/internal/bmdemo/plans"
 	"github.com/vpatelsj/stargate/internal/bmdemo/provider/fake"
 	"github.com/vpatelsj/stargate/internal/bmdemo/store"
@@ -133,7 +134,7 @@ func TestRunner_StartRun_RepaveJoin(t *testing.T) {
 	// Verify InCustomerCluster condition
 	hasCondition := false
 	for _, c := range finalMachine.Status.Conditions {
-		if c.Type == ConditionInCustomerCluster && c.Status {
+		if c.Type == lifecycle.ConditionInCustomerCluster && c.Status {
 			hasCondition = true
 			break
 		}
@@ -245,7 +246,7 @@ func TestRunner_StepRetries(t *testing.T) {
 	finalMachine, _ := s.GetMachine(machine.MachineId)
 	hasIntervention := false
 	for _, c := range finalMachine.Status.Conditions {
-		if c.Type == ConditionNeedsIntervention && c.Status {
+		if c.Type == lifecycle.ConditionNeedsIntervention && c.Status {
 			hasIntervention = true
 			break
 		}
@@ -547,16 +548,16 @@ func TestRunner_CancelRun_SetsMachineState(t *testing.T) {
 		t.Errorf("Expected empty ActiveRunId, got %v", finalMachine.Status.ActiveRunId)
 	}
 
-	// NeedsIntervention condition should be set
-	var hasIntervention bool
+	// OperationCanceled condition should be set (not NeedsIntervention - cancels are user-initiated)
+	var hasCanceled bool
 	for _, c := range finalMachine.Status.Conditions {
-		if c.Type == ConditionNeedsIntervention && c.Status {
-			hasIntervention = true
+		if c.Type == lifecycle.ConditionOperationCanceled && c.Status {
+			hasCanceled = true
 			break
 		}
 	}
-	if !hasIntervention {
-		t.Error("Expected NeedsIntervention condition to be set")
+	if !hasCanceled {
+		t.Error("Expected OperationCanceled condition to be set")
 	}
 }
 
@@ -635,7 +636,7 @@ func TestRunner_VerifyRequiredForInCustomerCluster(t *testing.T) {
 	finalMachine, _ := s.GetMachine(machine.MachineId)
 	var hasInCluster bool
 	for _, c := range finalMachine.Status.Conditions {
-		if c.Type == ConditionInCustomerCluster && c.Status {
+		if c.Type == lifecycle.ConditionInCustomerCluster && c.Status {
 			hasInCluster = true
 			break
 		}

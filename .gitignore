@@ -6,6 +6,17 @@ bin/
 *.so
 *.dylib
 
+# Built binaries (from cmd/)
+bmdemo-cli
+bmdemo-server
+mockapi
+simulator
+azure
+azure-controller
+mx-azure
+prep-dc-inventory
+qemu-controller
+
 # Go tools
 *.test
 *.out

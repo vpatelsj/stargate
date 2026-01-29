@@ -270,3 +270,76 @@ func TestAllPlansHaveTimeouts(t *testing.T) {
 		}
 	}
 }
+
+// TestGetPlanReturnsClone verifies that GetPlan returns a deep clone,
+// so callers cannot mutate the registry's shared global plans.
+func TestGetPlanReturnsClone(t *testing.T) {
+	r := NewRegistry()
+
+	// Get a plan
+	plan1, ok := r.GetPlan(PlanRepaveJoin)
+	if !ok {
+		t.Fatal("PlanRepaveJoin not found")
+	}
+
+	// Remember original step name
+	originalName := plan1.Steps[0].Name
+
+	// Mutate the returned plan
+	plan1.DisplayName = "MUTATED"
+	plan1.Steps[0].Name = "MUTATED-STEP"
+
+	// Get the plan again - it should have original values
+	plan2, ok := r.GetPlan(PlanRepaveJoin)
+	if !ok {
+		t.Fatal("PlanRepaveJoin not found on second get")
+	}
+
+	if plan2.DisplayName == "MUTATED" {
+		t.Error("Caller was able to mutate registry's plan DisplayName - GetPlan should return a clone")
+	}
+
+	if plan2.Steps[0].Name != originalName {
+		t.Errorf("Caller was able to mutate registry's plan Steps - GetPlan should return a clone. Expected %q, got %q",
+			originalName, plan2.Steps[0].Name)
+	}
+}
+
+// TestListPlansReturnsClones verifies that ListPlans returns deep clones,
+// so callers cannot mutate the registry's shared global plans.
+func TestListPlansReturnsClones(t *testing.T) {
+	r := NewRegistry()
+
+	plans1 := r.ListPlans()
+	if len(plans1) == 0 {
+		t.Fatal("Expected at least one plan")
+	}
+
+	// Remember original values
+	originalDisplayName := plans1[0].DisplayName
+	originalPlanId := plans1[0].PlanId
+
+	// Mutate the returned plans
+	plans1[0].DisplayName = "MUTATED"
+
+	// Get plans again - they should have original values
+	plans2 := r.ListPlans()
+
+	// Find the same plan
+	var found *pb.Plan
+	for _, p := range plans2 {
+		if p.PlanId == originalPlanId {
+			found = p
+			break
+		}
+	}
+
+	if found == nil {
+		t.Fatal("Could not find original plan")
+	}
+
+	if found.DisplayName != originalDisplayName {
+		t.Errorf("Caller was able to mutate registry's plan via ListPlans - should return clones. Expected %q, got %q",
+			originalDisplayName, found.DisplayName)
+	}
+}

@@ -510,3 +510,58 @@ func TestTryTransitionRunPhase(t *testing.T) {
 		t.Error("Expected error for non-existent run")
 	}
 }
+
+// TestCreateRunConcurrentUpsert verifies that CreateRunIfNotExists correctly
+// re-fetches the machine under write lock, preventing mutation of stale pointers
+// that could be replaced by concurrent UpsertMachine calls.
+func TestCreateRunConcurrentUpsert(t *testing.T) {
+	s := New()
+
+	// Create initial machine
+	s.UpsertMachine(&pb.Machine{
+		MachineId: "m-1",
+		Spec:      &pb.MachineSpec{SshEndpoint: "old-endpoint"},
+	})
+
+	// Simulate concurrent scenario: between the read lock and write lock in
+	// CreateRunIfNotExists, another goroutine calls UpsertMachine replacing the machine.
+	// Without the fix, the stale machine pointer would be mutated.
+
+	// Channel to synchronize the test
+	done := make(chan bool)
+
+	// Start CreateRunIfNotExists in a goroutine
+	go func() {
+		run, created, err := s.CreateRunIfNotExists("req-1", "m-1", "REPAVE", "")
+		if err != nil {
+			t.Errorf("CreateRunIfNotExists failed: %v", err)
+			done <- false
+			return
+		}
+		if !created {
+			t.Error("Expected run to be created")
+			done <- false
+			return
+		}
+		done <- run != nil
+	}()
+
+	// Immediately try to replace the machine (simulating concurrent update)
+	// This happens very quickly, so it may or may not race with the above call
+	newMachine := &pb.Machine{
+		MachineId: "m-1",
+		Spec:      &pb.MachineSpec{SshEndpoint: "new-endpoint"},
+		Status:    &pb.MachineStatus{Phase: pb.MachineStatus_READY},
+	}
+	s.UpsertMachine(newMachine)
+
+	// Wait for CreateRun to complete
+	<-done
+
+	// Verify: the machine in the store should have ActiveRunId set on the
+	// correct (current) machine, not a stale copy
+	machine, _ := s.GetMachine("m-1")
+	if machine.Status.ActiveRunId == "" {
+		t.Error("Expected ActiveRunId to be set on the machine")
+	}
+}

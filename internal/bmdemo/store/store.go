@@ -147,8 +147,7 @@ func (s *Store) CreateRunIfNotExists(requestID, machineID, runType, planID strin
 		}
 	}
 
-	machine, ok := s.machines[machineID]
-	if !ok {
+	if _, ok := s.machines[machineID]; !ok {
 		s.mu.RUnlock()
 		return nil, false, fmt.Errorf("machine %q not found", machineID)
 	}
@@ -171,6 +170,13 @@ func (s *Store) CreateRunIfNotExists(requestID, machineID, runType, planID strin
 		if existingRunID, ok := s.requestIndex[idempotencyKey]; ok {
 			return cloneRun(s.runs[existingRunID]), false, nil
 		}
+	}
+
+	// Re-fetch machine under write lock to avoid mutating stale pointer
+	// that may have been replaced by concurrent UpsertMachine.
+	machine, ok := s.machines[machineID]
+	if !ok {
+		return nil, false, fmt.Errorf("machine %q not found", machineID)
 	}
 
 	if s.machineRunning[machineID] {

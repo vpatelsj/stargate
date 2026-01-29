@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -17,13 +18,6 @@ import (
 	"github.com/vpatelsj/stargate/internal/bmdemo/plans"
 	"github.com/vpatelsj/stargate/internal/bmdemo/provider"
 	"github.com/vpatelsj/stargate/internal/bmdemo/store"
-)
-
-// Condition types set by the executor
-const (
-	ConditionProvisioned       = "Provisioned"
-	ConditionInCustomerCluster = "InCustomerCluster"
-	ConditionNeedsIntervention = "NeedsIntervention"
 )
 
 // EventCallback is called on run state transitions.
@@ -218,9 +212,10 @@ func (r *Runner) CancelRun(runID string) error {
 	// Update machine state for canceled runs
 	machine, ok := r.store.GetMachine(run.MachineId)
 	if ok {
-		// Set machine to MAINTENANCE with NeedsIntervention
+		// Set machine to MAINTENANCE with OperationCanceled (not NeedsIntervention)
+		// User-initiated cancels are expected; failures set NeedsIntervention.
 		lifecycle.SetMachinePhase(machine, pb.MachineStatus_MAINTENANCE)
-		lifecycle.SetCondition(machine, ConditionNeedsIntervention, true, "Canceled", "Run was canceled")
+		lifecycle.SetCondition(machine, lifecycle.ConditionOperationCanceled, true, "UserCanceled", "Run was canceled by user")
 		machine.Status.ActiveRunId = ""
 		r.store.UpdateMachine(machine)
 	}
@@ -250,6 +245,13 @@ func (r *Runner) executeRun(ctx context.Context, runID string) {
 		r.mu.Lock()
 		delete(r.activeRuns, runID)
 		r.mu.Unlock()
+	}()
+
+	// Panic safety: recover from any panic in execution and clean up properly
+	defer func() {
+		if rec := recover(); rec != nil {
+			r.handlePanic(runID, rec)
+		}
 	}()
 
 	run, ok := r.store.GetRun(runID)
@@ -315,16 +317,18 @@ func (r *Runner) executeRun(ctx context.Context, runID string) {
 		r.emitEventFromStore(runID, fmt.Sprintf("Step %s started", step.Name))
 
 		// Execute with retries
+		// MaxRetries means retries AFTER the first attempt, so total attempts = 1 + MaxRetries
 		maxRetries := int(step.MaxRetries)
-		if maxRetries < 1 {
-			maxRetries = 1
+		if maxRetries < 0 {
+			maxRetries = 0
 		}
+		totalAttempts := 1 + maxRetries
 
 		var stepErr error
-		for attempt := 0; attempt < maxRetries; attempt++ {
+		for attempt := 0; attempt < totalAttempts; attempt++ {
 			if attempt > 0 {
 				backoff := r.calculateBackoff(attempt)
-				r.emitLog(runID, "stdout", []byte(fmt.Sprintf("Retry %d/%d after %v...\n", attempt+1, maxRetries, backoff)))
+				r.emitLog(runID, "stdout", []byte(fmt.Sprintf("Retry %d/%d after %v...\n", attempt, maxRetries, backoff)))
 				select {
 				case <-time.After(backoff):
 				case <-ctx.Done():
@@ -498,6 +502,42 @@ func (r *Runner) calculateBackoff(attempt int) time.Duration {
 	return backoff
 }
 
+// handlePanic handles a panic during run execution, cleaning up state properly.
+func (r *Runner) handlePanic(runID string, recovered interface{}) {
+	panicMsg := fmt.Sprintf("panic: %v", recovered)
+	stackTrace := string(debug.Stack())
+
+	log.Printf("[executor] PANIC in run %s: %s\n%s", runID, panicMsg, stackTrace)
+
+	// Mark run as failed with PANIC error code
+	r.store.CompleteRun(runID, pb.Run_FAILED)
+	if run, ok := r.store.GetRun(runID); ok {
+		run.Error = &pb.ErrorStatus{
+			Code:      "PANIC",
+			Message:   panicMsg,
+			Retryable: false,
+		}
+		r.store.UpdateRun(run)
+		r.emitEvent(run, fmt.Sprintf("Run panicked: %s", panicMsg))
+		r.emitLog(runID, "stderr", []byte(fmt.Sprintf("\n=== Run PANICKED ===\n%s\n%s\n", panicMsg, stackTrace)))
+	}
+
+	// Get the run to find the machine
+	run, ok := r.store.GetRun(runID)
+	if !ok {
+		return
+	}
+
+	// Update machine state: MAINTENANCE + NeedsIntervention
+	machine, ok := r.store.GetMachine(run.MachineId)
+	if ok {
+		lifecycle.SetMachinePhase(machine, pb.MachineStatus_MAINTENANCE)
+		lifecycle.SetCondition(machine, lifecycle.ConditionNeedsIntervention, true, "Panic", panicMsg)
+		machine.Status.ActiveRunId = ""
+		r.store.UpdateMachine(machine)
+	}
+}
+
 // failRun marks run as failed.
 func (r *Runner) failRun(runID, message string) {
 	r.store.CompleteRun(runID, pb.Run_FAILED)
@@ -517,8 +557,8 @@ func (r *Runner) failRun(runID, message string) {
 func (r *Runner) failRunWithMachine(runID string, machine *pb.Machine, message string) {
 	r.failRun(runID, message)
 
-	// Set NeedsIntervention condition
-	lifecycle.SetCondition(machine, ConditionNeedsIntervention, true, "RunFailed", message)
+	// Set NeedsIntervention condition - failures require investigation
+	lifecycle.SetCondition(machine, lifecycle.ConditionNeedsIntervention, true, "RunFailed", message)
 	machine.Status.ActiveRunId = ""
 	lifecycle.SetMachinePhase(machine, pb.MachineStatus_MAINTENANCE)
 
@@ -538,11 +578,12 @@ func (r *Runner) cancelRun(runID string) {
 	// Cancel in store
 	r.store.CancelRun(runID)
 
-	// Update machine state
+	// Update machine state - use OperationCanceled (not NeedsIntervention)
+	// Cancellation is a normal operation, not a failure requiring intervention.
 	machine, ok := r.store.GetMachine(run.MachineId)
 	if ok {
 		lifecycle.SetMachinePhase(machine, pb.MachineStatus_MAINTENANCE)
-		lifecycle.SetCondition(machine, ConditionNeedsIntervention, true, "Canceled", "Run was canceled")
+		lifecycle.SetCondition(machine, lifecycle.ConditionOperationCanceled, true, "Canceled", "Run was canceled")
 		machine.Status.ActiveRunId = ""
 		r.store.UpdateMachine(machine)
 	}
@@ -580,8 +621,9 @@ func (r *Runner) succeedRun(runID string, machine *pb.Machine, completedRepave, 
 	// Clear active run
 	machine.Status.ActiveRunId = ""
 
-	// Clear any intervention condition
-	lifecycle.SetCondition(machine, ConditionNeedsIntervention, false, "RunSucceeded", "")
+	// Clear any intervention/canceled conditions on success
+	lifecycle.SetCondition(machine, lifecycle.ConditionNeedsIntervention, false, "RunSucceeded", "")
+	lifecycle.SetCondition(machine, lifecycle.ConditionOperationCanceled, false, "RunSucceeded", "")
 
 	// Update machine phase based on what completed
 	if isRMA {
@@ -591,7 +633,7 @@ func (r *Runner) succeedRun(runID string, machine *pb.Machine, completedRepave, 
 	}
 
 	if completedRepave {
-		lifecycle.SetCondition(machine, ConditionProvisioned, true, "RepaveComplete", "Machine successfully reprovisioned")
+		lifecycle.SetCondition(machine, lifecycle.ConditionProvisioned, true, "RepaveComplete", "Machine successfully reprovisioned")
 		lifecycle.SetMachinePhase(machine, pb.MachineStatus_READY)
 	}
 
@@ -611,7 +653,7 @@ func (r *Runner) succeedRun(runID string, machine *pb.Machine, completedRepave, 
 		}
 
 		if shouldSetInCluster {
-			lifecycle.SetCondition(machine, ConditionInCustomerCluster, true, "JoinVerified", "Node joined and verified in cluster")
+			lifecycle.SetCondition(machine, lifecycle.ConditionInCustomerCluster, true, "JoinVerified", "Node joined and verified in cluster")
 			lifecycle.SetMachinePhase(machine, pb.MachineStatus_IN_SERVICE)
 		}
 	}

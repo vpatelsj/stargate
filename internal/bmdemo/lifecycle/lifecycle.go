@@ -7,12 +7,15 @@ import (
 	pb "github.com/vpatelsj/stargate/gen/baremetal/v1"
 )
 
-// Common condition types
+// Condition type constants - all condition types should be defined here
+// and referenced from other packages to avoid string literal duplication.
 const (
 	ConditionReachable         = "Reachable"
 	ConditionInCustomerCluster = "InCustomerCluster"
 	ConditionNeedsIntervention = "NeedsIntervention"
 	ConditionHealthy           = "Healthy"
+	ConditionProvisioned       = "Provisioned"
+	ConditionOperationCanceled = "OperationCanceled"
 )
 
 // SetMachinePhase sets the phase on a machine's status.
