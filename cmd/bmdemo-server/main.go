@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"google.golang.org/grpc"
@@ -204,19 +205,7 @@ type runServer struct {
 }
 
 func (s *runServer) StartRun(ctx context.Context, req *pb.StartRunRequest) (*pb.Run, error) {
-	// Validate machine exists
-	machine, ok := s.store.GetMachine(req.MachineId)
-	if !ok {
-		return nil, status.Errorf(codes.NotFound, "machine %q not found", req.MachineId)
-	}
-
-	// Validate no active run
-	if machine.Status != nil && machine.Status.ActiveRunId != "" {
-		return nil, status.Errorf(codes.FailedPrecondition,
-			"machine %q has active run %q", req.MachineId, machine.Status.ActiveRunId)
-	}
-
-	// Validate request_id for idempotency
+	// Validate request_id for idempotency (must be first)
 	if req.RequestId == "" {
 		return nil, status.Error(codes.InvalidArgument, "request_id is required for idempotency")
 	}
@@ -242,14 +231,25 @@ func (s *runServer) StartRun(ctx context.Context, req *pb.StartRunRequest) (*pb.
 		}
 	}
 
-	// Create run (idempotent)
+	// Create run (idempotent) - this handles:
+	// - Returning existing run for same (machine_id, request_id)
+	// - Rejecting if machine has a different active run
+	// - Creating new run if no conflicts
 	run, created, err := s.store.CreateRunIfNotExists(req.RequestId, req.MachineId, runType, planID)
 	if err != nil {
+		errMsg := err.Error()
+		// Map specific errors to gRPC codes
+		if contains(errMsg, "not found") {
+			return nil, status.Errorf(codes.NotFound, "%v", err)
+		}
+		if contains(errMsg, "already has active run") {
+			return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+		}
 		s.logger.Error("failed to create run",
 			"machine_id", req.MachineId,
 			"request_id", req.RequestId,
 			"error", err)
-		return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
 
 	if created {
@@ -316,9 +316,16 @@ func (s *runServer) ListRuns(ctx context.Context, req *pb.ListRunsRequest) (*pb.
 }
 
 func (s *runServer) CancelRun(ctx context.Context, req *pb.CancelRunRequest) (*pb.Run, error) {
-	// Cancel via runner first (handles active runs)
+	// Cancel via runner (handles store update, machine state, and active execution)
 	if err := s.runner.CancelRun(req.RunId); err != nil {
-		s.logger.Warn("runner cancel returned error", "run_id", req.RunId, "error", err)
+		errMsg := err.Error()
+		if contains(errMsg, "not found") {
+			return nil, status.Errorf(codes.NotFound, "run %q not found", req.RunId)
+		}
+		if contains(errMsg, "already finished") {
+			return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+		}
+		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
 
 	run, ok := s.store.GetRun(req.RunId)
@@ -425,4 +432,9 @@ func (s *runServer) StreamRunLogs(req *pb.StreamRunLogsRequest, stream pb.RunSer
 			return nil
 		}
 	}
+}
+
+// contains checks if s contains substr (helper for error matching).
+func contains(s, substr string) bool {
+	return strings.Contains(s, substr)
 }

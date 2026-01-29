@@ -501,3 +501,150 @@ func TestRunner_IsRunning(t *testing.T) {
 		t.Error("Run should not be running after completion")
 	}
 }
+
+func TestRunner_CancelRun_SetsMachineState(t *testing.T) {
+	runner, s := setupRunner(t)
+
+	// Use slower config so we have time to cancel
+	cfg := fake.DefaultConfig()
+	cfg.RebootDuration = 2 * time.Second
+	p := fake.New(cfg, nil)
+	runner.provider = p
+
+	machine := createTestMachine(t, s)
+	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+
+	// Start run
+	runner.StartRun(context.Background(), run.RunId)
+	time.Sleep(100 * time.Millisecond)
+
+	// Cancel the run
+	err := runner.CancelRun(run.RunId)
+	if err != nil {
+		t.Fatalf("CancelRun failed: %v", err)
+	}
+
+	// Wait for cancellation to complete
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify run is canceled
+	finalRun, _ := s.GetRun(run.RunId)
+	if finalRun.Phase != pb.Run_CANCELED {
+		t.Errorf("Expected CANCELED, got %v", finalRun.Phase)
+	}
+
+	// Verify machine state was updated
+	finalMachine, _ := s.GetMachine(machine.MachineId)
+
+	// Phase should be MAINTENANCE
+	if finalMachine.Status.Phase != pb.MachineStatus_MAINTENANCE {
+		t.Errorf("Expected machine phase MAINTENANCE, got %v", finalMachine.Status.Phase)
+	}
+
+	// ActiveRunId should be cleared
+	if finalMachine.Status.ActiveRunId != "" {
+		t.Errorf("Expected empty ActiveRunId, got %v", finalMachine.Status.ActiveRunId)
+	}
+
+	// NeedsIntervention condition should be set
+	var hasIntervention bool
+	for _, c := range finalMachine.Status.Conditions {
+		if c.Type == ConditionNeedsIntervention && c.Status {
+			hasIntervention = true
+			break
+		}
+	}
+	if !hasIntervention {
+		t.Error("Expected NeedsIntervention condition to be set")
+	}
+}
+
+func TestRunner_CancelRun_Idempotent(t *testing.T) {
+	runner, s := setupRunner(t)
+
+	// Use slower config to ensure run is still in progress when we cancel
+	cfg := fake.DefaultConfig()
+	cfg.RebootDuration = 2 * time.Second
+	p := fake.New(cfg, nil)
+	runner.provider = p
+
+	machine := createTestMachine(t, s)
+	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+
+	// Start run
+	runner.StartRun(context.Background(), run.RunId)
+	time.Sleep(100 * time.Millisecond)
+
+	// First cancel
+	err := runner.CancelRun(run.RunId)
+	if err != nil {
+		t.Fatalf("First CancelRun failed: %v", err)
+	}
+
+	// Wait for cancellation
+	time.Sleep(100 * time.Millisecond)
+
+	// Second cancel should also succeed (idempotent)
+	err = runner.CancelRun(run.RunId)
+	if err != nil {
+		t.Fatalf("Second CancelRun failed: %v", err)
+	}
+
+	// Verify still canceled
+	finalRun, _ := s.GetRun(run.RunId)
+	if finalRun.Phase != pb.Run_CANCELED {
+		t.Errorf("Expected CANCELED, got %v", finalRun.Phase)
+	}
+}
+
+func TestRunner_VerifyRequiredForInCustomerCluster(t *testing.T) {
+	runner, s := setupRunner(t)
+
+	machine := createTestMachine(t, s)
+
+	// Start a repave-join run (which has a verify step)
+	run, _, err := s.CreateRunIfNotExists("req-1", machine.MachineId, "REPAVE", "plan/repave-join")
+	if err != nil {
+		t.Fatalf("failed to create run: %v", err)
+	}
+
+	// Start run
+	err = runner.StartRun(context.Background(), run.RunId)
+	if err != nil {
+		t.Fatalf("StartRun failed: %v", err)
+	}
+
+	// Wait for completion
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		r, ok := s.GetRun(run.RunId)
+		if ok && (r.Phase == pb.Run_SUCCEEDED || r.Phase == pb.Run_FAILED) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Verify run succeeded
+	finalRun, _ := s.GetRun(run.RunId)
+	if finalRun.Phase != pb.Run_SUCCEEDED {
+		t.Fatalf("Expected SUCCEEDED, got %v", finalRun.Phase)
+	}
+
+	// Verify machine has InCustomerCluster condition
+	finalMachine, _ := s.GetMachine(machine.MachineId)
+	var hasInCluster bool
+	for _, c := range finalMachine.Status.Conditions {
+		if c.Type == ConditionInCustomerCluster && c.Status {
+			hasInCluster = true
+			break
+		}
+	}
+	if !hasInCluster {
+		t.Error("Expected InCustomerCluster condition to be set after repave-join with verify")
+	}
+
+	// Verify machine is IN_SERVICE
+	if finalMachine.Status.Phase != pb.MachineStatus_IN_SERVICE {
+		t.Errorf("Expected IN_SERVICE, got %v", finalMachine.Status.Phase)
+	}
+}

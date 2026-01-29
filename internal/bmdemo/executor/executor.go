@@ -184,19 +184,48 @@ func (r *Runner) StartRun(ctx context.Context, runID string) error {
 	return nil
 }
 
-// CancelRun cancels an active run.
+// CancelRun cancels a run immediately.
+// It marks the run as CANCELED in the store, clears machine state, and stops execution.
+// Idempotent: canceling an already-canceled run returns success.
 func (r *Runner) CancelRun(runID string) error {
-	r.mu.Lock()
-	cancel, ok := r.activeRuns[runID]
-	r.mu.Unlock()
-
+	// First, get the run to access machine info
+	run, ok := r.store.GetRun(runID)
 	if !ok {
-		// Try to cancel via store (might already be done)
-		_, err := r.store.CancelRun(runID)
+		return fmt.Errorf("run %q not found", runID)
+	}
+
+	// Always try to cancel in the store first (idempotent)
+	_, err := r.store.CancelRun(runID)
+	if err != nil {
+		// If already finished, that's an error
 		return err
 	}
 
-	cancel()
+	// Update machine state for canceled runs
+	machine, ok := r.store.GetMachine(run.MachineId)
+	if ok {
+		// Set machine to MAINTENANCE with NeedsIntervention
+		lifecycle.SetMachinePhase(machine, pb.MachineStatus_MAINTENANCE)
+		lifecycle.SetCondition(machine, ConditionNeedsIntervention, true, "Canceled", "Run was canceled")
+		machine.Status.ActiveRunId = ""
+		r.store.UpdateMachine(machine)
+	}
+
+	// Cancel the active context if the run is still executing
+	r.mu.Lock()
+	cancel, active := r.activeRuns[runID]
+	if active {
+		cancel()
+		delete(r.activeRuns, runID)
+	}
+	r.mu.Unlock()
+
+	// Emit cancel event
+	if updatedRun, ok := r.store.GetRun(runID); ok {
+		r.emitEvent(updatedRun, "Run canceled")
+		r.emitLog(runID, "stdout", []byte("\n=== Run CANCELED ===\n"))
+	}
+
 	return nil
 }
 
@@ -247,7 +276,8 @@ func (r *Runner) executeRun(ctx context.Context, runID string) {
 	var lastErr error
 	completedJoin := false
 	completedRepave := false
-	isRMA := run.Type == "RMA" || run.Type == plans.PlanRMA
+	completedVerify := false
+	isRMA := plan.PlanId == plans.PlanRMA
 
 	for i, step := range plan.Steps {
 		select {
@@ -326,9 +356,7 @@ func (r *Runner) executeRun(ctx context.Context, runID string) {
 		case *pb.Step_Join:
 			completedJoin = true
 		case *pb.Step_Verify:
-			if completedJoin {
-				completedJoin = true // Mark verify after join as success
-			}
+			completedVerify = true
 		}
 	}
 
@@ -336,7 +364,9 @@ func (r *Runner) executeRun(ctx context.Context, runID string) {
 	if lastErr != nil {
 		r.failRunWithMachine(runID, machine, lastErr.Error())
 	} else {
-		r.succeedRun(runID, machine, completedRepave, completedJoin, isRMA)
+		// Check if the plan contains a verify step
+		planHasVerify := r.planContainsVerifyStep(plan)
+		r.succeedRun(runID, machine, completedRepave, completedJoin, completedVerify, planHasVerify, isRMA)
 	}
 }
 
@@ -484,17 +514,51 @@ func (r *Runner) failRunWithMachine(runID string, machine *pb.Machine, message s
 	r.store.UpdateMachine(machine)
 }
 
-// cancelRun marks run as canceled.
+// cancelRun is called when a run is canceled via context (internal path).
+// It marks run as canceled and updates machine state.
 func (r *Runner) cancelRun(runID string) {
+	// Get run info before canceling
+	run, ok := r.store.GetRun(runID)
+	if !ok {
+		return
+	}
+
+	// Cancel in store
 	r.store.CancelRun(runID)
-	if run, ok := r.store.GetRun(runID); ok {
-		r.emitEvent(run, "Run canceled")
+
+	// Update machine state
+	machine, ok := r.store.GetMachine(run.MachineId)
+	if ok {
+		lifecycle.SetMachinePhase(machine, pb.MachineStatus_MAINTENANCE)
+		lifecycle.SetCondition(machine, ConditionNeedsIntervention, true, "Canceled", "Run was canceled")
+		machine.Status.ActiveRunId = ""
+		r.store.UpdateMachine(machine)
+	}
+
+	// Emit events
+	if updatedRun, ok := r.store.GetRun(runID); ok {
+		r.emitEvent(updatedRun, "Run canceled")
 		r.emitLog(runID, "stdout", []byte("\n=== Run CANCELED ===\n"))
 	}
 }
 
+// planContainsVerifyStep checks if a plan has a verify step.
+func (r *Runner) planContainsVerifyStep(plan *pb.Plan) bool {
+	if plan == nil {
+		return false
+	}
+	for _, step := range plan.Steps {
+		if _, ok := step.Kind.(*pb.Step_Verify); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // succeedRun marks run as succeeded and updates machine state.
-func (r *Runner) succeedRun(runID string, machine *pb.Machine, completedRepave, completedJoin, isRMA bool) {
+// completedVerify indicates if a verify step succeeded.
+// planHasVerify indicates if the plan contains a verify step.
+func (r *Runner) succeedRun(runID string, machine *pb.Machine, completedRepave, completedJoin, completedVerify, planHasVerify, isRMA bool) {
 	r.store.CompleteRun(runID, pb.Run_SUCCEEDED)
 
 	run, _ := r.store.GetRun(runID)
@@ -519,9 +583,25 @@ func (r *Runner) succeedRun(runID string, machine *pb.Machine, completedRepave, 
 		lifecycle.SetMachinePhase(machine, pb.MachineStatus_READY)
 	}
 
+	// Only set InCustomerCluster if:
+	// - Plan has verify step AND verify succeeded, OR
+	// - Plan has no verify step AND join succeeded
 	if completedJoin {
-		lifecycle.SetCondition(machine, ConditionInCustomerCluster, true, "JoinComplete", "Node joined and verified in cluster")
-		lifecycle.SetMachinePhase(machine, pb.MachineStatus_IN_SERVICE)
+		shouldSetInCluster := false
+		if planHasVerify {
+			// Plan has verify - require verify success
+			if completedVerify {
+				shouldSetInCluster = true
+			}
+		} else {
+			// Plan has no verify - join success is enough
+			shouldSetInCluster = true
+		}
+
+		if shouldSetInCluster {
+			lifecycle.SetCondition(machine, ConditionInCustomerCluster, true, "JoinVerified", "Node joined and verified in cluster")
+			lifecycle.SetMachinePhase(machine, pb.MachineStatus_IN_SERVICE)
+		}
 	}
 
 	// If neither repave nor join, just set to READY

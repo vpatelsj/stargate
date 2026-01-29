@@ -84,11 +84,11 @@ This guide provides talking points for presenting the baremetal provisioning dem
 **Machine phases:**
 | Phase | Meaning |
 |-------|---------|
-| AVAILABLE | Registered, ready for provisioning |
+| FACTORY_READY | Just imported, never provisioned |
 | PROVISIONING | Currently being set up |
 | READY | OS installed, not yet in cluster |
 | IN_SERVICE | Actively serving workloads |
-| MAINTENANCE | Temporarily out of service |
+| MAINTENANCE | Temporarily out of service (or canceled) |
 | RMA | Awaiting hardware replacement |
 
 ---
@@ -137,7 +137,23 @@ This guide provides talking points for presenting the baremetal provisioning dem
 
 ---
 
-### Step 8: RMA Flow
+### Step 8: Cancellation Handling
+
+**What to say:**
+
+> "Sometimes we need to cancel an operation in progress - maybe the wrong machine was selected, or priorities changed. Let's see how cancellation works."
+>
+> "When we cancel a run, it's marked CANCELED immediately, and the machine moves to MAINTENANCE with a NeedsIntervention condition. This signals that someone should investigate before starting another operation."
+
+**Key points:**
+- Cancel is idempotent - safe to call multiple times
+- Machine moves to MAINTENANCE, not left in PROVISIONING
+- NeedsIntervention condition is set for alerting
+- Active run ID is cleared so new runs can start after intervention
+
+---
+
+### Step 9: RMA Flow
 
 **What to say:**
 
@@ -152,7 +168,7 @@ This guide provides talking points for presenting the baremetal provisioning dem
 
 ---
 
-### Step 9: Run History
+### Step 10: Run History
 
 **What to say:**
 
@@ -224,6 +240,7 @@ go run ./cmd/bmdemo-cli import 5          # Import 5 machines
 go run ./cmd/bmdemo-cli repave <id>       # Repave machine
 go run ./cmd/bmdemo-cli reboot <id>       # Reboot machine
 go run ./cmd/bmdemo-cli rma <id>          # RMA machine
+go run ./cmd/bmdemo-cli cancel <run-id>   # Cancel a run in progress
 go run ./cmd/bmdemo-cli watch             # Watch events (streaming)
 go run ./cmd/bmdemo-cli logs <run-id>     # Stream run logs
 ```

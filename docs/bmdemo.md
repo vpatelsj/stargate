@@ -68,13 +68,16 @@ Boolean signals tracking runtime state:
 | `Degraded` | Operating with reduced capacity |
 
 ### 3. Effective State
-Computed view applying precedence rules:
+Computed view applying precedence rules (from `lifecycle.EffectiveState()`):
 
 ```
-1. Active run (PENDING/RUNNING)  → PROVISIONING
-2. Explicit RMA/RETIRED/MAINTENANCE → that phase
-3. InCustomerCluster=true        → IN_SERVICE
-4. Otherwise                     → explicit phase
+1. Active run (PENDING/RUNNING)     → PROVISIONING
+2. Explicit RMA                     → RMA
+3. Explicit RETIRED                 → RETIRED
+4. Explicit MAINTENANCE             → MAINTENANCE
+5. InCustomerCluster condition=true → IN_SERVICE
+6. FACTORY_READY                    → FACTORY_READY
+7. Otherwise                        → READY
 ```
 
 **Example:**
@@ -91,11 +94,11 @@ Built-in plans in `internal/bmdemo/plans`:
 
 | Plan | Steps |
 |------|-------|
-| `plan/repave-join` | set-netboot → reboot → repave → join-cluster → verify |
+| `plan/repave-join` | set-netboot → reboot-to-netboot → repave-image → join-cluster → verify-in-cluster |
 | `plan/rma` | drain-check → graceful-shutdown → mark-rma |
 | `plan/reboot` | reboot |
-| `plan/upgrade` | cordon → drain → upgrade-kubelet → restart → uncordon → verify |
-| `plan/net-reconfig` | apply-net-config → verify-connectivity |
+| `plan/upgrade` | cordon-node → drain-node → upgrade-kubelet → restart-kubelet → uncordon-node → verify-upgrade |
+| `plan/net-reconfig` | apply-network-config → verify-connectivity |
 
 ## Step Types
 

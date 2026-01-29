@@ -236,10 +236,45 @@ run_cli runs
 wait_for_input
 
 # ============================================================================
-# Step 8: RMA Flow
+# Step 8: Cancel Operation
 # ============================================================================
 
-print_header "Step 8: RMA (Return Merchandise Authorization)"
+print_header "Step 8: Cancellation Handling"
+
+print_step "Starting a new repave on $MACHINE_2..."
+# Start in background so we can cancel it
+go run ./cmd/bmdemo-cli repave "$MACHINE_2" --request-id="cancel-demo" &
+CLI_PID=$!
+sleep 1
+
+echo ""
+print_step "Canceling the run mid-flight..."
+# Get the latest run for machine-2
+CANCEL_RUN_ID=$(go run ./cmd/bmdemo-cli runs 2>/dev/null | grep "$MACHINE_2" | grep RUNNING | awk '{print $1}' | head -1)
+if [[ -n "$CANCEL_RUN_ID" ]]; then
+    run_cli cancel "$CANCEL_RUN_ID"
+else
+    print_info "Run completed before we could cancel - that's OK!"
+fi
+
+# Wait for background CLI to finish
+wait $CLI_PID 2>/dev/null || true
+
+echo ""
+print_step "Checking machine state after cancellation..."
+run_cli list
+
+echo ""
+print_info "Canceled runs set machine to MAINTENANCE with NeedsIntervention condition."
+print_info "This signals that manual investigation may be needed."
+
+wait_for_input
+
+# ============================================================================
+# Step 9: RMA Flow
+# ============================================================================
+
+print_header "Step 9: RMA (Return Merchandise Authorization)"
 
 print_step "Initiating RMA for $MACHINE_1 (hardware failure scenario)..."
 run_cli rma "$MACHINE_1"
@@ -254,10 +289,10 @@ print_info "$MACHINE_1 is now in RMA phase, awaiting hardware replacement."
 wait_for_input
 
 # ============================================================================
-# Step 9: View All Runs
+# Step 10: View All Runs
 # ============================================================================
 
-print_header "Step 9: Run History and Audit Trail"
+print_header "Step 10: Run History and Audit Trail"
 
 print_step "Viewing all runs across the system..."
 run_cli runs

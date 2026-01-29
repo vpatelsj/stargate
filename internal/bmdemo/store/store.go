@@ -248,6 +248,7 @@ func (s *Store) UpdateRun(run *pb.Run) error {
 }
 
 // CancelRun cancels a run if it's still active.
+// Idempotent: canceling an already-canceled run returns success.
 func (s *Store) CancelRun(runID string) (*pb.Run, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -257,6 +258,12 @@ func (s *Store) CancelRun(runID string) (*pb.Run, error) {
 		return nil, fmt.Errorf("run %q not found", runID)
 	}
 
+	// Already canceled - return success (idempotent)
+	if run.Phase == pb.Run_CANCELED {
+		return cloneRun(run), nil
+	}
+
+	// Already finished with success or failure - cannot cancel
 	if run.Phase == pb.Run_SUCCEEDED || run.Phase == pb.Run_FAILED {
 		return nil, fmt.Errorf("run %q already finished with phase %s", runID, run.Phase)
 	}

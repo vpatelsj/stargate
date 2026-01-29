@@ -342,3 +342,121 @@ func TestMachineStatusUpdatedOnRunCompletion(t *testing.T) {
 		t.Errorf("Expected phase to remain PROVISIONING, got %v", machine.Status.Phase)
 	}
 }
+
+func TestIdempotencyForInFlightRun(t *testing.T) {
+	s := New()
+	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
+
+	// Create a run (which becomes the active run)
+	run1, created, err := s.CreateRunIfNotExists("req-1", "m-1", "REPAVE", "plan/repave-join")
+	if err != nil {
+		t.Fatalf("CreateRunIfNotExists failed: %v", err)
+	}
+	if !created {
+		t.Error("Expected run to be created")
+	}
+
+	// Verify machine has active run
+	machine, _ := s.GetMachine("m-1")
+	if machine.Status.ActiveRunId != run1.RunId {
+		t.Errorf("Expected active run %s, got %s", run1.RunId, machine.Status.ActiveRunId)
+	}
+
+	// Same request_id should return the existing run (even though machine has active run)
+	run2, created, err := s.CreateRunIfNotExists("req-1", "m-1", "REPAVE", "plan/repave-join")
+	if err != nil {
+		t.Fatalf("CreateRunIfNotExists for same request_id failed: %v", err)
+	}
+	if created {
+		t.Error("Expected run NOT to be created (idempotent)")
+	}
+	if run2.RunId != run1.RunId {
+		t.Errorf("Expected same run ID %s, got %s", run1.RunId, run2.RunId)
+	}
+
+	// Different request_id should fail because machine has active run
+	_, _, err = s.CreateRunIfNotExists("req-2", "m-1", "REPAVE", "plan/repave-join")
+	if err == nil {
+		t.Error("Expected error when creating run with different request_id while machine has active run")
+	}
+}
+
+func TestIdempotencyScopedToMachine(t *testing.T) {
+	s := New()
+	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
+	s.UpsertMachine(&pb.Machine{MachineId: "m-2"})
+
+	// Create run on m-1 with request_id "req-1"
+	run1, created, err := s.CreateRunIfNotExists("req-1", "m-1", "REPAVE", "")
+	if err != nil {
+		t.Fatalf("CreateRunIfNotExists failed: %v", err)
+	}
+	if !created {
+		t.Error("Expected run to be created for m-1")
+	}
+
+	// Complete run1 so m-1 doesn't have an active run
+	s.CompleteRun(run1.RunId, pb.Run_SUCCEEDED)
+
+	// Same request_id on DIFFERENT machine should create a NEW run
+	run2, created, err := s.CreateRunIfNotExists("req-1", "m-2", "REPAVE", "")
+	if err != nil {
+		t.Fatalf("CreateRunIfNotExists for m-2 failed: %v", err)
+	}
+	if !created {
+		t.Error("Expected run to be created for m-2 (different machine, same request_id)")
+	}
+	if run2.RunId == run1.RunId {
+		t.Error("Expected different run ID for different machine")
+	}
+	if run2.MachineId != "m-2" {
+		t.Errorf("Expected machine_id m-2, got %s", run2.MachineId)
+	}
+}
+
+func TestCancelRunIdempotent(t *testing.T) {
+	s := New()
+	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
+
+	run, _, _ := s.CreateRunIfNotExists("req-1", "m-1", "REPAVE", "")
+
+	// First cancel should succeed
+	canceledRun, err := s.CancelRun(run.RunId)
+	if err != nil {
+		t.Fatalf("First CancelRun failed: %v", err)
+	}
+	if canceledRun.Phase != pb.Run_CANCELED {
+		t.Errorf("Expected CANCELED phase, got %v", canceledRun.Phase)
+	}
+
+	// Second cancel should also succeed (idempotent)
+	canceledRun2, err := s.CancelRun(run.RunId)
+	if err != nil {
+		t.Fatalf("Second CancelRun failed: %v", err)
+	}
+	if canceledRun2.Phase != pb.Run_CANCELED {
+		t.Errorf("Expected CANCELED phase on second cancel, got %v", canceledRun2.Phase)
+	}
+
+	// Verify machine state was cleared
+	machine, _ := s.GetMachine("m-1")
+	if machine.Status.ActiveRunId != "" {
+		t.Errorf("Expected empty ActiveRunId after cancel, got %v", machine.Status.ActiveRunId)
+	}
+}
+
+func TestCancelCompletedRunFails(t *testing.T) {
+	s := New()
+	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
+
+	run, _, _ := s.CreateRunIfNotExists("req-1", "m-1", "REPAVE", "")
+
+	// Complete the run
+	s.CompleteRun(run.RunId, pb.Run_SUCCEEDED)
+
+	// Cancel should fail because run is already completed
+	_, err := s.CancelRun(run.RunId)
+	if err == nil {
+		t.Error("Expected error when canceling completed run")
+	}
+}

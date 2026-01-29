@@ -57,6 +57,8 @@ func main() {
 		runAndWatch(conn, args, "REBOOT", "plan/reboot")
 	case "runs":
 		listRuns(conn)
+	case "cancel":
+		cancelRun(conn, args)
 	case "plans":
 		listPlans(conn)
 	case "watch":
@@ -83,6 +85,7 @@ Commands:
   repave <machine-id>     Start repave run (plan/repave-join) and watch
   rma <machine-id>        Start RMA run (plan/rma) and watch
   reboot <machine-id>     Start reboot run (plan/reboot) and watch
+  cancel <run-id>         Cancel a run in progress
   runs                    List all runs
   plans                   List available plans
   watch [machine-id]      Watch run events (streaming)
@@ -473,14 +476,8 @@ func listRuns(conn *grpc.ClientConn) {
 			errMsg = truncate(r.Error.Message, 30)
 		}
 
-		// Short run ID for readability
-		runID := r.RunId
-		if len(runID) > 8 {
-			runID = runID[:8]
-		}
-
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			runID, r.MachineId, r.Type, r.Phase, step, errMsg)
+			r.RunId, r.MachineId, r.Type, r.Phase, step, errMsg)
 	}
 	w.Flush()
 }
@@ -490,6 +487,31 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// ============================================================================
+// cancel - Cancel a run in progress
+// ============================================================================
+
+func cancelRun(conn *grpc.ClientConn, args []string) {
+	if len(args) < 1 {
+		fmt.Println("Usage: bmdemo-cli cancel <run-id>")
+		os.Exit(1)
+	}
+
+	runID := args[0]
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	client := pb.NewRunServiceClient(conn)
+
+	run, err := client.CancelRun(ctx, &pb.CancelRunRequest{RunId: runID})
+	if err != nil {
+		log.Fatalf("CancelRun failed: %v", err)
+	}
+
+	fmt.Printf("✓ Canceled run %s (phase: %s)\n", run.RunId, run.Phase)
 }
 
 // ============================================================================
