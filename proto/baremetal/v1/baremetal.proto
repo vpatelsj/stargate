@@ -121,6 +121,7 @@ message Run {
 
   string request_id = 4;     // idempotency key
   string type = 5;           // "REPAVE", "UPGRADE", "RMA", ...
+  string plan_id = 6;        // which plan is being executed (e.g., "plan/repave-join")
 
   google.protobuf.Timestamp created_at = 10;
   google.protobuf.Timestamp started_at = 11;
@@ -177,10 +178,7 @@ message StartRunRequest {
   string request_id = 2;  // required for idempotency
 
   string type = 3;        // REPAVE/UPGRADE/NET_RECONFIG/RMA/REBOOT
-  oneof plan_source {
-    string plan_id = 10;
-    Plan inline_plan = 11;
-  }
+  string plan_id = 10;    // which plan to execute (e.g., "plan/repave-join")
   map<string,string> params = 12;
 }
 message GetRunRequest { string run_id = 1; }

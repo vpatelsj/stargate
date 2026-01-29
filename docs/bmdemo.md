@@ -89,6 +89,20 @@ Built-in plans in `internal/bmdemo/plans`:
 | `plan/upgrade` | drain → set-netboot → repave → mint-join → join → verify |
 | `plan/net-reconfig` | apply-net-config → verify-connectivity |
 
+## Run Semantics
+
+A **Run** has both:
+- `type` - operation category (REPAVE, RMA, REBOOT, UPGRADE, NET_RECONFIG)
+- `plan_id` - specific plan executed (e.g., `plan/repave-join`)
+
+**Plan selection precedence:**
+1. If `plan_id` is provided, use that plan
+2. Otherwise, map `type` to default plan
+
+**Idempotency:** StartRun requires `request_id`. Replaying the same request_id returns the existing run.
+
+**Single active run:** Only one run can be active per machine at a time.
+
 ## Architecture
 
 ```

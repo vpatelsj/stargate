@@ -49,7 +49,7 @@ func TestRunner_StartRun_Success(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	machine := createTestMachine(t, s)
-	run, _, err := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", nil)
+	run, _, err := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
 	if err != nil {
 		t.Fatalf("failed to create run: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestRunner_StartRun_RepaveJoin(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	machine := createTestMachine(t, s)
-	run, _, err := s.CreateRunIfNotExists("req-1", machine.MachineId, "REPAVE", nil)
+	run, _, err := s.CreateRunIfNotExists("req-1", machine.MachineId, "REPAVE", "")
 	if err != nil {
 		t.Fatalf("failed to create run: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestRunner_StartRun_RMA(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	machine := createTestMachine(t, s)
-	run, _, err := s.CreateRunIfNotExists("req-1", machine.MachineId, "RMA", nil)
+	run, _, err := s.CreateRunIfNotExists("req-1", machine.MachineId, "RMA", "")
 	if err != nil {
 		t.Fatalf("failed to create run: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestRunner_CancelRun(t *testing.T) {
 	runner.provider = p
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", nil)
+	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
 
 	runner.StartRun(context.Background(), run.RunId)
 
@@ -222,7 +222,7 @@ func TestRunner_StepRetries(t *testing.T) {
 	runner.baseRetryWait = 10 * time.Millisecond
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", nil)
+	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
 
 	runner.StartRun(context.Background(), run.RunId)
 
@@ -259,7 +259,7 @@ func TestRunner_LogStreaming(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", nil)
+	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
 
 	var logCount int32
 	runner.SubscribeLogs(run.RunId, func(chunk *pb.LogChunk) {
@@ -287,7 +287,7 @@ func TestRunner_EventStreaming(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", nil)
+	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
 
 	var events []*pb.RunEvent
 	var mu sync.Mutex
@@ -321,7 +321,7 @@ func TestRunner_EventStreaming(t *testing.T) {
 	unsubscribe()
 
 	// Create another run and verify no more events
-	run2, _, _ := s.CreateRunIfNotExists("req-2", machine.MachineId, "REBOOT", nil)
+	run2, _, _ := s.CreateRunIfNotExists("req-2", machine.MachineId, "REBOOT", "")
 	runner.StartRun(context.Background(), run2.RunId)
 
 	time.Sleep(200 * time.Millisecond)
@@ -365,7 +365,7 @@ func TestRunner_ConcurrentRuns(t *testing.T) {
 	// Start runs on all machines concurrently
 	var runs []*pb.Run
 	for i, m := range machines {
-		run, _, _ := s.CreateRunIfNotExists("req-"+string(rune('0'+i)), m.MachineId, "REBOOT", nil)
+		run, _, _ := s.CreateRunIfNotExists("req-"+string(rune('0'+i)), m.MachineId, "REBOOT", "")
 		runs = append(runs, run)
 	}
 
@@ -431,7 +431,7 @@ func TestRunner_RunNotPending(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", nil)
+	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
 
 	// Complete the run first
 	s.CompleteRun(run.RunId, pb.Run_SUCCEEDED)
@@ -452,7 +452,7 @@ func TestRunner_Shutdown(t *testing.T) {
 	runner.provider = p
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", nil)
+	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
 
 	runner.StartRun(context.Background(), run.RunId)
 
@@ -481,7 +481,7 @@ func TestRunner_IsRunning(t *testing.T) {
 	runner.provider = p
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", nil)
+	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
 
 	if runner.IsRunning(run.RunId) {
 		t.Error("Run should not be running before start")

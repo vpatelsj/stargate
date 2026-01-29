@@ -1134,6 +1134,7 @@ type Run struct {
 	Phase         Run_Phase              `protobuf:"varint,3,opt,name=phase,proto3,enum=baremetal.v1.Run_Phase" json:"phase,omitempty"`
 	RequestId     string                 `protobuf:"bytes,4,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"` // idempotency key
 	Type          string                 `protobuf:"bytes,5,opt,name=type,proto3" json:"type,omitempty"`                            // "REPAVE", "UPGRADE", "RMA", ...
+	PlanId        string                 `protobuf:"bytes,6,opt,name=plan_id,json=planId,proto3" json:"plan_id,omitempty"`          // which plan is being executed (e.g., "plan/repave-join")
 	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	StartedAt     *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
 	FinishedAt    *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
@@ -1205,6 +1206,13 @@ func (x *Run) GetRequestId() string {
 func (x *Run) GetType() string {
 	if x != nil {
 		return x.Type
+	}
+	return ""
+}
+
+func (x *Run) GetPlanId() string {
+	if x != nil {
+		return x.PlanId
 	}
 	return ""
 }
@@ -1925,16 +1933,12 @@ func (x *ListPlansResponse) GetNextPageToken() string {
 }
 
 type StartRunRequest struct {
-	state     protoimpl.MessageState `protogen:"open.v1"`
-	MachineId string                 `protobuf:"bytes,1,opt,name=machine_id,json=machineId,proto3" json:"machine_id,omitempty"`
-	RequestId string                 `protobuf:"bytes,2,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"` // required for idempotency
-	Type      string                 `protobuf:"bytes,3,opt,name=type,proto3" json:"type,omitempty"`                            // REPAVE/UPGRADE/NET_RECONFIG/RMA/REBOOT
-	// Types that are valid to be assigned to PlanSource:
-	//
-	//	*StartRunRequest_PlanId
-	//	*StartRunRequest_InlinePlan
-	PlanSource    isStartRunRequest_PlanSource `protobuf_oneof:"plan_source"`
-	Params        map[string]string            `protobuf:"bytes,12,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MachineId     string                 `protobuf:"bytes,1,opt,name=machine_id,json=machineId,proto3" json:"machine_id,omitempty"`
+	RequestId     string                 `protobuf:"bytes,2,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"` // required for idempotency
+	Type          string                 `protobuf:"bytes,3,opt,name=type,proto3" json:"type,omitempty"`                            // REPAVE/UPGRADE/NET_RECONFIG/RMA/REBOOT
+	PlanId        string                 `protobuf:"bytes,10,opt,name=plan_id,json=planId,proto3" json:"plan_id,omitempty"`         // which plan to execute (e.g., "plan/repave-join")
+	Params        map[string]string      `protobuf:"bytes,12,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1990,29 +1994,11 @@ func (x *StartRunRequest) GetType() string {
 	return ""
 }
 
-func (x *StartRunRequest) GetPlanSource() isStartRunRequest_PlanSource {
-	if x != nil {
-		return x.PlanSource
-	}
-	return nil
-}
-
 func (x *StartRunRequest) GetPlanId() string {
 	if x != nil {
-		if x, ok := x.PlanSource.(*StartRunRequest_PlanId); ok {
-			return x.PlanId
-		}
+		return x.PlanId
 	}
 	return ""
-}
-
-func (x *StartRunRequest) GetInlinePlan() *Plan {
-	if x != nil {
-		if x, ok := x.PlanSource.(*StartRunRequest_InlinePlan); ok {
-			return x.InlinePlan
-		}
-	}
-	return nil
 }
 
 func (x *StartRunRequest) GetParams() map[string]string {
@@ -2021,22 +2007,6 @@ func (x *StartRunRequest) GetParams() map[string]string {
 	}
 	return nil
 }
-
-type isStartRunRequest_PlanSource interface {
-	isStartRunRequest_PlanSource()
-}
-
-type StartRunRequest_PlanId struct {
-	PlanId string `protobuf:"bytes,10,opt,name=plan_id,json=planId,proto3,oneof"`
-}
-
-type StartRunRequest_InlinePlan struct {
-	InlinePlan *Plan `protobuf:"bytes,11,opt,name=inline_plan,json=inlinePlan,proto3,oneof"`
-}
-
-func (*StartRunRequest_PlanId) isStartRunRequest_PlanSource() {}
-
-func (*StartRunRequest_InlinePlan) isStartRunRequest_PlanSource() {}
 
 type GetRunRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -2419,7 +2389,7 @@ const file_baremetal_v1_baremetal_proto_rawDesc = "" +
 	"\x06params\x18\x01 \x03(\v2%.baremetal.v1.NetReconfig.ParamsEntryR\x06params\x1a9\n" +
 	"\vParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xbb\x04\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd4\x04\n" +
 	"\x03Run\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1d\n" +
 	"\n" +
@@ -2427,7 +2397,8 @@ const file_baremetal_v1_baremetal_proto_rawDesc = "" +
 	"\x05phase\x18\x03 \x01(\x0e2\x17.baremetal.v1.Run.PhaseR\x05phase\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x04 \x01(\tR\trequestId\x12\x12\n" +
-	"\x04type\x18\x05 \x01(\tR\x04type\x129\n" +
+	"\x04type\x18\x05 \x01(\tR\x04type\x12\x17\n" +
+	"\aplan_id\x18\x06 \x01(\tR\x06planId\x129\n" +
 	"\n" +
 	"created_at\x18\n" +
 	" \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
@@ -2504,22 +2475,19 @@ const file_baremetal_v1_baremetal_proto_rawDesc = "" +
 	"page_token\x18\x02 \x01(\tR\tpageToken\"e\n" +
 	"\x11ListPlansResponse\x12(\n" +
 	"\x05plans\x18\x01 \x03(\v2\x12.baremetal.v1.PlanR\x05plans\x12&\n" +
-	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\xc2\x02\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\xfa\x01\n" +
 	"\x0fStartRunRequest\x12\x1d\n" +
 	"\n" +
 	"machine_id\x18\x01 \x01(\tR\tmachineId\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x02 \x01(\tR\trequestId\x12\x12\n" +
-	"\x04type\x18\x03 \x01(\tR\x04type\x12\x19\n" +
+	"\x04type\x18\x03 \x01(\tR\x04type\x12\x17\n" +
 	"\aplan_id\x18\n" +
-	" \x01(\tH\x00R\x06planId\x125\n" +
-	"\vinline_plan\x18\v \x01(\v2\x12.baremetal.v1.PlanH\x00R\n" +
-	"inlinePlan\x12A\n" +
+	" \x01(\tR\x06planId\x12A\n" +
 	"\x06params\x18\f \x03(\v2).baremetal.v1.StartRunRequest.ParamsEntryR\x06params\x1a9\n" +
 	"\vParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\r\n" +
-	"\vplan_source\"&\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"&\n" +
 	"\rGetRunRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\"e\n" +
 	"\x0fListRunsRequest\x12\x1b\n" +
@@ -2652,38 +2620,37 @@ var file_baremetal_v1_baremetal_proto_depIdxs = []int32{
 	3,  // 34: baremetal.v1.ListMachinesResponse.machines:type_name -> baremetal.v1.Machine
 	3,  // 35: baremetal.v1.UpdateMachineRequest.machine:type_name -> baremetal.v1.Machine
 	8,  // 36: baremetal.v1.ListPlansResponse.plans:type_name -> baremetal.v1.Plan
-	8,  // 37: baremetal.v1.StartRunRequest.inline_plan:type_name -> baremetal.v1.Plan
-	41, // 38: baremetal.v1.StartRunRequest.params:type_name -> baremetal.v1.StartRunRequest.ParamsEntry
-	17, // 39: baremetal.v1.ListRunsResponse.runs:type_name -> baremetal.v1.Run
-	22, // 40: baremetal.v1.MachineService.RegisterMachine:input_type -> baremetal.v1.RegisterMachineRequest
-	23, // 41: baremetal.v1.MachineService.GetMachine:input_type -> baremetal.v1.GetMachineRequest
-	24, // 42: baremetal.v1.MachineService.ListMachines:input_type -> baremetal.v1.ListMachinesRequest
-	26, // 43: baremetal.v1.MachineService.UpdateMachine:input_type -> baremetal.v1.UpdateMachineRequest
-	27, // 44: baremetal.v1.PlanService.GetPlan:input_type -> baremetal.v1.GetPlanRequest
-	28, // 45: baremetal.v1.PlanService.ListPlans:input_type -> baremetal.v1.ListPlansRequest
-	30, // 46: baremetal.v1.RunService.StartRun:input_type -> baremetal.v1.StartRunRequest
-	31, // 47: baremetal.v1.RunService.GetRun:input_type -> baremetal.v1.GetRunRequest
-	32, // 48: baremetal.v1.RunService.ListRuns:input_type -> baremetal.v1.ListRunsRequest
-	34, // 49: baremetal.v1.RunService.CancelRun:input_type -> baremetal.v1.CancelRunRequest
-	35, // 50: baremetal.v1.RunService.WatchRuns:input_type -> baremetal.v1.WatchRunsRequest
-	36, // 51: baremetal.v1.RunService.StreamRunLogs:input_type -> baremetal.v1.StreamRunLogsRequest
-	3,  // 52: baremetal.v1.MachineService.RegisterMachine:output_type -> baremetal.v1.Machine
-	3,  // 53: baremetal.v1.MachineService.GetMachine:output_type -> baremetal.v1.Machine
-	25, // 54: baremetal.v1.MachineService.ListMachines:output_type -> baremetal.v1.ListMachinesResponse
-	3,  // 55: baremetal.v1.MachineService.UpdateMachine:output_type -> baremetal.v1.Machine
-	8,  // 56: baremetal.v1.PlanService.GetPlan:output_type -> baremetal.v1.Plan
-	29, // 57: baremetal.v1.PlanService.ListPlans:output_type -> baremetal.v1.ListPlansResponse
-	17, // 58: baremetal.v1.RunService.StartRun:output_type -> baremetal.v1.Run
-	17, // 59: baremetal.v1.RunService.GetRun:output_type -> baremetal.v1.Run
-	33, // 60: baremetal.v1.RunService.ListRuns:output_type -> baremetal.v1.ListRunsResponse
-	17, // 61: baremetal.v1.RunService.CancelRun:output_type -> baremetal.v1.Run
-	20, // 62: baremetal.v1.RunService.WatchRuns:output_type -> baremetal.v1.RunEvent
-	21, // 63: baremetal.v1.RunService.StreamRunLogs:output_type -> baremetal.v1.LogChunk
-	52, // [52:64] is the sub-list for method output_type
-	40, // [40:52] is the sub-list for method input_type
-	40, // [40:40] is the sub-list for extension type_name
-	40, // [40:40] is the sub-list for extension extendee
-	0,  // [0:40] is the sub-list for field type_name
+	41, // 37: baremetal.v1.StartRunRequest.params:type_name -> baremetal.v1.StartRunRequest.ParamsEntry
+	17, // 38: baremetal.v1.ListRunsResponse.runs:type_name -> baremetal.v1.Run
+	22, // 39: baremetal.v1.MachineService.RegisterMachine:input_type -> baremetal.v1.RegisterMachineRequest
+	23, // 40: baremetal.v1.MachineService.GetMachine:input_type -> baremetal.v1.GetMachineRequest
+	24, // 41: baremetal.v1.MachineService.ListMachines:input_type -> baremetal.v1.ListMachinesRequest
+	26, // 42: baremetal.v1.MachineService.UpdateMachine:input_type -> baremetal.v1.UpdateMachineRequest
+	27, // 43: baremetal.v1.PlanService.GetPlan:input_type -> baremetal.v1.GetPlanRequest
+	28, // 44: baremetal.v1.PlanService.ListPlans:input_type -> baremetal.v1.ListPlansRequest
+	30, // 45: baremetal.v1.RunService.StartRun:input_type -> baremetal.v1.StartRunRequest
+	31, // 46: baremetal.v1.RunService.GetRun:input_type -> baremetal.v1.GetRunRequest
+	32, // 47: baremetal.v1.RunService.ListRuns:input_type -> baremetal.v1.ListRunsRequest
+	34, // 48: baremetal.v1.RunService.CancelRun:input_type -> baremetal.v1.CancelRunRequest
+	35, // 49: baremetal.v1.RunService.WatchRuns:input_type -> baremetal.v1.WatchRunsRequest
+	36, // 50: baremetal.v1.RunService.StreamRunLogs:input_type -> baremetal.v1.StreamRunLogsRequest
+	3,  // 51: baremetal.v1.MachineService.RegisterMachine:output_type -> baremetal.v1.Machine
+	3,  // 52: baremetal.v1.MachineService.GetMachine:output_type -> baremetal.v1.Machine
+	25, // 53: baremetal.v1.MachineService.ListMachines:output_type -> baremetal.v1.ListMachinesResponse
+	3,  // 54: baremetal.v1.MachineService.UpdateMachine:output_type -> baremetal.v1.Machine
+	8,  // 55: baremetal.v1.PlanService.GetPlan:output_type -> baremetal.v1.Plan
+	29, // 56: baremetal.v1.PlanService.ListPlans:output_type -> baremetal.v1.ListPlansResponse
+	17, // 57: baremetal.v1.RunService.StartRun:output_type -> baremetal.v1.Run
+	17, // 58: baremetal.v1.RunService.GetRun:output_type -> baremetal.v1.Run
+	33, // 59: baremetal.v1.RunService.ListRuns:output_type -> baremetal.v1.ListRunsResponse
+	17, // 60: baremetal.v1.RunService.CancelRun:output_type -> baremetal.v1.Run
+	20, // 61: baremetal.v1.RunService.WatchRuns:output_type -> baremetal.v1.RunEvent
+	21, // 62: baremetal.v1.RunService.StreamRunLogs:output_type -> baremetal.v1.LogChunk
+	51, // [51:63] is the sub-list for method output_type
+	39, // [39:51] is the sub-list for method input_type
+	39, // [39:39] is the sub-list for extension type_name
+	39, // [39:39] is the sub-list for extension extendee
+	0,  // [0:39] is the sub-list for field type_name
 }
 
 func init() { file_baremetal_v1_baremetal_proto_init() }
@@ -2699,10 +2666,6 @@ func file_baremetal_v1_baremetal_proto_init() {
 		(*Step_Join)(nil),
 		(*Step_Verify)(nil),
 		(*Step_Net)(nil),
-	}
-	file_baremetal_v1_baremetal_proto_msgTypes[27].OneofWrappers = []any{
-		(*StartRunRequest_PlanId)(nil),
-		(*StartRunRequest_InlinePlan)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{

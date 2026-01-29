@@ -6,10 +6,27 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	pb "github.com/vpatelsj/stargate/gen/baremetal/v1"
 )
+
+// cloneMachine returns a deep copy of a machine.
+func cloneMachine(m *pb.Machine) *pb.Machine {
+	if m == nil {
+		return nil
+	}
+	return proto.Clone(m).(*pb.Machine)
+}
+
+// cloneRun returns a deep copy of a run.
+func cloneRun(r *pb.Run) *pb.Run {
+	if r == nil {
+		return nil
+	}
+	return proto.Clone(r).(*pb.Run)
+}
 
 // Store is a thread-safe in-memory store for machines and runs.
 type Store struct {
@@ -59,8 +76,9 @@ func (s *Store) UpsertMachine(m *pb.Machine) (*pb.Machine, error) {
 		s.machineLocks[m.MachineId] = &sync.Mutex{}
 	}
 
-	s.machines[m.MachineId] = m
-	return m, nil
+	// Store a clone internally
+	s.machines[m.MachineId] = cloneMachine(m)
+	return cloneMachine(m), nil
 }
 
 // GetMachine retrieves a machine by ID.
@@ -68,7 +86,10 @@ func (s *Store) GetMachine(machineID string) (*pb.Machine, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	m, ok := s.machines[machineID]
-	return m, ok
+	if !ok {
+		return nil, false
+	}
+	return cloneMachine(m), true
 }
 
 // ListMachines returns all machines.
@@ -78,7 +99,7 @@ func (s *Store) ListMachines() []*pb.Machine {
 
 	result := make([]*pb.Machine, 0, len(s.machines))
 	for _, m := range s.machines {
-		result = append(result, m)
+		result = append(result, cloneMachine(m))
 	}
 	return result
 }
@@ -108,19 +129,19 @@ func (s *Store) UpdateMachine(m *pb.Machine) (*pb.Machine, error) {
 	}
 
 	s.machines[m.MachineId] = existing
-	return existing, nil
+	return cloneMachine(existing), nil
 }
 
 // CreateRunIfNotExists creates a new run if the request_id hasn't been seen before.
 // Returns the run and whether it was newly created (true) or already existed (false).
 // Enforces that only one run can be active per machine at a time.
-func (s *Store) CreateRunIfNotExists(requestID, machineID, runType string, plan *pb.Plan) (*pb.Run, bool, error) {
+func (s *Store) CreateRunIfNotExists(requestID, machineID, runType, planID string) (*pb.Run, bool, error) {
 	s.mu.RLock()
 	if requestID != "" {
 		if existingRunID, ok := s.requestIndex[requestID]; ok {
 			run := s.runs[existingRunID]
 			s.mu.RUnlock()
-			return run, false, nil
+			return cloneRun(run), false, nil
 		}
 	}
 
@@ -145,7 +166,7 @@ func (s *Store) CreateRunIfNotExists(requestID, machineID, runType string, plan 
 
 	if requestID != "" {
 		if existingRunID, ok := s.requestIndex[requestID]; ok {
-			return s.runs[existingRunID], false, nil
+			return cloneRun(s.runs[existingRunID]), false, nil
 		}
 	}
 
@@ -161,6 +182,7 @@ func (s *Store) CreateRunIfNotExists(requestID, machineID, runType string, plan 
 		Phase:     pb.Run_PENDING,
 		RequestId: requestID,
 		Type:      runType,
+		PlanId:    planID,
 		CreatedAt: timestamppb.Now(),
 	}
 
@@ -178,7 +200,7 @@ func (s *Store) CreateRunIfNotExists(requestID, machineID, runType string, plan 
 	machine.Status.ActiveRunId = runID
 	machine.Status.Phase = pb.MachineStatus_PROVISIONING
 
-	return run, true, nil
+	return cloneRun(run), true, nil
 }
 
 // GetRun retrieves a run by ID.
@@ -186,7 +208,10 @@ func (s *Store) GetRun(runID string) (*pb.Run, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	r, ok := s.runs[runID]
-	return r, ok
+	if !ok {
+		return nil, false
+	}
+	return cloneRun(r), true
 }
 
 // ListRuns returns all runs.
@@ -196,7 +221,7 @@ func (s *Store) ListRuns() []*pb.Run {
 
 	result := make([]*pb.Run, 0, len(s.runs))
 	for _, r := range s.runs {
-		result = append(result, r)
+		result = append(result, cloneRun(r))
 	}
 	return result
 }
@@ -214,7 +239,7 @@ func (s *Store) UpdateRun(run *pb.Run) error {
 		return fmt.Errorf("run %q not found", run.RunId)
 	}
 
-	s.runs[run.RunId] = run
+	s.runs[run.RunId] = cloneRun(run)
 	return nil
 }
 
@@ -237,7 +262,7 @@ func (s *Store) CancelRun(runID string) (*pb.Run, error) {
 
 	s.clearMachineActiveRun(run.MachineId)
 
-	return run, nil
+	return cloneRun(run), nil
 }
 
 // CompleteRun marks a run as completed and clears the machine's active run.

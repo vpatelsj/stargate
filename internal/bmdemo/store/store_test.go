@@ -75,7 +75,7 @@ func TestIdempotentCreateRun(t *testing.T) {
 	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
 
 	// First create with request_id
-	run1, created, err := s.CreateRunIfNotExists("req-123", "m-1", "REPAVE", nil)
+	run1, created, err := s.CreateRunIfNotExists("req-123", "m-1", "REPAVE", "")
 	if err != nil {
 		t.Fatalf("CreateRunIfNotExists failed: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestIdempotentCreateRun(t *testing.T) {
 	s.CompleteRun(run1.RunId, pb.Run_SUCCEEDED)
 
 	// Second create with same request_id should return same run
-	run2, created, err := s.CreateRunIfNotExists("req-123", "m-1", "REPAVE", nil)
+	run2, created, err := s.CreateRunIfNotExists("req-123", "m-1", "REPAVE", "")
 	if err != nil {
 		t.Fatalf("CreateRunIfNotExists failed: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestIdempotentCreateRun(t *testing.T) {
 	}
 
 	// Different request_id should create new run
-	run3, created, err := s.CreateRunIfNotExists("req-456", "m-1", "REPAVE", nil)
+	run3, created, err := s.CreateRunIfNotExists("req-456", "m-1", "REPAVE", "")
 	if err != nil {
 		t.Fatalf("CreateRunIfNotExists failed: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestNoTwoActiveRunsPerMachine(t *testing.T) {
 	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
 
 	// Start first run
-	run1, created, err := s.CreateRunIfNotExists("req-1", "m-1", "REPAVE", nil)
+	run1, created, err := s.CreateRunIfNotExists("req-1", "m-1", "REPAVE", "")
 	if err != nil {
 		t.Fatalf("CreateRunIfNotExists failed: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestNoTwoActiveRunsPerMachine(t *testing.T) {
 	}
 
 	// Try to start second run - should fail
-	_, _, err = s.CreateRunIfNotExists("req-2", "m-1", "REPAVE", nil)
+	_, _, err = s.CreateRunIfNotExists("req-2", "m-1", "REPAVE", "")
 	if err == nil {
 		t.Error("Expected error when creating second run for same machine")
 	}
@@ -142,7 +142,7 @@ func TestNoTwoActiveRunsPerMachine(t *testing.T) {
 	}
 
 	// Now we should be able to start a new run
-	run3, created, err := s.CreateRunIfNotExists("req-3", "m-1", "REPAVE", nil)
+	run3, created, err := s.CreateRunIfNotExists("req-3", "m-1", "REPAVE", "")
 	if err != nil {
 		t.Fatalf("CreateRunIfNotExists failed after completing first run: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestConcurrentCreateRuns(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			_, created, err := s.CreateRunIfNotExists("", "m-1", "REPAVE", nil)
+			_, created, err := s.CreateRunIfNotExists("", "m-1", "REPAVE", "")
 			if err != nil {
 				results <- err
 				return
@@ -220,7 +220,7 @@ func TestConcurrentIdempotentRequests(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			run, _, err := s.CreateRunIfNotExists("idempotent-req", "m-1", "REPAVE", nil)
+			run, _, err := s.CreateRunIfNotExists("idempotent-req", "m-1", "REPAVE", "")
 			if err != nil {
 				// May get "already has active run" error, which is fine
 				return
@@ -247,7 +247,7 @@ func TestCancelRun(t *testing.T) {
 	s := New()
 	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
 
-	run, _, _ := s.CreateRunIfNotExists("req-1", "m-1", "REPAVE", nil)
+	run, _, _ := s.CreateRunIfNotExists("req-1", "m-1", "REPAVE", "")
 
 	// Cancel the run
 	cancelled, err := s.CancelRun(run.RunId)
@@ -265,7 +265,7 @@ func TestCancelRun(t *testing.T) {
 	}
 
 	// Should be able to start new run now
-	_, created, err := s.CreateRunIfNotExists("req-2", "m-1", "REPAVE", nil)
+	_, created, err := s.CreateRunIfNotExists("req-2", "m-1", "REPAVE", "")
 	if err != nil {
 		t.Fatalf("CreateRunIfNotExists after cancel failed: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestUpdateRunStep(t *testing.T) {
 	s := New()
 	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
 
-	run, _, _ := s.CreateRunIfNotExists("req-1", "m-1", "REPAVE", nil)
+	run, _, _ := s.CreateRunIfNotExists("req-1", "m-1", "REPAVE", "")
 
 	// Add step
 	err := s.UpdateRunStep(run.RunId, &pb.StepStatus{
@@ -320,7 +320,7 @@ func TestMachineStatusUpdatedOnRunCompletion(t *testing.T) {
 	s := New()
 	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
 
-	run, _, _ := s.CreateRunIfNotExists("req-1", "m-1", "REPAVE", nil)
+	run, _, _ := s.CreateRunIfNotExists("req-1", "m-1", "REPAVE", "")
 
 	// Machine should be PROVISIONING
 	machine, _ := s.GetMachine("m-1")

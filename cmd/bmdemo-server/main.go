@@ -60,13 +60,14 @@ func main() {
 		providerCfg = fake.DefaultConfig()
 	}
 
-	// Create provider with log streaming
-	runner := executor.NewRunner(s, nil, pl) // Will set provider after
-	provider := fake.New(providerCfg, func(runID, stream string, data []byte) {
-		// Stream logs to executor which forwards to subscribers
-		runner.SubscribeLogs(runID, func(chunk *pb.LogChunk) {})
-	})
-	runner = executor.NewRunner(s, provider, pl)
+	// Create runner first (provider needs its EmitLog method)
+	runner := executor.NewRunner(s, nil, pl)
+
+	// Create provider with log callback that forwards to runner
+	provider := fake.New(providerCfg, runner.EmitLog)
+
+	// Set the provider on the runner
+	runner.SetProvider(provider)
 
 	// Create gRPC server
 	grpcServer := grpc.NewServer()
@@ -220,23 +221,29 @@ func (s *runServer) StartRun(ctx context.Context, req *pb.StartRunRequest) (*pb.
 		return nil, status.Error(codes.InvalidArgument, "request_id is required for idempotency")
 	}
 
-	// Validate plan exists (if plan_id provided)
+	// Determine run type and plan_id
 	runType := req.Type
-	if runType == "" {
-		if planID := req.GetPlanId(); planID != "" {
-			if _, ok := s.plans.GetPlan(planID); !ok {
-				return nil, status.Errorf(codes.NotFound, "plan %q not found", planID)
-			}
-			runType = planID
-		} else if req.GetInlinePlan() != nil {
-			runType = "INLINE"
-		} else {
-			return nil, status.Error(codes.InvalidArgument, "type, plan_id, or inline_plan is required")
+	planID := req.PlanId
+
+	// If no type provided, infer from plan_id
+	if runType == "" && planID != "" {
+		runType = planID // Use plan as type if type not specified
+	}
+
+	// Validate we have something to execute
+	if runType == "" && planID == "" {
+		return nil, status.Error(codes.InvalidArgument, "type or plan_id is required")
+	}
+
+	// Validate plan exists if plan_id provided
+	if planID != "" {
+		if _, ok := s.plans.GetPlan(planID); !ok {
+			return nil, status.Errorf(codes.NotFound, "plan %q not found", planID)
 		}
 	}
 
 	// Create run (idempotent)
-	run, created, err := s.store.CreateRunIfNotExists(req.RequestId, req.MachineId, runType, req.GetInlinePlan())
+	run, created, err := s.store.CreateRunIfNotExists(req.RequestId, req.MachineId, runType, planID)
 	if err != nil {
 		s.logger.Error("failed to create run",
 			"machine_id", req.MachineId,
@@ -250,6 +257,7 @@ func (s *runServer) StartRun(ctx context.Context, req *pb.StartRunRequest) (*pb.
 			"run_id", run.RunId,
 			"machine_id", req.MachineId,
 			"type", runType,
+			"plan_id", planID,
 			"request_id", req.RequestId)
 
 		// Start execution asynchronously

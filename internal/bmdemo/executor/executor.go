@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	pb "github.com/vpatelsj/stargate/gen/baremetal/v1"
@@ -58,6 +59,16 @@ func NewRunner(s *store.Store, p *fake.Provider, pl *plans.Registry) *Runner {
 	}
 }
 
+// SetProvider sets the provider (for deferred initialization).
+func (r *Runner) SetProvider(p *fake.Provider) {
+	r.provider = p
+}
+
+// EmitLog is called by the provider to stream logs. This is the public API.
+func (r *Runner) EmitLog(runID, stream string, data []byte) {
+	r.emitLog(runID, stream, data)
+}
+
 // SubscribeEvents adds an event subscriber.
 func (r *Runner) SubscribeEvents(cb EventCallback) func() {
 	r.mu.Lock()
@@ -91,11 +102,13 @@ func (r *Runner) SubscribeLogs(runID string, cb LogCallback) func() {
 	}
 }
 
-// emitEvent sends an event to all subscribers.
+// emitEvent sends an event to all subscribers with an immutable snapshot.
 func (r *Runner) emitEvent(run *pb.Run, message string) {
+	// Clone the run to ensure immutability
+	snapshot := proto.Clone(run).(*pb.Run)
 	event := &pb.RunEvent{
 		Ts:       timestamppb.Now(),
-		Snapshot: run,
+		Snapshot: snapshot,
 		Message:  message,
 	}
 
@@ -315,9 +328,16 @@ func (r *Runner) executeRun(ctx context.Context, runID string) {
 }
 
 // getPlanForRun retrieves the plan for a run.
+// Priority: plan_id > type-based lookup > fallback
 func (r *Runner) getPlanForRun(run *pb.Run) *pb.Plan {
-	// Check for inline plan (not supported in current proto but future-proof)
-	// For now, use type to determine plan
+	// First, try explicit plan_id
+	if run.PlanId != "" {
+		if plan, ok := r.plans.GetPlan(run.PlanId); ok {
+			return plan
+		}
+	}
+
+	// Second, map type to default plan
 	switch run.Type {
 	case "REPAVE", "repave":
 		if plan, ok := r.plans.GetPlan(plans.PlanRepaveJoin); ok {
@@ -337,11 +357,6 @@ func (r *Runner) getPlanForRun(run *pb.Run) *pb.Plan {
 		}
 	case "NET_RECONFIG", "net-reconfig":
 		if plan, ok := r.plans.GetPlan(plans.PlanNetReconfig); ok {
-			return plan
-		}
-	default:
-		// Try to find by plan ID directly
-		if plan, ok := r.plans.GetPlan(run.Type); ok {
 			return plan
 		}
 	}
@@ -444,6 +459,9 @@ func (r *Runner) failRunWithMachine(runID string, machine *pb.Machine, message s
 	lifecycle.SetCondition(machine, ConditionNeedsIntervention, true, "RunFailed", message)
 	machine.Status.ActiveRunId = ""
 	lifecycle.SetMachinePhase(machine, pb.MachineStatus_MAINTENANCE)
+
+	// Persist the updated machine
+	r.store.UpdateMachine(machine)
 }
 
 // cancelRun marks run as canceled.
@@ -472,6 +490,7 @@ func (r *Runner) succeedRun(runID string, machine *pb.Machine, completedRepave, 
 	// Update machine phase based on what completed
 	if isRMA {
 		lifecycle.SetMachinePhase(machine, pb.MachineStatus_RMA)
+		r.store.UpdateMachine(machine)
 		return
 	}
 
@@ -489,6 +508,9 @@ func (r *Runner) succeedRun(runID string, machine *pb.Machine, completedRepave, 
 	if !completedRepave && !completedJoin && !isRMA {
 		lifecycle.SetMachinePhase(machine, pb.MachineStatus_READY)
 	}
+
+	// Persist the updated machine
+	r.store.UpdateMachine(machine)
 }
 
 // IsRunning returns true if the runner has an active run.

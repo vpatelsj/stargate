@@ -35,7 +35,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	conn, err := grpc.NewClient(*serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.Dial(*serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Fatalf("failed to connect: %v", err)
 	}
@@ -250,9 +250,7 @@ func runAndWatch(conn *grpc.ClientConn, args []string, runType, planID string) {
 		MachineId: machineID,
 		RequestId: requestID,
 		Type:      runType,
-		PlanSource: &pb.StartRunRequest_PlanId{
-			PlanId: planID,
-		},
+		PlanId:    planID,
 	})
 	if err != nil {
 		log.Fatalf("StartRun failed: %v", err)
@@ -678,9 +676,7 @@ func runDemo(conn *grpc.ClientConn) {
 		MachineId: "machine-1",
 		RequestId: uuid.New().String(),
 		Type:      "REPAVE",
-		PlanSource: &pb.StartRunRequest_PlanId{
-			PlanId: "plan/repave-join",
-		},
+		PlanId:    "plan/repave-join",
 	})
 	if err != nil {
 		log.Fatalf("StartRun failed: %v", err)
@@ -741,9 +737,7 @@ func runDemo(conn *grpc.ClientConn) {
 		MachineId: "machine-1",
 		RequestId: uuid.New().String(),
 		Type:      "UPGRADE",
-		PlanSource: &pb.StartRunRequest_PlanId{
-			PlanId: "plan/upgrade",
-		},
+		PlanId:    "plan/upgrade",
 	})
 	if err != nil {
 		fmt.Printf("upgrade run: (plan not found - expected for stub)\n")
@@ -778,9 +772,7 @@ func runDemo(conn *grpc.ClientConn) {
 		MachineId: "machine-1",
 		RequestId: uuid.New().String(),
 		Type:      "RMA",
-		PlanSource: &pb.StartRunRequest_PlanId{
-			PlanId: "plan/rma",
-		},
+		PlanId:    "plan/rma",
 	})
 	if err != nil {
 		log.Fatalf("RMA run failed: %v", err)
