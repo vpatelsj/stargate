@@ -119,9 +119,11 @@ func importMachines(conn *grpc.ClientConn, args []string) {
 	for i := 0; i < count; i++ {
 		// Generate fake MAC address: 02:00:00:00:XX:YY
 		mac := fmt.Sprintf("02:00:00:00:%02x:%02x", i/256, i%256)
+		machineID := fmt.Sprintf("machine-%d", i+1)
 
 		machine, err := client.RegisterMachine(ctx, &pb.RegisterMachineRequest{
 			Machine: &pb.Machine{
+				MachineId: machineID,
 				Spec: &pb.MachineSpec{
 					Provider:     "fake",
 					MacAddresses: []string{mac},
@@ -240,8 +242,18 @@ func runAndWatch(conn *grpc.ClientConn, args []string, runType, planID string) {
 	machineID := args[0]
 	requestID := uuid.New().String()
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	// Create a cancellable context for the entire operation
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Handle signals
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		fmt.Println("\n⚠ Interrupted. Run continues in background.")
+		cancel()
+	}()
 
 	runClient := pb.NewRunServiceClient(conn)
 
@@ -266,20 +278,19 @@ func runAndWatch(conn *grpc.ClientConn, args []string, runType, planID string) {
 
 	// Watch for events and logs concurrently
 	var wg sync.WaitGroup
-	done := make(chan struct{})
 
 	// Event watcher
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		watchRunEvents(ctx, runClient, run.RunId, machineID, done)
+		watchRunEvents(ctx, runClient, run.RunId, machineID)
 	}()
 
 	// Log streamer
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		streamRunLogs(ctx, runClient, run.RunId, done)
+		streamRunLogs(ctx, runClient, run.RunId)
 	}()
 
 	// Poll for completion
@@ -292,8 +303,6 @@ func runAndWatch(conn *grpc.ClientConn, args []string, runType, planID string) {
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("\n⚠ Interrupted. Run continues in background.")
-			close(done)
 			wg.Wait()
 			return
 		case <-ticker.C:
@@ -320,7 +329,8 @@ func runAndWatch(conn *grpc.ClientConn, args []string, runType, planID string) {
 
 			// Check for terminal state
 			if lifecycle.IsTerminalRunPhase(r.Phase) {
-				close(done)
+				// Cancel context to stop the streaming goroutines
+				cancel()
 				wg.Wait()
 
 				fmt.Println()
@@ -331,7 +341,7 @@ func runAndWatch(conn *grpc.ClientConn, args []string, runType, planID string) {
 	}
 }
 
-func watchRunEvents(ctx context.Context, client pb.RunServiceClient, runID, machineID string, done <-chan struct{}) {
+func watchRunEvents(ctx context.Context, client pb.RunServiceClient, runID, machineID string) {
 	stream, err := client.WatchRuns(ctx, &pb.WatchRunsRequest{
 		Filter: fmt.Sprintf("machine_id=%s", machineID),
 	})
@@ -340,48 +350,38 @@ func watchRunEvents(ctx context.Context, client pb.RunServiceClient, runID, mach
 	}
 
 	for {
-		select {
-		case <-done:
-			return
-		default:
-			event, err := stream.Recv()
-			if err != nil {
-				return
-			}
-			if event.Snapshot != nil && event.Snapshot.RunId == runID {
-				if event.Message != "" {
-					ts := event.Ts.AsTime().Format("15:04:05")
-					fmt.Printf("  [%s] %s\n", ts, event.Message)
-				}
+		event, err := stream.Recv()
+		if err != nil {
+			return // Context cancelled or stream ended
+		}
+		if event.Snapshot != nil && event.Snapshot.RunId == runID {
+			if event.Message != "" {
+				ts := event.Ts.AsTime().Format("15:04:05")
+				fmt.Printf("  [%s] %s\n", ts, event.Message)
 			}
 		}
 	}
 }
 
-func streamRunLogs(ctx context.Context, client pb.RunServiceClient, runID string, done <-chan struct{}) {
+func streamRunLogs(ctx context.Context, client pb.RunServiceClient, runID string) {
 	stream, err := client.StreamRunLogs(ctx, &pb.StreamRunLogsRequest{RunId: runID})
 	if err != nil {
 		return
 	}
 
 	for {
-		select {
-		case <-done:
-			return
-		default:
-			chunk, err := stream.Recv()
-			if err != nil {
-				return
+		chunk, err := stream.Recv()
+		if err != nil {
+			return // Context cancelled or stream ended
+		}
+		data := strings.TrimSpace(string(chunk.Data))
+		if data != "" {
+			prefix := "│"
+			if chunk.Stream == "stderr" {
+				prefix = "│!"
 			}
-			data := strings.TrimSpace(string(chunk.Data))
-			if data != "" {
-				prefix := "│"
-				if chunk.Stream == "stderr" {
-					prefix = "│!"
-				}
-				for _, line := range strings.Split(data, "\n") {
-					fmt.Printf("  %s %s\n", prefix, line)
-				}
+			for _, line := range strings.Split(data, "\n") {
+				fmt.Printf("  %s %s\n", prefix, line)
 			}
 		}
 	}

@@ -77,9 +77,8 @@ var builtinPlans = map[string]*pb.Plan{
 			},
 			{
 				Name: "mark-rma",
-				Kind: &pb.Step_Ssh{Ssh: &pb.SshCommand{
-					ScriptRef: "mark_rma.sh",
-					Args:      map[string]string{},
+				Kind: &pb.Step_Rma{Rma: &pb.RmaAction{
+					Reason: "hardware failure",
 				}},
 				TimeoutSeconds: 60,
 				MaxRetries:     1,

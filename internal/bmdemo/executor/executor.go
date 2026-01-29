@@ -15,7 +15,7 @@ import (
 	pb "github.com/vpatelsj/stargate/gen/baremetal/v1"
 	"github.com/vpatelsj/stargate/internal/bmdemo/lifecycle"
 	"github.com/vpatelsj/stargate/internal/bmdemo/plans"
-	"github.com/vpatelsj/stargate/internal/bmdemo/provider/fake"
+	"github.com/vpatelsj/stargate/internal/bmdemo/provider"
 	"github.com/vpatelsj/stargate/internal/bmdemo/store"
 )
 
@@ -35,24 +35,28 @@ type LogCallback func(chunk *pb.LogChunk)
 // Runner executes runs asynchronously.
 type Runner struct {
 	store    *store.Store
-	provider *fake.Provider
+	provider provider.Provider
 	plans    *plans.Registry
 
 	mu            sync.RWMutex
-	eventSubs     []EventCallback
-	logSubs       map[string][]LogCallback // runID -> subscribers
+	eventSubID    uint64                            // counter for unique subscriber IDs
+	eventSubs     map[uint64]EventCallback          // subscriberID -> callback
+	logSubID      map[string]uint64                 // runID -> counter for unique log subscriber IDs
+	logSubs       map[string]map[uint64]LogCallback // runID -> subscriberID -> callback
 	activeRuns    map[string]context.CancelFunc
 	baseRetryWait time.Duration
 	maxRetryWait  time.Duration
 }
 
 // NewRunner creates a new run executor.
-func NewRunner(s *store.Store, p *fake.Provider, pl *plans.Registry) *Runner {
+func NewRunner(s *store.Store, p provider.Provider, pl *plans.Registry) *Runner {
 	return &Runner{
 		store:         s,
 		provider:      p,
 		plans:         pl,
-		logSubs:       make(map[string][]LogCallback),
+		eventSubs:     make(map[uint64]EventCallback),
+		logSubID:      make(map[string]uint64),
+		logSubs:       make(map[string]map[uint64]LogCallback),
 		activeRuns:    make(map[string]context.CancelFunc),
 		baseRetryWait: 500 * time.Millisecond,
 		maxRetryWait:  10 * time.Second,
@@ -60,7 +64,7 @@ func NewRunner(s *store.Store, p *fake.Provider, pl *plans.Registry) *Runner {
 }
 
 // SetProvider sets the provider (for deferred initialization).
-func (r *Runner) SetProvider(p *fake.Provider) {
+func (r *Runner) SetProvider(p provider.Provider) {
 	r.provider = p
 }
 
@@ -69,35 +73,42 @@ func (r *Runner) EmitLog(runID, stream string, data []byte) {
 	r.emitLog(runID, stream, data)
 }
 
-// SubscribeEvents adds an event subscriber.
+// SubscribeEvents adds an event subscriber. Returns unsubscribe function.
 func (r *Runner) SubscribeEvents(cb EventCallback) func() {
 	r.mu.Lock()
-	r.eventSubs = append(r.eventSubs, cb)
-	idx := len(r.eventSubs) - 1
+	r.eventSubID++
+	id := r.eventSubID
+	r.eventSubs[id] = cb
 	r.mu.Unlock()
 
 	return func() {
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		// Mark as nil instead of removing to avoid index issues
-		if idx < len(r.eventSubs) {
-			r.eventSubs[idx] = nil
-		}
+		delete(r.eventSubs, id)
 	}
 }
 
-// SubscribeLogs adds a log subscriber for a specific run.
+// SubscribeLogs adds a log subscriber for a specific run. Returns unsubscribe function.
 func (r *Runner) SubscribeLogs(runID string, cb LogCallback) func() {
 	r.mu.Lock()
-	r.logSubs[runID] = append(r.logSubs[runID], cb)
-	idx := len(r.logSubs[runID]) - 1
+	if r.logSubs[runID] == nil {
+		r.logSubs[runID] = make(map[uint64]LogCallback)
+	}
+	r.logSubID[runID]++
+	id := r.logSubID[runID]
+	r.logSubs[runID][id] = cb
 	r.mu.Unlock()
 
 	return func() {
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		if subs, ok := r.logSubs[runID]; ok && idx < len(subs) {
-			r.logSubs[runID][idx] = nil
+		if subs, ok := r.logSubs[runID]; ok {
+			delete(subs, id)
+			// Clean up empty map
+			if len(subs) == 0 {
+				delete(r.logSubs, runID)
+				delete(r.logSubID, runID)
+			}
 		}
 	}
 }
@@ -113,14 +124,14 @@ func (r *Runner) emitEvent(run *pb.Run, message string) {
 	}
 
 	r.mu.RLock()
-	subs := make([]EventCallback, len(r.eventSubs))
-	copy(subs, r.eventSubs)
+	subs := make([]EventCallback, 0, len(r.eventSubs))
+	for _, cb := range r.eventSubs {
+		subs = append(subs, cb)
+	}
 	r.mu.RUnlock()
 
 	for _, cb := range subs {
-		if cb != nil {
-			cb(event)
-		}
+		cb(event)
 	}
 }
 
@@ -134,15 +145,17 @@ func (r *Runner) emitLog(runID, stream string, data []byte) {
 	}
 
 	r.mu.RLock()
-	subs := r.logSubs[runID]
-	subsCopy := make([]LogCallback, len(subs))
-	copy(subsCopy, subs)
+	var subs []LogCallback
+	if m, ok := r.logSubs[runID]; ok {
+		subs = make([]LogCallback, 0, len(m))
+		for _, cb := range m {
+			subs = append(subs, cb)
+		}
+	}
 	r.mu.RUnlock()
 
-	for _, cb := range subsCopy {
-		if cb != nil {
-			cb(chunk)
-		}
+	for _, cb := range subs {
+		cb(chunk)
 	}
 }
 
@@ -421,6 +434,13 @@ func (r *Runner) executeStep(ctx context.Context, runID string, machine *pb.Mach
 		time.Sleep(500 * time.Millisecond)
 		r.emitLog(runID, "stdout", []byte("[net-reconfig] Network reconfiguration complete\n"))
 		return nil
+
+	case *pb.Step_Rma:
+		reason := kind.Rma.Reason
+		if reason == "" {
+			reason = "no reason specified"
+		}
+		return r.provider.RMA(stepCtx, runID, machine, reason)
 
 	default:
 		return fmt.Errorf("unknown step kind: %T", step.Kind)

@@ -21,7 +21,7 @@ all: build
 
 ## Build targets
 
-build: azure-controller qemu-controller simulator prep-dc-inventory azure
+build: azure-controller qemu-controller simulator prep-dc-inventory azure bmdemo
 
 azure-controller:
 	$(GOBUILD) -o $(AZURE_CONTROLLER_BIN) ./cmd/azure-controller/main.go

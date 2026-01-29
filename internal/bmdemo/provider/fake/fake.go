@@ -7,21 +7,18 @@ import (
 	"time"
 
 	pb "github.com/vpatelsj/stargate/gen/baremetal/v1"
+	"github.com/vpatelsj/stargate/internal/bmdemo/provider"
 )
+
+// Verify that Provider implements provider.Provider interface.
+var _ provider.Provider = (*Provider)(nil)
 
 // LogCallback is called to stream logs from provider operations.
 // stream is "stdout" or "stderr", data is the log content.
-type LogCallback func(runID, stream string, data []byte)
+type LogCallback = provider.LogCallback
 
-// JoinMaterial contains the information needed to join a node to a cluster.
-type JoinMaterial struct {
-	Endpoint    string
-	Token       string
-	CAHash      string
-	ExpiresAt   time.Time
-	ClusterID   string
-	Certificate []byte // optional client cert
-}
+// JoinMaterial is an alias for provider.JoinMaterial.
+type JoinMaterial = provider.JoinMaterial
 
 // Config holds timing configuration for the fake provider.
 type Config struct {

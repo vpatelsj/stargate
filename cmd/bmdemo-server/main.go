@@ -225,14 +225,14 @@ func (s *runServer) StartRun(ctx context.Context, req *pb.StartRunRequest) (*pb.
 	runType := req.Type
 	planID := req.PlanId
 
-	// If no type provided, infer from plan_id
-	if runType == "" && planID != "" {
-		runType = planID // Use plan as type if type not specified
-	}
-
 	// Validate we have something to execute
 	if runType == "" && planID == "" {
 		return nil, status.Error(codes.InvalidArgument, "type or plan_id is required")
+	}
+
+	// If plan_id not provided, resolve default plan from type
+	if planID == "" && runType != "" {
+		planID = s.defaultPlanForType(runType)
 	}
 
 	// Validate plan exists if plan_id provided
@@ -271,6 +271,18 @@ func (s *runServer) StartRun(ctx context.Context, req *pb.StartRunRequest) (*pb.
 		s.logger.Debug("idempotent run request",
 			"run_id", run.RunId,
 			"request_id", req.RequestId)
+
+		// If run is still PENDING, try to start it (retry scenario)
+		if run.Phase == pb.Run_PENDING {
+			s.logger.Info("retrying pending run",
+				"run_id", run.RunId,
+				"request_id", req.RequestId)
+			if err := s.runner.StartRun(ctx, run.RunId); err != nil {
+				s.logger.Error("failed to retry run execution",
+					"run_id", run.RunId,
+					"error", err)
+			}
+		}
 	}
 
 	return run, nil
@@ -316,6 +328,24 @@ func (s *runServer) CancelRun(ctx context.Context, req *pb.CancelRunRequest) (*p
 
 	s.logger.Info("cancelled run", "run_id", req.RunId, "phase", run.Phase)
 	return run, nil
+}
+
+// defaultPlanForType returns the default plan_id for a given run type.
+func (s *runServer) defaultPlanForType(runType string) string {
+	switch runType {
+	case "REPAVE", "repave":
+		return plans.PlanRepaveJoin
+	case "RMA", "rma":
+		return plans.PlanRMA
+	case "REBOOT", "reboot":
+		return plans.PlanReboot
+	case "UPGRADE", "upgrade":
+		return plans.PlanUpgrade
+	case "NET_RECONFIG", "net-reconfig":
+		return plans.PlanNetReconfig
+	default:
+		return plans.PlanReboot // fallback
+	}
 }
 
 func (s *runServer) WatchRuns(req *pb.WatchRunsRequest, stream pb.RunService_WatchRunsServer) error {

@@ -135,10 +135,12 @@ func (s *Store) UpdateMachine(m *pb.Machine) (*pb.Machine, error) {
 // CreateRunIfNotExists creates a new run if the request_id hasn't been seen before.
 // Returns the run and whether it was newly created (true) or already existed (false).
 // Enforces that only one run can be active per machine at a time.
+// Idempotency is scoped to (machine_id, request_id) tuple.
 func (s *Store) CreateRunIfNotExists(requestID, machineID, runType, planID string) (*pb.Run, bool, error) {
 	s.mu.RLock()
 	if requestID != "" {
-		if existingRunID, ok := s.requestIndex[requestID]; ok {
+		idempotencyKey := machineID + ":" + requestID
+		if existingRunID, ok := s.requestIndex[idempotencyKey]; ok {
 			run := s.runs[existingRunID]
 			s.mu.RUnlock()
 			return cloneRun(run), false, nil
@@ -165,7 +167,8 @@ func (s *Store) CreateRunIfNotExists(requestID, machineID, runType, planID strin
 	defer s.mu.Unlock()
 
 	if requestID != "" {
-		if existingRunID, ok := s.requestIndex[requestID]; ok {
+		idempotencyKey := machineID + ":" + requestID
+		if existingRunID, ok := s.requestIndex[idempotencyKey]; ok {
 			return cloneRun(s.runs[existingRunID]), false, nil
 		}
 	}
@@ -189,7 +192,8 @@ func (s *Store) CreateRunIfNotExists(requestID, machineID, runType, planID strin
 	s.runs[runID] = run
 
 	if requestID != "" {
-		s.requestIndex[requestID] = runID
+		idempotencyKey := machineID + ":" + requestID
+		s.requestIndex[idempotencyKey] = runID
 	}
 
 	s.machineRunning[machineID] = true
@@ -266,6 +270,8 @@ func (s *Store) CancelRun(runID string) (*pb.Run, error) {
 }
 
 // CompleteRun marks a run as completed and clears the machine's active run.
+// NOTE: This method does NOT change machine.Status.Phase - the executor
+// is responsible for phase transitions based on what steps completed.
 func (s *Store) CompleteRun(runID string, phase pb.Run_Phase) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -279,14 +285,6 @@ func (s *Store) CompleteRun(runID string, phase pb.Run_Phase) error {
 	run.FinishedAt = timestamppb.Now()
 
 	s.clearMachineActiveRun(run.MachineId)
-
-	if machine, ok := s.machines[run.MachineId]; ok {
-		if phase == pb.Run_SUCCEEDED {
-			machine.Status.Phase = pb.MachineStatus_IN_SERVICE
-		} else {
-			machine.Status.Phase = pb.MachineStatus_MAINTENANCE
-		}
-	}
 
 	return nil
 }

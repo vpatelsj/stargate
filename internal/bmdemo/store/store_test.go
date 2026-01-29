@@ -331,9 +331,14 @@ func TestMachineStatusUpdatedOnRunCompletion(t *testing.T) {
 	// Complete run successfully
 	s.CompleteRun(run.RunId, pb.Run_SUCCEEDED)
 
-	// Machine should be IN_SERVICE
+	// Machine phase should NOT be changed by CompleteRun - that's the executor's job
+	// CompleteRun should only clear active_run_id
 	machine, _ = s.GetMachine("m-1")
-	if machine.Status.Phase != pb.MachineStatus_IN_SERVICE {
-		t.Errorf("Expected IN_SERVICE, got %v", machine.Status.Phase)
+	if machine.Status.ActiveRunId != "" {
+		t.Errorf("Expected empty ActiveRunId, got %v", machine.Status.ActiveRunId)
+	}
+	// Phase should still be PROVISIONING (executor updates it, not store)
+	if machine.Status.Phase != pb.MachineStatus_PROVISIONING {
+		t.Errorf("Expected phase to remain PROVISIONING, got %v", machine.Status.Phase)
 	}
 }
