@@ -65,7 +65,8 @@ Boolean signals tracking runtime state:
 | `Reachable` | Machine responds to health probes |
 | `InCustomerCluster` | Successfully joined target cluster |
 | `NeedsIntervention` | Requires manual action |
-| `Degraded` | Operating with reduced capacity |
+| `Provisioned` | Machine has been successfully provisioned |
+| `Healthy` | Machine is operating normally |
 
 ### 3. Effective State
 Computed view applying precedence rules (from `lifecycle.EffectiveState()`):
@@ -84,7 +85,7 @@ Computed view applying precedence rules (from `lifecycle.EffectiveState()`):
 ```
 MACHINE      PHASE          EFFECTIVE      CONDITIONS
 machine-1    READY          IN_SERVICE     InCustomerCluster=✓
-machine-2    MAINTENANCE    MAINTENANCE    InCustomerCluster=✓, Degraded=✓
+machine-2    MAINTENANCE    MAINTENANCE    InCustomerCluster=✓, NeedsIntervention=✓
 machine-3    FACTORY_READY  PROVISIONING   (active run)
 ```
 

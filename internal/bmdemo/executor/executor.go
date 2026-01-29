@@ -135,6 +135,16 @@ func (r *Runner) emitEvent(run *pb.Run, message string) {
 	}
 }
 
+// emitEventFromStore fetches the latest run state from store and emits an event.
+// This ensures event snapshots reflect actual persisted state (including Steps[]).
+func (r *Runner) emitEventFromStore(runID string, message string) {
+	run, ok := r.store.GetRun(runID)
+	if !ok {
+		return
+	}
+	r.emitEvent(run, message)
+}
+
 // emitLog sends a log chunk to run subscribers.
 func (r *Runner) emitLog(runID, stream string, data []byte) {
 	chunk := &pb.LogChunk{
@@ -161,16 +171,20 @@ func (r *Runner) emitLog(runID, stream string, data []byte) {
 
 // StartRun begins executing a run asynchronously.
 // Returns immediately; run proceeds in background.
+// Idempotent: calling StartRun on an already-running or finished run returns nil.
 func (r *Runner) StartRun(ctx context.Context, runID string) error {
-	run, ok := r.store.GetRun(runID)
+	// Atomically try to transition from PENDING to RUNNING
+	ok, err := r.store.TryTransitionRunPhase(runID, pb.Run_PENDING, pb.Run_RUNNING)
+	if err != nil {
+		return err // run not found
+	}
 	if !ok {
-		return fmt.Errorf("run %q not found", runID)
+		// Run is not PENDING - either already running, succeeded, failed, or canceled.
+		// This is idempotent success - someone else started it or it's already done.
+		return nil
 	}
 
-	if run.Phase != pb.Run_PENDING {
-		return fmt.Errorf("run %q is not pending (phase=%s)", runID, run.Phase)
-	}
-
+	// We are the winner - we transitioned PENDING -> RUNNING
 	// Create cancellable context for this run
 	runCtx, cancel := context.WithCancel(context.Background())
 
@@ -230,6 +244,7 @@ func (r *Runner) CancelRun(runID string) error {
 }
 
 // executeRun is the main run execution loop.
+// Called after StartRun has already transitioned the run to RUNNING.
 func (r *Runner) executeRun(ctx context.Context, runID string) {
 	defer func() {
 		r.mu.Lock()
@@ -258,19 +273,16 @@ func (r *Runner) executeRun(ctx context.Context, runID string) {
 		return
 	}
 
-	// Transition to RUNNING
-	if err := r.store.SetRunPhase(runID, pb.Run_RUNNING); err != nil {
-		log.Printf("[executor] failed to set run phase: %v", err)
-		return
-	}
-	run.Phase = pb.Run_RUNNING
-	run.StartedAt = timestamppb.Now()
+	// Run is already RUNNING (set by StartRun via TryTransitionRunPhase)
+	// Emit the start event with the current run state
+	run, _ = r.store.GetRun(runID) // refresh to get StartedAt
 	r.emitEvent(run, "Run started")
 	r.emitLog(runID, "stdout", []byte(fmt.Sprintf("=== Starting run %s (type: %s) ===\n", runID, run.Type)))
 
-	// Update machine phase
+	// Update machine phase to PROVISIONING (lifecycle moved out of store)
 	lifecycle.SetMachinePhase(machine, pb.MachineStatus_PROVISIONING)
 	machine.Status.ActiveRunId = runID
+	r.store.UpdateMachine(machine)
 
 	// Execute steps
 	var lastErr error
@@ -299,8 +311,8 @@ func (r *Runner) executeRun(ctx context.Context, runID string) {
 
 		stepStatus.State = pb.StepStatus_RUNNING
 		r.store.UpdateRunStep(runID, stepStatus)
-		run.CurrentStep = step.Name
-		r.emitEvent(run, fmt.Sprintf("Step %s started", step.Name))
+		// Emit event with fresh run state from store (includes StepStatus[])
+		r.emitEventFromStore(runID, fmt.Sprintf("Step %s started", step.Name))
 
 		// Execute with retries
 		maxRetries := int(step.MaxRetries)
@@ -340,14 +352,14 @@ func (r *Runner) executeRun(ctx context.Context, runID string) {
 			stepStatus.State = pb.StepStatus_FAILED
 			stepStatus.Message = stepErr.Error()
 			r.store.UpdateRunStep(runID, stepStatus)
-			r.emitEvent(run, fmt.Sprintf("Step %s failed: %v", step.Name, stepErr))
+			r.emitEventFromStore(runID, fmt.Sprintf("Step %s failed: %v", step.Name, stepErr))
 			lastErr = stepErr
 			break
 		}
 
 		stepStatus.State = pb.StepStatus_SUCCEEDED
 		r.store.UpdateRunStep(runID, stepStatus)
-		r.emitEvent(run, fmt.Sprintf("Step %s succeeded", step.Name))
+		r.emitEventFromStore(runID, fmt.Sprintf("Step %s succeeded", step.Name))
 
 		// Track specific step completions
 		switch step.Kind.(type) {

@@ -436,9 +436,10 @@ func TestRunner_RunNotPending(t *testing.T) {
 	// Complete the run first
 	s.CompleteRun(run.RunId, pb.Run_SUCCEEDED)
 
+	// StartRun on a non-pending run should be idempotent success (no error)
 	err := runner.StartRun(context.Background(), run.RunId)
-	if err == nil {
-		t.Error("Expected error for non-pending run")
+	if err != nil {
+		t.Errorf("Expected idempotent success for completed run, got error: %v", err)
 	}
 }
 
@@ -646,5 +647,51 @@ func TestRunner_VerifyRequiredForInCustomerCluster(t *testing.T) {
 	// Verify machine is IN_SERVICE
 	if finalMachine.Status.Phase != pb.MachineStatus_IN_SERVICE {
 		t.Errorf("Expected IN_SERVICE, got %v", finalMachine.Status.Phase)
+	}
+}
+
+func TestRunner_StartRun_DuplicatePrevention(t *testing.T) {
+	runner, s := setupRunner(t)
+
+	// Use slower config so run takes time to complete
+	cfg := fake.DefaultConfig()
+	cfg.RebootDuration = 500 * time.Millisecond
+	p := fake.New(cfg, nil)
+	runner.provider = p
+
+	machine := createTestMachine(t, s)
+	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+
+	// Call StartRun twice quickly - only one should actually execute
+	err1 := runner.StartRun(context.Background(), run.RunId)
+	err2 := runner.StartRun(context.Background(), run.RunId)
+
+	// Both should succeed (idempotent)
+	if err1 != nil {
+		t.Errorf("First StartRun failed: %v", err1)
+	}
+	if err2 != nil {
+		t.Errorf("Second StartRun failed: %v", err2)
+	}
+
+	// Wait for run to complete
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		r, ok := s.GetRun(run.RunId)
+		if ok && (r.Phase == pb.Run_SUCCEEDED || r.Phase == pb.Run_FAILED) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Verify run succeeded (only executed once)
+	finalRun, _ := s.GetRun(run.RunId)
+	if finalRun.Phase != pb.Run_SUCCEEDED {
+		t.Errorf("Expected SUCCEEDED, got %v", finalRun.Phase)
+	}
+
+	// Verify only one step execution (reboot plan has one step)
+	if len(finalRun.Steps) != 1 {
+		t.Errorf("Expected 1 step, got %d", len(finalRun.Steps))
 	}
 }

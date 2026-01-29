@@ -322,10 +322,15 @@ func TestMachineStatusUpdatedOnRunCompletion(t *testing.T) {
 
 	run, _, _ := s.CreateRunIfNotExists("req-1", "m-1", "REPAVE", "")
 
-	// Machine should be PROVISIONING
+	// Machine should still be FACTORY_READY (store no longer sets PROVISIONING)
+	// The executor is responsible for setting PROVISIONING when it starts execution
 	machine, _ := s.GetMachine("m-1")
-	if machine.Status.Phase != pb.MachineStatus_PROVISIONING {
-		t.Errorf("Expected PROVISIONING, got %v", machine.Status.Phase)
+	if machine.Status.Phase != pb.MachineStatus_FACTORY_READY {
+		t.Errorf("Expected FACTORY_READY, got %v", machine.Status.Phase)
+	}
+	// But ActiveRunId should be set
+	if machine.Status.ActiveRunId != run.RunId {
+		t.Errorf("Expected ActiveRunId %s, got %s", run.RunId, machine.Status.ActiveRunId)
 	}
 
 	// Complete run successfully
@@ -337,9 +342,9 @@ func TestMachineStatusUpdatedOnRunCompletion(t *testing.T) {
 	if machine.Status.ActiveRunId != "" {
 		t.Errorf("Expected empty ActiveRunId, got %v", machine.Status.ActiveRunId)
 	}
-	// Phase should still be PROVISIONING (executor updates it, not store)
-	if machine.Status.Phase != pb.MachineStatus_PROVISIONING {
-		t.Errorf("Expected phase to remain PROVISIONING, got %v", machine.Status.Phase)
+	// Phase should still be FACTORY_READY (executor updates it, not store)
+	if machine.Status.Phase != pb.MachineStatus_FACTORY_READY {
+		t.Errorf("Expected phase to remain FACTORY_READY, got %v", machine.Status.Phase)
 	}
 }
 
@@ -458,5 +463,50 @@ func TestCancelCompletedRunFails(t *testing.T) {
 	_, err := s.CancelRun(run.RunId)
 	if err == nil {
 		t.Error("Expected error when canceling completed run")
+	}
+}
+
+func TestTryTransitionRunPhase(t *testing.T) {
+	s := New()
+	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
+
+	run, _, _ := s.CreateRunIfNotExists("req-1", "m-1", "REPAVE", "")
+
+	// Run starts as PENDING
+	if run.Phase != pb.Run_PENDING {
+		t.Fatalf("Expected PENDING, got %v", run.Phase)
+	}
+
+	// Transition PENDING -> RUNNING should succeed
+	ok, err := s.TryTransitionRunPhase(run.RunId, pb.Run_PENDING, pb.Run_RUNNING)
+	if err != nil {
+		t.Fatalf("TryTransitionRunPhase failed: %v", err)
+	}
+	if !ok {
+		t.Error("Expected transition to succeed")
+	}
+
+	// Verify the run is now RUNNING with StartedAt set
+	updatedRun, _ := s.GetRun(run.RunId)
+	if updatedRun.Phase != pb.Run_RUNNING {
+		t.Errorf("Expected RUNNING, got %v", updatedRun.Phase)
+	}
+	if updatedRun.StartedAt == nil {
+		t.Error("Expected StartedAt to be set")
+	}
+
+	// Second transition attempt PENDING -> RUNNING should fail (already RUNNING)
+	ok, err = s.TryTransitionRunPhase(run.RunId, pb.Run_PENDING, pb.Run_RUNNING)
+	if err != nil {
+		t.Fatalf("TryTransitionRunPhase should not error: %v", err)
+	}
+	if ok {
+		t.Error("Expected transition to fail (run is no longer PENDING)")
+	}
+
+	// Transition for non-existent run should error
+	_, err = s.TryTransitionRunPhase("nonexistent", pb.Run_PENDING, pb.Run_RUNNING)
+	if err == nil {
+		t.Error("Expected error for non-existent run")
 	}
 }

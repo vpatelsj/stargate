@@ -202,7 +202,9 @@ func (s *Store) CreateRunIfNotExists(requestID, machineID, runType, planID strin
 		machine.Status = &pb.MachineStatus{}
 	}
 	machine.Status.ActiveRunId = runID
-	machine.Status.Phase = pb.MachineStatus_PROVISIONING
+	// NOTE: We do NOT set machine.Status.Phase here.
+	// The executor is responsible for setting PROVISIONING when it starts execution.
+	// This keeps lifecycle semantics out of the store.
 
 	return cloneRun(run), true, nil
 }
@@ -346,4 +348,33 @@ func (s *Store) SetRunPhase(runID string, phase pb.Run_Phase) error {
 		run.StartedAt = timestamppb.Now()
 	}
 	return nil
+}
+
+// TryTransitionRunPhase atomically transitions a run from one phase to another.
+// Returns (true, nil) if the transition succeeded.
+// Returns (false, nil) if the run is already in a different phase (including terminal phases).
+// Returns (false, error) only if the run doesn't exist.
+func (s *Store) TryTransitionRunPhase(runID string, from, to pb.Run_Phase) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	run, ok := s.runs[runID]
+	if !ok {
+		return false, fmt.Errorf("run %q not found", runID)
+	}
+
+	// If already in target phase, or different from expected, no transition
+	if run.Phase != from {
+		return false, nil
+	}
+
+	run.Phase = to
+	if to == pb.Run_RUNNING && run.StartedAt == nil {
+		run.StartedAt = timestamppb.Now()
+	}
+	if to == pb.Run_SUCCEEDED || to == pb.Run_FAILED || to == pb.Run_CANCELED {
+		run.FinishedAt = timestamppb.Now()
+	}
+
+	return true, nil
 }

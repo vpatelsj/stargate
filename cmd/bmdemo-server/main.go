@@ -155,14 +155,31 @@ func (s *machineServer) ListMachines(ctx context.Context, req *pb.ListMachinesRe
 	return &pb.ListMachinesResponse{Machines: machines}, nil
 }
 
+// UpdateMachine updates a machine's Spec and Labels.
+// NOTE: Status changes from clients are ignored - status is owned by the backend/executor.
+// This prevents clients from accidentally corrupting machine lifecycle state.
 func (s *machineServer) UpdateMachine(ctx context.Context, req *pb.UpdateMachineRequest) (*pb.Machine, error) {
 	if req.Machine == nil {
 		return nil, status.Error(codes.InvalidArgument, "machine is required")
 	}
 
-	m, err := s.store.UpdateMachine(req.Machine)
+	// Get existing machine to preserve status
+	existing, ok := s.store.GetMachine(req.Machine.MachineId)
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "machine %q not found", req.Machine.MachineId)
+	}
+
+	// Only update Spec and Labels - ignore Status from client
+	if req.Machine.Spec != nil {
+		existing.Spec = req.Machine.Spec
+	}
+	if req.Machine.Labels != nil {
+		existing.Labels = req.Machine.Labels
+	}
+
+	m, err := s.store.UpdateMachine(existing)
 	if err != nil {
-		return nil, status.Errorf(codes.NotFound, "%v", err)
+		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
 
 	s.logger.Info("updated machine", "machine_id", m.MachineId)
