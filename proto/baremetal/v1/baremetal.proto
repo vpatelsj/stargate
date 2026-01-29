@@ -1,0 +1,192 @@
+syntax = "proto3";
+package baremetal.v1;
+
+option go_package = "github.com/vpatelsj/stargate/gen/baremetal/v1;baremetalv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+service MachineService {
+  rpc RegisterMachine(RegisterMachineRequest) returns (Machine);
+  rpc GetMachine(GetMachineRequest) returns (Machine);
+  rpc ListMachines(ListMachinesRequest) returns (ListMachinesResponse);
+  rpc UpdateMachine(UpdateMachineRequest) returns (Machine);
+}
+
+service PlanService {
+  rpc GetPlan(GetPlanRequest) returns (Plan);
+  rpc ListPlans(ListPlansRequest) returns (ListPlansResponse);
+}
+
+service RunService {
+  rpc StartRun(StartRunRequest) returns (Run);
+  rpc GetRun(GetRunRequest) returns (Run);
+  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+  rpc CancelRun(CancelRunRequest) returns (Run);
+
+  rpc WatchRuns(WatchRunsRequest) returns (stream RunEvent);
+  rpc StreamRunLogs(StreamRunLogsRequest) returns (stream LogChunk);
+}
+
+message Machine {
+  string machine_id = 1;
+
+  MachineSpec spec = 2;
+  MachineStatus status = 3;
+
+  map<string,string> labels = 4;
+}
+
+message MachineSpec {
+  string provider = 1;                // e.g., "boulder", "nebius", "tensorwave"
+  repeated string mac_addresses = 2;
+  string serial = 3;
+
+  string ssh_endpoint = 10;           // e.g., via router/jumphost path
+  string bmc_address = 11;            // optional
+  string rack = 12;                   // optional
+
+  // Optional: where this machine should join after repave
+  TargetClusterRef target_cluster = 20;
+}
+
+message TargetClusterRef {
+  string cluster_id = 1;
+  string kubeconfig_secret_ref = 2;   // impl-defined (could be a secret name, vault ref, etc.)
+}
+
+message MachineStatus {
+  enum Phase {
+    PHASE_UNSPECIFIED = 0;
+    FACTORY_READY = 1;
+    READY = 2;
+    PROVISIONING = 3;
+    IN_SERVICE = 4;
+    MAINTENANCE = 5;
+    RMA = 6;
+    RETIRED = 7;
+  }
+  Phase phase = 1;
+
+  repeated Condition conditions = 2;
+  string active_run_id = 3;
+  google.protobuf.Timestamp last_seen = 4;
+}
+
+message Condition {
+  string type = 1; // Reachable, InCustomerCluster, NeedsIntervention, ...
+  bool status = 2;
+  string reason = 3;
+  string message = 4;
+  google.protobuf.Timestamp last_transition_time = 5;
+}
+
+message Plan {
+  string plan_id = 1;
+  string display_name = 2;
+  repeated Step steps = 3;
+}
+
+message Step {
+  string name = 1;
+
+  oneof kind {
+    SshCommand ssh = 10;
+    Reboot reboot = 11;
+    SetNetboot netboot = 12;
+    RepaveImage repave = 13;
+    KubeadmJoin join = 14;
+    VerifyInCluster verify = 15;
+    NetReconfig net = 16;
+  }
+
+  int32 timeout_seconds = 50;
+  int32 max_retries = 51;
+}
+
+message SshCommand { string script_ref = 1; map<string,string> args = 2; }
+message Reboot { bool force = 1; }
+message SetNetboot { string profile = 1; }
+message RepaveImage { string image_ref = 1; string cloud_init_ref = 2; }
+message KubeadmJoin { TargetClusterRef target_cluster = 1; }
+message VerifyInCluster { TargetClusterRef target_cluster = 1; }
+message NetReconfig { map<string,string> params = 1; }
+
+message Run {
+  string run_id = 1;
+  string machine_id = 2;
+
+  enum Phase { RUN_PHASE_UNSPECIFIED=0; PENDING=1; RUNNING=2; SUCCEEDED=3; FAILED=4; CANCELED=5; }
+  Phase phase = 3;
+
+  string request_id = 4;     // idempotency key
+  string type = 5;           // "REPAVE", "UPGRADE", "RMA", ...
+
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp started_at = 11;
+  google.protobuf.Timestamp finished_at = 12;
+
+  string current_step = 20;
+  repeated StepStatus steps = 21;
+  ErrorStatus error = 22;
+}
+
+message StepStatus {
+  string name = 1;
+  enum State { STATE_UNSPECIFIED=0; WAITING=1; RUNNING=2; SUCCEEDED=3; FAILED=4; }
+  State state = 2;
+  int32 retry_count = 3;
+  google.protobuf.Timestamp started_at = 4;
+  google.protobuf.Timestamp finished_at = 5;
+  string message = 6;
+}
+
+message ErrorStatus {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+  map<string,string> details = 4;
+}
+
+message RunEvent {
+  google.protobuf.Timestamp ts = 1;
+  Run snapshot = 2;
+  string message = 3;
+}
+
+message LogChunk {
+  google.protobuf.Timestamp ts = 1;
+  string run_id = 2;
+  string stream = 3; // stdout|stderr
+  bytes data = 4;
+}
+
+/*** Requests ***/
+message RegisterMachineRequest { Machine machine = 1; }
+message GetMachineRequest { string machine_id = 1; }
+message ListMachinesRequest { int32 page_size = 1; string page_token = 2; string filter = 3; }
+message ListMachinesResponse { repeated Machine machines = 1; string next_page_token = 2; }
+message UpdateMachineRequest { Machine machine = 1; }
+
+message GetPlanRequest { string plan_id = 1; }
+message ListPlansRequest { int32 page_size = 1; string page_token = 2; }
+message ListPlansResponse { repeated Plan plans = 1; string next_page_token = 2; }
+
+message StartRunRequest {
+  string machine_id = 1;
+  string request_id = 2;  // required for idempotency
+
+  string type = 3;        // REPAVE/UPGRADE/NET_RECONFIG/RMA/REBOOT
+  oneof plan_source {
+    string plan_id = 10;
+    Plan inline_plan = 11;
+  }
+  map<string,string> params = 12;
+}
+message GetRunRequest { string run_id = 1; }
+message ListRunsRequest { int32 page_size=1; string page_token=2; string filter=3; }
+message ListRunsResponse { repeated Run runs=1; string next_page_token=2; }
+message CancelRunRequest { string run_id=1; }
+
+message WatchRunsRequest { string filter = 1; }
+message StreamRunLogsRequest { string run_id = 1; }
