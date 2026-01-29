@@ -316,6 +316,50 @@ func TestUpdateRunStep(t *testing.T) {
 	}
 }
 
+// TestUpdateRunStep_ClonesInput verifies that UpdateRunStep clones the input
+// step, so mutations to the original do not affect the stored copy.
+func TestUpdateRunStep_ClonesInput(t *testing.T) {
+	s := New()
+	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
+	run, _, _ := s.CreateRunIfNotExists("req-1", "m-1", "REPAVE", "")
+
+	// Create a step and store it
+	originalStep := &pb.StepStatus{
+		Name:       "test-step",
+		State:      pb.StepStatus_RUNNING,
+		Message:    "initial message",
+		RetryCount: 0,
+	}
+	err := s.UpdateRunStep(run.RunId, originalStep)
+	if err != nil {
+		t.Fatalf("UpdateRunStep failed: %v", err)
+	}
+
+	// Mutate the original step after storing
+	originalStep.State = pb.StepStatus_FAILED
+	originalStep.Message = "mutated message"
+	originalStep.RetryCount = 99
+
+	// Fetch the run and verify the stored step was NOT affected
+	r, ok := s.GetRun(run.RunId)
+	if !ok {
+		t.Fatal("Run not found")
+	}
+	if len(r.Steps) != 1 {
+		t.Fatalf("Expected 1 step, got %d", len(r.Steps))
+	}
+	storedStep := r.Steps[0]
+	if storedStep.State != pb.StepStatus_RUNNING {
+		t.Errorf("Expected stored step state RUNNING, got %v (mutation leaked)", storedStep.State)
+	}
+	if storedStep.Message != "initial message" {
+		t.Errorf("Expected stored message 'initial message', got %q (mutation leaked)", storedStep.Message)
+	}
+	if storedStep.RetryCount != 0 {
+		t.Errorf("Expected retry count 0, got %d (mutation leaked)", storedStep.RetryCount)
+	}
+}
+
 func TestMachineStatusUpdatedOnRunCompletion(t *testing.T) {
 	s := New()
 	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})

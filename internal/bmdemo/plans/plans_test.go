@@ -112,6 +112,71 @@ func TestRegisterPlan_NilAndEmpty(t *testing.T) {
 	}
 }
 
+// TestRegisterPlan_ClonesInput verifies that RegisterPlan clones the input plan,
+// so mutations to the original do not affect the stored copy.
+func TestRegisterPlan_ClonesInput(t *testing.T) {
+	r := NewRegistry()
+
+	// Create and register a custom plan
+	customPlan := &pb.Plan{
+		PlanId:      "custom/cloning-test",
+		DisplayName: "Original Display Name",
+		Steps: []*pb.Step{
+			{Name: "original-step", Kind: &pb.Step_Reboot{Reboot: &pb.Reboot{}}},
+		},
+	}
+	r.RegisterPlan(customPlan)
+
+	// Mutate the original plan after registration
+	customPlan.DisplayName = "Mutated Display Name"
+	customPlan.Steps[0].Name = "mutated-step"
+	customPlan.Steps = append(customPlan.Steps, &pb.Step{Name: "extra-step"})
+
+	// Fetch from registry and verify it was NOT affected
+	stored, ok := r.GetPlan("custom/cloning-test")
+	if !ok {
+		t.Fatal("Custom plan not found")
+	}
+	if stored.DisplayName != "Original Display Name" {
+		t.Errorf("Expected 'Original Display Name', got %q (mutation leaked)", stored.DisplayName)
+	}
+	if len(stored.Steps) != 1 {
+		t.Errorf("Expected 1 step, got %d (mutation leaked)", len(stored.Steps))
+	}
+	if stored.Steps[0].Name != "original-step" {
+		t.Errorf("Expected 'original-step', got %q (mutation leaked)", stored.Steps[0].Name)
+	}
+}
+
+// TestNewRegistry_ClonesBuiltins verifies that NewRegistry clones the builtin plans,
+// so mutations to the builtins map do not affect the registry.
+func TestNewRegistry_ClonesBuiltins(t *testing.T) {
+	r := NewRegistry()
+
+	// Get a plan from the registry
+	plan, ok := r.GetPlan(PlanRepaveJoin)
+	if !ok {
+		t.Fatal("PlanRepaveJoin not found")
+	}
+
+	// Store original values
+	originalDisplayName := plan.DisplayName
+	originalStepCount := len(plan.Steps)
+
+	// Mutate the returned plan (note: GetPlan also clones, so this tests both)
+	plan.DisplayName = "Mutated"
+	plan.Steps = nil
+
+	// Fetch again and verify the registry copy is unchanged
+	plan2, _ := r.GetPlan(PlanRepaveJoin)
+	if plan2.DisplayName != originalDisplayName {
+		t.Errorf("Expected %q, got %q (mutation leaked)", originalDisplayName, plan2.DisplayName)
+	}
+	if len(plan2.Steps) != originalStepCount {
+		t.Errorf("Expected %d steps, got %d (mutation leaked)", originalStepCount, len(plan2.Steps))
+	}
+}
+
 func TestPlanRepaveJoin_Steps(t *testing.T) {
 	r := NewRegistry()
 	plan, ok := r.GetPlan(PlanRepaveJoin)

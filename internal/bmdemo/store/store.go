@@ -2,6 +2,7 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -10,6 +11,13 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	pb "github.com/vpatelsj/stargate/gen/baremetal/v1"
+)
+
+// Sentinel errors for typed error handling
+var (
+	ErrMachineNotFound     = errors.New("machine not found")
+	ErrMachineHasActiveRun = errors.New("machine has active run")
+	ErrRunNotFound         = errors.New("run not found")
 )
 
 // cloneMachine returns a deep copy of a machine.
@@ -136,6 +144,10 @@ func (s *Store) UpdateMachine(m *pb.Machine) (*pb.Machine, error) {
 // Returns the run and whether it was newly created (true) or already existed (false).
 // Enforces that only one run can be active per machine at a time.
 // Idempotency is scoped to (machine_id, request_id) tuple.
+//
+// Errors returned:
+//   - ErrMachineNotFound if machine doesn't exist
+//   - ErrMachineHasActiveRun if machine already has an active run
 func (s *Store) CreateRunIfNotExists(requestID, machineID, runType, planID string) (*pb.Run, bool, error) {
 	s.mu.RLock()
 	if requestID != "" {
@@ -149,13 +161,13 @@ func (s *Store) CreateRunIfNotExists(requestID, machineID, runType, planID strin
 
 	if _, ok := s.machines[machineID]; !ok {
 		s.mu.RUnlock()
-		return nil, false, fmt.Errorf("machine %q not found", machineID)
+		return nil, false, fmt.Errorf("%w: %q", ErrMachineNotFound, machineID)
 	}
 
 	machineLock, ok := s.machineLocks[machineID]
 	if !ok {
 		s.mu.RUnlock()
-		return nil, false, fmt.Errorf("machine %q lock not found", machineID)
+		return nil, false, fmt.Errorf("%w: %q lock not found", ErrMachineNotFound, machineID)
 	}
 	s.mu.RUnlock()
 
@@ -176,12 +188,12 @@ func (s *Store) CreateRunIfNotExists(requestID, machineID, runType, planID strin
 	// that may have been replaced by concurrent UpsertMachine.
 	machine, ok := s.machines[machineID]
 	if !ok {
-		return nil, false, fmt.Errorf("machine %q not found", machineID)
+		return nil, false, fmt.Errorf("%w: %q", ErrMachineNotFound, machineID)
 	}
 
 	if s.machineRunning[machineID] {
 		activeRunID := machine.Status.GetActiveRunId()
-		return nil, false, fmt.Errorf("machine %q already has active run %q", machineID, activeRunID)
+		return nil, false, fmt.Errorf("%w: %q has active run %q", ErrMachineHasActiveRun, machineID, activeRunID)
 	}
 
 	runID := fmt.Sprintf("run-%d", time.Now().UnixNano())
@@ -313,8 +325,21 @@ func (s *Store) clearMachineActiveRun(machineID string) {
 	}
 }
 
+// cloneStepStatus returns a deep copy of a step status.
+func cloneStepStatus(s *pb.StepStatus) *pb.StepStatus {
+	if s == nil {
+		return nil
+	}
+	return proto.Clone(s).(*pb.StepStatus)
+}
+
 // UpdateRunStep adds or updates a step status for a run.
+// The step is cloned before storing to prevent external mutation.
 func (s *Store) UpdateRunStep(runID string, step *pb.StepStatus) error {
+	if step == nil {
+		return fmt.Errorf("step is nil")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -323,19 +348,22 @@ func (s *Store) UpdateRunStep(runID string, step *pb.StepStatus) error {
 		return fmt.Errorf("run %q not found", runID)
 	}
 
+	// Clone the step to prevent external mutation from affecting store state
+	stepClone := cloneStepStatus(step)
+
 	found := false
 	for i, existing := range run.Steps {
-		if existing.Name == step.Name {
-			run.Steps[i] = step
+		if existing.Name == stepClone.Name {
+			run.Steps[i] = stepClone
 			found = true
 			break
 		}
 	}
 	if !found {
-		run.Steps = append(run.Steps, step)
+		run.Steps = append(run.Steps, stepClone)
 	}
 
-	run.CurrentStep = step.Name
+	run.CurrentStep = stepClone.Name
 	return nil
 }
 

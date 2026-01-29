@@ -193,9 +193,9 @@ func NewRegistry() *Registry {
 	r := &Registry{
 		plans: make(map[string]*pb.Plan),
 	}
-	// Copy built-in plans
+	// Clone built-in plans so the registry is immutable from outside mutation
 	for id, plan := range builtinPlans {
-		r.plans[id] = plan
+		r.plans[id] = clonePlan(plan)
 	}
 	return r
 }
@@ -227,9 +227,10 @@ func (r *Registry) ListPlans() []*pb.Plan {
 }
 
 // RegisterPlan adds a custom plan to the registry.
+// The plan is cloned before storing so the registry is immutable from outside mutation.
 func (r *Registry) RegisterPlan(plan *pb.Plan) {
 	if plan != nil && plan.PlanId != "" {
-		r.plans[plan.PlanId] = plan
+		r.plans[plan.PlanId] = clonePlan(plan)
 	}
 }
 

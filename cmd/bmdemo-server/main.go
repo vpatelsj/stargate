@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -76,11 +77,17 @@ func main() {
 	// Register services
 	machineService := &machineServer{store: s, logger: logger.With("service", "machine")}
 	planService := &planServer{plans: pl, logger: logger.With("service", "plan")}
+
+	// Create a context for run execution that's canceled on server shutdown.
+	// This is separate from RPC request contexts which are short-lived.
+	runCtx, runCancel := context.WithCancel(context.Background())
+
 	runService := &runServer{
 		store:  s,
 		runner: runner,
 		plans:  pl,
 		logger: logger.With("service", "run"),
+		runCtx: runCtx,
 	}
 
 	pb.RegisterMachineServiceServer(grpcServer, machineService)
@@ -104,6 +111,7 @@ func main() {
 	go func() {
 		<-ctx.Done()
 		slog.Info("shutting down server")
+		runCancel() // Cancel the run execution context
 		runner.Shutdown()
 		grpcServer.GracefulStop()
 	}()
@@ -219,6 +227,7 @@ type runServer struct {
 	runner *executor.Runner
 	plans  *plans.Registry
 	logger *slog.Logger
+	runCtx context.Context // Long-lived context for run execution (not tied to RPC)
 }
 
 func (s *runServer) StartRun(ctx context.Context, req *pb.StartRunRequest) (*pb.Run, error) {
@@ -254,12 +263,11 @@ func (s *runServer) StartRun(ctx context.Context, req *pb.StartRunRequest) (*pb.
 	// - Creating new run if no conflicts
 	run, created, err := s.store.CreateRunIfNotExists(req.RequestId, req.MachineId, runType, planID)
 	if err != nil {
-		errMsg := err.Error()
-		// Map specific errors to gRPC codes
-		if contains(errMsg, "not found") {
+		// Map sentinel errors to gRPC codes
+		if errors.Is(err, store.ErrMachineNotFound) {
 			return nil, status.Errorf(codes.NotFound, "%v", err)
 		}
-		if contains(errMsg, "already has active run") {
+		if errors.Is(err, store.ErrMachineHasActiveRun) {
 			return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
 		}
 		s.logger.Error("failed to create run",
@@ -277,8 +285,9 @@ func (s *runServer) StartRun(ctx context.Context, req *pb.StartRunRequest) (*pb.
 			"plan_id", planID,
 			"request_id", req.RequestId)
 
-		// Start execution asynchronously
-		if err := s.runner.StartRun(ctx, run.RunId); err != nil {
+		// Start execution asynchronously using the long-lived runCtx
+		// (not the RPC request ctx which is canceled when StartRun returns)
+		if err := s.runner.StartRun(s.runCtx, run.RunId); err != nil {
 			s.logger.Error("failed to start run execution",
 				"run_id", run.RunId,
 				"error", err)
@@ -294,7 +303,7 @@ func (s *runServer) StartRun(ctx context.Context, req *pb.StartRunRequest) (*pb.
 			s.logger.Info("retrying pending run",
 				"run_id", run.RunId,
 				"request_id", req.RequestId)
-			if err := s.runner.StartRun(ctx, run.RunId); err != nil {
+			if err := s.runner.StartRun(s.runCtx, run.RunId); err != nil {
 				s.logger.Error("failed to retry run execution",
 					"run_id", run.RunId,
 					"error", err)
