@@ -299,10 +299,10 @@ func TestUpdateWorkflowStep(t *testing.T) {
 		t.Errorf("Expected 1 step in workflow, got %d", len(wf.Steps))
 	}
 
-	// Check current_stage is set on public operation
+	// current_stage should NOT be set to step name (step names are internal)
 	o, _ := s.GetOperation(op.OperationId)
-	if o.CurrentStage != "step-1" {
-		t.Errorf("Expected current stage step-1, got %s", o.CurrentStage)
+	if o.CurrentStage != "" {
+		t.Errorf("Expected current stage to be empty (step names are internal), got %s", o.CurrentStage)
 	}
 
 	// Update same step

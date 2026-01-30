@@ -202,7 +202,7 @@ func (r *Runner) CancelOperation(operationID string) error {
 	// First, get the operation to access machine info
 	op, ok := r.store.GetOperation(operationID)
 	if !ok {
-		return fmt.Errorf("operation %q not found", operationID)
+		return fmt.Errorf("%w: %q", store.ErrOperationNotFound, operationID)
 	}
 
 	// Always try to cancel in the store first (idempotent)
@@ -304,7 +304,7 @@ func (r *Runner) executeOperation(ctx context.Context, operationID string) {
 		default:
 		}
 
-		r.emitLog(operationID, "stdout", []byte(fmt.Sprintf("\n--- Step %d/%d: %s ---\n", i+1, len(plan.Steps), step.Name)))
+		r.emitLog(operationID, "stdout", []byte(fmt.Sprintf("\n--- Processing step %d/%d ---\n", i+1, len(plan.Steps))))
 
 		// Set step to WAITING then RUNNING using internal workflow types
 		stepStatus := &workflow.StepStatus{
@@ -316,8 +316,8 @@ func (r *Runner) executeOperation(ctx context.Context, operationID string) {
 
 		stepStatus.State = workflow.StepStateRunning
 		r.store.UpdateWorkflowStep(operationID, stepStatus)
-		// Emit event with fresh operation state from store
-		r.emitEventFromStore(operationID, fmt.Sprintf("Step %s started", step.Name))
+		// Emit event without step name (internal workflow detail)
+		r.emitEventFromStore(operationID, fmt.Sprintf("Processing step %d of %d", i+1, len(plan.Steps)))
 
 		// Execute with retries
 		// MaxRetries means retries AFTER the first attempt, so total attempts = 1 + MaxRetries
@@ -350,7 +350,7 @@ func (r *Runner) executeOperation(ctx context.Context, operationID string) {
 				return
 			}
 
-			r.emitLog(operationID, "stderr", []byte(fmt.Sprintf("Step failed: %v\n", stepErr)))
+			r.emitLog(operationID, "stderr", []byte(fmt.Sprintf("Step %d failed: %v\n", i+1, stepErr)))
 			stepStatus.RetryCount = int32(attempt + 1)
 		}
 
@@ -359,14 +359,14 @@ func (r *Runner) executeOperation(ctx context.Context, operationID string) {
 			stepStatus.State = workflow.StepStateFailed
 			stepStatus.Message = stepErr.Error()
 			r.store.UpdateWorkflowStep(operationID, stepStatus)
-			r.emitEventFromStore(operationID, fmt.Sprintf("Step %s failed: %v", step.Name, stepErr))
+			r.emitEventFromStore(operationID, fmt.Sprintf("Step %d of %d failed", i+1, len(plan.Steps)))
 			lastErr = stepErr
 			break
 		}
 
 		stepStatus.State = workflow.StepStateSucceeded
 		r.store.UpdateWorkflowStep(operationID, stepStatus)
-		r.emitEventFromStore(operationID, fmt.Sprintf("Step %s succeeded", step.Name))
+		r.emitEventFromStore(operationID, fmt.Sprintf("Step %d of %d completed", i+1, len(plan.Steps)))
 
 		// Track specific step completions
 		switch step.Kind.(type) {

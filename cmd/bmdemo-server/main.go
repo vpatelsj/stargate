@@ -160,6 +160,15 @@ func (s *machineServer) RegisterMachine(ctx context.Context, req *pb.RegisterMac
 		return nil, status.Error(codes.InvalidArgument, "machine is required")
 	}
 
+	// Force clean status - ignore any client-supplied status
+	// Machines always start in FACTORY_READY with no conditions or active operations
+	req.Machine.Status = &pb.MachineStatus{
+		Phase:             pb.MachineStatus_FACTORY_READY,
+		EffectiveState:    pb.MachineStatus_EFFECTIVE_UNSPECIFIED,
+		ActiveOperationId: "",
+		Conditions:        nil,
+	}
+
 	m, err := s.store.UpsertMachine(req.Machine)
 	if err != nil {
 		s.logger.Error("failed to register machine", "error", err)

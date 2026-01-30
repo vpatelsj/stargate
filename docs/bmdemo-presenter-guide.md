@@ -69,16 +69,13 @@ machine-5    READY          ⛔BLOCK        RMA=✓
 
 ### Step 5: Enter Maintenance & Reimage
 
-> "To reimage a machine, we first enter maintenance mode. This is a safety gate - the API rejects reimage requests on machines in READY phase. Watch the logs and events stream in real-time - you're seeing two gRPC streams interleaved."
+> "To reimage a machine, we first enter maintenance mode. This is a safety gate - the API rejects reimage requests on machines in READY phase. Watch the logs stream in real-time."
 
-**The internal 5-step reimage flow** (not visible in SDK, just logs):
-1. **set-netboot** - Configure PXE/iPXE for network boot
-2. **reboot-to-netboot** - BMC reboot, machine boots from network
-3. **repave-image** - Download image, write to disk, configure bootloader
-4. **join-cluster** - Mint join token, run kubeadm join
-5. **verify-in-cluster** - Confirm node is Ready in K8s
+The server executes an internal multi-step workflow, but clients only see:
+- `phase`: PENDING → RUNNING → SUCCEEDED/FAILED
+- Streaming logs from the provider
 
-**Note:** Clients only see `current_stage` field - the full step list is internal.
+**Note:** Step names and workflow details are NOT exposed in the public API.
 
 ### Step 6: Exit Maintenance
 
@@ -166,7 +163,7 @@ Second request: request_id=demo-idempotent-123 → op-ABC returned immediately (
 
 ### Closing
 
-> "Summary: Type-safe gRPC API with streaming, dual state model (Phase + EffectiveState), idempotent operations, complete observability, extensible Provider interface. Plans and steps are internal - clients only see operation type, phase, and current_stage. This keeps the SDK stable while letting us evolve the workflow engine."
+> "Summary: Type-safe gRPC API with streaming, dual state model (Phase + EffectiveState), idempotent operations, complete observability, extensible Provider interface. Plans and steps are internal - clients only see operation type and phase. This keeps the SDK stable while letting us evolve the workflow engine."
 
 ---
 

@@ -96,7 +96,7 @@ Boolean signals tracked on the machine status:
 
 1. **External API = MachineService + OperationService only**
    - Plans/steps are internal implementation details (not in public proto)
-   - Operations expose only: `type`, `phase`, `current_stage`, `params`, `error`, timestamps
+   - Operations expose only: `type`, `phase`, `params`, `error`, timestamps
    - Internal workflow engine can evolve without breaking SDK consumers
 
 2. **Machine.phase limited to 3 values**
@@ -238,11 +238,8 @@ machine-3    FACTORY  NEW        -          -            -
 
 $ go run ./cmd/bmdemo-cli reimage machine-1
 Operation: def67890...
-→ set-netboot...      ✓
-→ reboot-to-netboot... ✓
-→ repave-image...     ✓
-→ join-cluster...     ✓
-→ verify-in-cluster... ✓
+  Phase: RUNNING
+  Phase: SUCCEEDED
 ✓ SUCCEEDED
 
 $ go run ./cmd/bmdemo-cli exit-maintenance machine-1

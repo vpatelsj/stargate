@@ -439,7 +439,7 @@ func watchAndStreamOperation(ctx context.Context, client pb.OperationServiceClie
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	lastStep := ""
+	lastPhase := op.Phase
 
 	for {
 		select {
@@ -453,15 +453,10 @@ func watchAndStreamOperation(ctx context.Context, client pb.OperationServiceClie
 				continue
 			}
 
-			// Print step transitions
-			if o.CurrentStage != lastStep {
-				if lastStep != "" {
-					fmt.Printf("  ✓ %s\n", lastStep)
-				}
-				if o.CurrentStage != "" {
-					fmt.Printf("→ %s...\n", o.CurrentStage)
-				}
-				lastStep = o.CurrentStage
+			// Print phase transitions (not step names - those are internal)
+			if o.Phase != lastPhase {
+				fmt.Printf("  Phase: %s\n", o.Phase)
+				lastPhase = o.Phase
 			}
 
 			// Check for terminal state

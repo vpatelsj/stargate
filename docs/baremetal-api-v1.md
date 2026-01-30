@@ -44,12 +44,11 @@ Operations are the customer-facing handle for long-running work and expose:
 |-------|-------------|
 | `type` | REBOOT, REIMAGE, ENTER_MAINTENANCE, EXIT_MAINTENANCE |
 | `phase` | PENDING, RUNNING, SUCCEEDED, FAILED, CANCELED |
-| `current_stage` | Human-readable current step name (for progress) |
 | `params` | Key-value parameters for the operation |
 | `error` | Structured error info on failure |
 | Timestamps | `created_at`, `started_at`, `finished_at` |
 
-**Note**: Internal workflow details (plan_id, step list, step status) are NOT exposed
+**Note**: Internal workflow details (plan_id, step names, step list, step status) are NOT exposed
 in the public proto. This separation allows the workflow engine to evolve without
 breaking SDK consumers.
 
@@ -58,9 +57,9 @@ The server maintains an internal workflow engine with:
 - **Plan**: A sequence of typed steps (SSHCommand, Reboot, SetNetboot, etc.)
 - **Step**: Individual actions with timeout, retry, and execution state
 
-This is entirely server-managed. Clients only see:
-- `current_stage`: which step is running (for progress display)
-- `phase`: overall operation state
+This is entirely server-managed. Clients see only:
+- `phase`: overall operation state (PENDING, RUNNING, SUCCEEDED, FAILED, CANCELED)
+- Step names and details are NOT exposed in the public API
 
 ---
 
@@ -185,7 +184,7 @@ sequenceDiagram
     A-->>C: Operation{id, PENDING}
     loop until terminal
         C->>A: GetOperation(id)
-        A-->>C: Operation{phase, current_stage}
+        A-->>C: Operation{phase}
     end
     C->>A: GetOperation(id)
     A-->>C: Operation{SUCCEEDED}
@@ -283,12 +282,11 @@ message Operation {
   string request_id = 3;
   OperationType type = 4;
   Phase phase = 5;
-  string current_stage = 6;       // Human-readable progress indicator
-  map<string, string> params = 7;
-  OperationError error = 8;
-  google.protobuf.Timestamp created_at = 9;
-  google.protobuf.Timestamp started_at = 10;
-  google.protobuf.Timestamp finished_at = 11;
+  map<string, string> params = 6;
+  OperationError error = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp started_at = 9;
+  google.protobuf.Timestamp finished_at = 10;
 
   enum OperationType {
     OPERATION_TYPE_UNSPECIFIED = 0;
@@ -365,7 +363,6 @@ message LogChunk {
   "request_id": "req-456",
   "type": "REIMAGE",
   "phase": "RUNNING",
-  "current_stage": "repave-os",
   "params": {
     "image_ref": "ubuntu-2204-lab"
   },
@@ -384,7 +381,6 @@ message LogChunk {
   "request_id": "req-456",
   "type": "REIMAGE",
   "phase": "SUCCEEDED",
-  "current_stage": "",
   "params": {
     "image_ref": "ubuntu-2204-lab"
   },
@@ -420,7 +416,7 @@ message LogChunk {
 5. **Internal workflow engine**
    - Plans/steps are NOT part of SDK contract
    - Allows workflow engine to evolve without breaking clients
-   - Clients see only `current_stage` for progress display
+   - Clients see only operation phase for progress
 
 6. **Async execution with streaming**
    - Operation RPCs return immediately with handle

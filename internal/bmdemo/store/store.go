@@ -387,10 +387,9 @@ func (s *Store) UpdateWorkflowStep(opID string, step *workflow.StepStatus) error
 		return fmt.Errorf("workflow for operation %q not found", opID)
 	}
 
-	// Also update the public operation's CurrentStage field for visibility
-	if op, ok := s.operations[opID]; ok {
-		op.CurrentStage = step.Name
-	}
+	// NOTE: We intentionally do NOT update op.CurrentStage with step.Name
+	// because step names are internal workflow details that should not be
+	// exposed in the public API.
 
 	// Clone the step to prevent external mutation
 	stepClone := *step
