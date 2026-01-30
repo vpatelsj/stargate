@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	pb "github.com/vpatelsj/stargate/gen/baremetal/v1"
 	"github.com/vpatelsj/stargate/internal/bmdemo/executor"
@@ -153,6 +154,19 @@ func (s *machineServer) populateEffectiveState(m *pb.Machine) {
 	lifecycle.PopulateEffectiveState(m, activeOp)
 }
 
+// sanitizeOperation removes internal workflow engine fields from an Operation
+// before returning it to external callers. This hides plan_id and steps.
+func sanitizeOperation(op *pb.Operation) *pb.Operation {
+	if op == nil {
+		return nil
+	}
+	// Clone to avoid mutating stored data
+	clone := proto.Clone(op).(*pb.Operation)
+	clone.PlanId = ""
+	clone.Steps = nil
+	return clone
+}
+
 func (s *machineServer) RegisterMachine(ctx context.Context, req *pb.RegisterMachineRequest) (*pb.Machine, error) {
 	if req.Machine == nil {
 		return nil, status.Error(codes.InvalidArgument, "machine is required")
@@ -254,7 +268,7 @@ func (s *machineServer) RebootMachine(ctx context.Context, req *pb.RebootMachine
 			"machine %q is in phase %s; reboot requires READY or MAINTENANCE", req.MachineId, phase)
 	}
 
-	return s.startOperation(req.MachineId, req.RequestId, "REBOOT", plans.PlanReboot)
+	return s.startOperation(req.MachineId, req.RequestId, pb.Operation_REBOOT, plans.PlanReboot, nil)
 }
 
 // ReimageMachine starts a reimage operation on a machine.
@@ -278,8 +292,16 @@ func (s *machineServer) ReimageMachine(ctx context.Context, req *pb.ReimageMachi
 			"machine %q is in phase %s; reimage requires MAINTENANCE", req.MachineId, machine.Status.GetPhase())
 	}
 
+	// Store image_ref in operation params
+	params := make(map[string]string)
+	imageRef := req.ImageRef
+	if imageRef == "" {
+		imageRef = "ubuntu-2204-lab" // Default lab image
+	}
+	params["image_ref"] = imageRef
+
 	// Use default reimage plan (server-side plan selection per decision E)
-	return s.startOperation(req.MachineId, req.RequestId, "REIMAGE", plans.PlanRepaveJoin)
+	return s.startOperation(req.MachineId, req.RequestId, pb.Operation_REIMAGE, plans.PlanRepaveJoin, params)
 }
 
 // EnterMaintenance transitions a machine to MAINTENANCE phase.
@@ -296,7 +318,7 @@ func (s *machineServer) EnterMaintenance(ctx context.Context, req *pb.EnterMaint
 		return nil, status.Errorf(codes.NotFound, "machine %q not found", req.MachineId)
 	}
 
-	return s.startOperation(req.MachineId, req.RequestId, "ENTER_MAINTENANCE", "")
+	return s.startOperation(req.MachineId, req.RequestId, pb.Operation_ENTER_MAINTENANCE, "", nil)
 }
 
 // ExitMaintenance transitions a machine out of MAINTENANCE phase to READY.
@@ -319,7 +341,7 @@ func (s *machineServer) ExitMaintenance(ctx context.Context, req *pb.ExitMainten
 			"machine %q is in phase %s; exit-maintenance requires MAINTENANCE", req.MachineId, machine.Status.GetPhase())
 	}
 
-	return s.startOperation(req.MachineId, req.RequestId, "EXIT_MAINTENANCE", "")
+	return s.startOperation(req.MachineId, req.RequestId, pb.Operation_EXIT_MAINTENANCE, "", nil)
 }
 
 // CancelOperation cancels an in-progress operation.
@@ -345,17 +367,17 @@ func (s *machineServer) CancelOperation(ctx context.Context, req *pb.CancelOpera
 	}
 
 	s.logger.Info("cancelled operation", "operation_id", req.OperationId, "phase", op.Phase)
-	return op, nil
+	return sanitizeOperation(op), nil
 }
 
 // startOperation is the shared helper that creates and starts an operation.
 // Enforces idempotency scoped by (machine_id, request_id) and single active operation per machine.
-func (s *machineServer) startOperation(machineID, requestID, opType, planID string) (*pb.Operation, error) {
+func (s *machineServer) startOperation(machineID, requestID string, opType pb.Operation_OperationType, planID string, params map[string]string) (*pb.Operation, error) {
 	// Create operation (idempotent) - this handles:
 	// - Returning existing operation for same (machine_id, request_id)
 	// - Rejecting if machine has a different active operation
 	// - Creating new operation if no conflicts
-	op, created, err := s.store.CreateOperationIfNotExists(requestID, machineID, opType, planID)
+	op, created, err := s.store.CreateOperationIfNotExists(requestID, machineID, opType, planID, params)
 	if err != nil {
 		// Map sentinel errors to gRPC codes
 		if errors.Is(err, store.ErrMachineNotFound) {
@@ -405,7 +427,8 @@ func (s *machineServer) startOperation(machineID, requestID, opType, planID stri
 		}
 	}
 
-	return op, nil
+	// Sanitize before returning to caller (hide plan_id and steps)
+	return sanitizeOperation(op), nil
 }
 
 // ============================================================================
@@ -424,7 +447,7 @@ func (s *operationServer) GetOperation(ctx context.Context, req *pb.GetOperation
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "operation %q not found", req.OperationId)
 	}
-	return op, nil
+	return sanitizeOperation(op), nil
 }
 
 func (s *operationServer) ListOperations(ctx context.Context, req *pb.ListOperationsRequest) (*pb.ListOperationsResponse, error) {
@@ -442,7 +465,13 @@ func (s *operationServer) ListOperations(ctx context.Context, req *pb.ListOperat
 		ops = filtered
 	}
 
-	return &pb.ListOperationsResponse{Operations: ops}, nil
+	// Sanitize all operations before returning
+	sanitized := make([]*pb.Operation, len(ops))
+	for i, op := range ops {
+		sanitized[i] = sanitizeOperation(op)
+	}
+
+	return &pb.ListOperationsResponse{Operations: sanitized}, nil
 }
 
 func (s *operationServer) WatchOperations(req *pb.WatchOperationsRequest, stream pb.OperationService_WatchOperationsServer) error {
@@ -462,6 +491,11 @@ func (s *operationServer) WatchOperations(req *pb.WatchOperationsRequest, stream
 					return
 				}
 			}
+		}
+
+		// Sanitize event snapshot before sending
+		if event.Snapshot != nil {
+			event.Snapshot = sanitizeOperation(event.Snapshot)
 		}
 
 		select {

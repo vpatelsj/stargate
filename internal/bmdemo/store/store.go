@@ -113,6 +113,9 @@ func (s *Store) ListMachines() []*pb.Machine {
 }
 
 // UpdateMachine updates an existing machine. Returns error if not found.
+// This method clones spec and labels to avoid pointer aliasing.
+// Status is backend-owned; if the caller passes a status, it is applied
+// (the server layer is responsible for ensuring clients don't pass status).
 func (s *Store) UpdateMachine(m *pb.Machine) (*pb.Machine, error) {
 	if m == nil {
 		return nil, fmt.Errorf("machine is nil")
@@ -126,14 +129,21 @@ func (s *Store) UpdateMachine(m *pb.Machine) (*pb.Machine, error) {
 		return nil, fmt.Errorf("machine %q not found", m.MachineId)
 	}
 
+	// Clone spec and labels to avoid pointer aliasing (caller should not
+	// be able to mutate the stored machine after this call returns)
 	if m.Spec != nil {
-		existing.Spec = m.Spec
+		existing.Spec = proto.Clone(m.Spec).(*pb.MachineSpec)
 	}
 	if m.Status != nil {
-		existing.Status = m.Status
+		existing.Status = proto.Clone(m.Status).(*pb.MachineStatus)
 	}
 	if m.Labels != nil {
-		existing.Labels = m.Labels
+		// Clone the labels map
+		clonedLabels := make(map[string]string, len(m.Labels))
+		for k, v := range m.Labels {
+			clonedLabels[k] = v
+		}
+		existing.Labels = clonedLabels
 	}
 
 	s.machines[m.MachineId] = existing
@@ -148,7 +158,7 @@ func (s *Store) UpdateMachine(m *pb.Machine) (*pb.Machine, error) {
 // Errors returned:
 //   - ErrMachineNotFound if machine doesn't exist
 //   - ErrMachineHasActiveOperation if machine already has an active operation
-func (s *Store) CreateOperationIfNotExists(requestID, machineID, opType, planID string) (*pb.Operation, bool, error) {
+func (s *Store) CreateOperationIfNotExists(requestID, machineID string, opType pb.Operation_OperationType, planID string, params map[string]string) (*pb.Operation, bool, error) {
 	s.mu.RLock()
 	if requestID != "" {
 		idempotencyKey := machineID + ":" + requestID
@@ -204,6 +214,7 @@ func (s *Store) CreateOperationIfNotExists(requestID, machineID, opType, planID 
 		RequestId:   requestID,
 		Type:        opType,
 		PlanId:      planID,
+		Params:      params,
 		CreatedAt:   timestamppb.Now(),
 	}
 

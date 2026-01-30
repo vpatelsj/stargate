@@ -166,7 +166,8 @@ func (r *Runner) emitLog(operationID, stream string, data []byte) {
 // StartOperation begins executing an operation asynchronously.
 // Returns immediately; operation proceeds in background.
 // Idempotent: calling StartOperation on an already-running or finished operation returns nil.
-func (r *Runner) StartOperation(ctx context.Context, operationID string) error {
+// parentCtx is used as the base context for the operation; canceling it will cancel the operation.
+func (r *Runner) StartOperation(parentCtx context.Context, operationID string) error {
 	// Atomically try to transition from PENDING to RUNNING
 	ok, err := r.store.TryTransitionOperationPhase(operationID, pb.Operation_PENDING, pb.Operation_RUNNING)
 	if err != nil {
@@ -179,8 +180,8 @@ func (r *Runner) StartOperation(ctx context.Context, operationID string) error {
 	}
 
 	// We are the winner - we transitioned PENDING -> RUNNING
-	// Create cancellable context for this operation
-	opCtx, cancel := context.WithCancel(context.Background())
+	// Create cancellable context derived from parentCtx (so server shutdown cancels operations)
+	opCtx, cancel := context.WithCancel(parentCtx)
 
 	r.mu.Lock()
 	r.activeOperations[operationID] = cancel
@@ -195,6 +196,8 @@ func (r *Runner) StartOperation(ctx context.Context, operationID string) error {
 // CancelOperation cancels an operation immediately.
 // It marks the operation as CANCELED in the store, clears machine state, and stops execution.
 // Idempotent: canceling an already-canceled operation returns success.
+// NOTE: Does NOT change machine.phase - phase is imperative intent, only
+// EnterMaintenance/ExitMaintenance should modify it.
 func (r *Runner) CancelOperation(operationID string) error {
 	// First, get the operation to access machine info
 	op, ok := r.store.GetOperation(operationID)
@@ -210,11 +213,9 @@ func (r *Runner) CancelOperation(operationID string) error {
 	}
 
 	// Update machine state for canceled operations
+	// Set OperationCanceled condition but do NOT change phase (phase is imperative intent)
 	machine, ok := r.store.GetMachine(op.MachineId)
 	if ok {
-		// Set machine to MAINTENANCE with OperationCanceled (not NeedsIntervention)
-		// User-initiated cancels are expected; failures set NeedsIntervention.
-		lifecycle.SetMachinePhase(machine, pb.MachineStatus_MAINTENANCE)
 		lifecycle.SetCondition(machine, lifecycle.ConditionOperationCanceled, true, "UserCanceled", "Operation was canceled by user")
 		machine.Status.ActiveOperationId = ""
 		r.store.UpdateMachine(machine)
@@ -279,7 +280,13 @@ func (r *Runner) executeOperation(ctx context.Context, operationID string) {
 	// Emit the start event with the current operation state
 	op, _ = r.store.GetOperation(operationID) // refresh to get StartedAt
 	r.emitEvent(op, "Operation started")
-	r.emitLog(operationID, "stdout", []byte(fmt.Sprintf("=== Starting operation %s (type: %s) ===\n", operationID, op.Type)))
+
+	// Log operation start with params
+	logMsg := fmt.Sprintf("=== Starting operation %s (type: %s) ===\n", operationID, op.Type)
+	if len(op.Params) > 0 {
+		logMsg += fmt.Sprintf("Parameters: %v\n", op.Params)
+	}
+	r.emitLog(operationID, "stdout", []byte(logMsg))
 
 	// Update machine: set active operation ID
 	machine.Status.ActiveOperationId = operationID
@@ -333,7 +340,7 @@ func (r *Runner) executeOperation(ctx context.Context, operationID string) {
 				}
 			}
 
-			stepErr = r.executeStep(ctx, operationID, machine, step)
+			stepErr = r.executeStep(ctx, op, machine, step)
 			if stepErr == nil {
 				break
 			}
@@ -388,22 +395,22 @@ func (r *Runner) getPlanForOperation(op *pb.Operation) *pb.Plan {
 
 	// Second, map type to default plan
 	switch op.Type {
-	case "REIMAGE", "reimage":
+	case pb.Operation_REIMAGE:
 		if plan, ok := r.plans.GetPlan(plans.PlanRepaveJoin); ok {
 			return plan
 		}
-	case "REBOOT", "reboot":
+	case pb.Operation_REBOOT:
 		if plan, ok := r.plans.GetPlan(plans.PlanReboot); ok {
 			return plan
 		}
-	case "ENTER_MAINTENANCE", "enter_maintenance":
+	case pb.Operation_ENTER_MAINTENANCE:
 		// Simple no-op plan for entering maintenance
 		return &pb.Plan{
 			PlanId:      "plan/enter-maintenance",
 			DisplayName: "Enter Maintenance",
 			Steps:       []*pb.Step{}, // No steps - just a phase transition
 		}
-	case "EXIT_MAINTENANCE", "exit_maintenance":
+	case pb.Operation_EXIT_MAINTENANCE:
 		// Simple no-op plan for exiting maintenance
 		return &pb.Plan{
 			PlanId:      "plan/exit-maintenance",
@@ -418,7 +425,8 @@ func (r *Runner) getPlanForOperation(op *pb.Operation) *pb.Plan {
 }
 
 // executeStep executes a single step.
-func (r *Runner) executeStep(ctx context.Context, operationID string, machine *pb.Machine, step *pb.Step) error {
+// The operation is passed to access params like image_ref.
+func (r *Runner) executeStep(ctx context.Context, op *pb.Operation, machine *pb.Machine, step *pb.Step) error {
 	timeout := time.Duration(step.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
@@ -426,6 +434,8 @@ func (r *Runner) executeStep(ctx context.Context, operationID string, machine *p
 
 	stepCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	operationID := op.OperationId
 
 	switch kind := step.Kind.(type) {
 	case *pb.Step_Ssh:
@@ -438,7 +448,12 @@ func (r *Runner) executeStep(ctx context.Context, operationID string, machine *p
 		return r.provider.SetNetboot(stepCtx, operationID, machine, kind.Netboot.Profile)
 
 	case *pb.Step_Repave:
-		return r.provider.Repave(stepCtx, operationID, machine, kind.Repave.ImageRef, kind.Repave.CloudInitRef)
+		// Use image_ref from operation params if available, otherwise use plan default
+		imageRef := kind.Repave.ImageRef
+		if opImageRef := op.Params["image_ref"]; opImageRef != "" {
+			imageRef = opImageRef
+		}
+		return r.provider.Repave(stepCtx, operationID, machine, imageRef, kind.Repave.CloudInitRef)
 
 	case *pb.Step_Join:
 		// Mint join material and join
@@ -495,6 +510,7 @@ func (r *Runner) calculateBackoff(attempt int) time.Duration {
 }
 
 // handlePanic handles a panic during operation execution, cleaning up state properly.
+// NOTE: Does NOT change machine.phase - phase is imperative intent. Sets NeedsIntervention instead.
 func (r *Runner) handlePanic(operationID string, recovered interface{}) {
 	panicMsg := fmt.Sprintf("panic: %v", recovered)
 	stackTrace := string(debug.Stack())
@@ -520,10 +536,10 @@ func (r *Runner) handlePanic(operationID string, recovered interface{}) {
 		return
 	}
 
-	// Update machine state: MAINTENANCE + NeedsIntervention
+	// Update machine state: set NeedsIntervention but do NOT change phase
+	// Phase is imperative intent - only EnterMaintenance/ExitMaintenance should modify it
 	machine, ok := r.store.GetMachine(op.MachineId)
 	if ok {
-		lifecycle.SetMachinePhase(machine, pb.MachineStatus_MAINTENANCE)
 		lifecycle.SetCondition(machine, lifecycle.ConditionNeedsIntervention, true, "Panic", panicMsg)
 		machine.Status.ActiveOperationId = ""
 		r.store.UpdateMachine(machine)
@@ -546,13 +562,14 @@ func (r *Runner) failOperation(operationID, message string) {
 }
 
 // failOperationWithMachine marks operation as failed and updates machine state.
+// NOTE: Does NOT change machine.phase - phase is imperative intent. Sets NeedsIntervention instead.
 func (r *Runner) failOperationWithMachine(operationID string, machine *pb.Machine, message string) {
 	r.failOperation(operationID, message)
 
 	// Set NeedsIntervention condition - failures require investigation
+	// Do NOT change phase - phase is imperative intent
 	lifecycle.SetCondition(machine, lifecycle.ConditionNeedsIntervention, true, "OperationFailed", message)
 	machine.Status.ActiveOperationId = ""
-	lifecycle.SetMachinePhase(machine, pb.MachineStatus_MAINTENANCE)
 
 	// Persist the updated machine
 	r.store.UpdateMachine(machine)
@@ -560,6 +577,7 @@ func (r *Runner) failOperationWithMachine(operationID string, machine *pb.Machin
 
 // cancelOperation is called when an operation is canceled via context (internal path).
 // It marks operation as canceled and updates machine state.
+// NOTE: Does NOT change machine.phase - phase is imperative intent.
 func (r *Runner) cancelOperation(operationID string) {
 	// Get operation info before canceling
 	op, ok := r.store.GetOperation(operationID)
@@ -572,9 +590,9 @@ func (r *Runner) cancelOperation(operationID string) {
 
 	// Update machine state - use OperationCanceled (not NeedsIntervention)
 	// Cancellation is a normal operation, not a failure requiring intervention.
+	// Do NOT change phase - phase is imperative intent
 	machine, ok := r.store.GetMachine(op.MachineId)
 	if ok {
-		lifecycle.SetMachinePhase(machine, pb.MachineStatus_MAINTENANCE)
 		lifecycle.SetCondition(machine, lifecycle.ConditionOperationCanceled, true, "Canceled", "Operation was canceled")
 		machine.Status.ActiveOperationId = ""
 		r.store.UpdateMachine(machine)
@@ -588,7 +606,7 @@ func (r *Runner) cancelOperation(operationID string) {
 }
 
 // succeedOperation marks operation as succeeded and updates machine state.
-func (r *Runner) succeedOperation(operationID string, machine *pb.Machine, completedReimage bool, opType string) {
+func (r *Runner) succeedOperation(operationID string, machine *pb.Machine, completedReimage bool, opType pb.Operation_OperationType) {
 	r.store.CompleteOperation(operationID, pb.Operation_SUCCEEDED)
 
 	op, _ := r.store.GetOperation(operationID)
@@ -603,19 +621,20 @@ func (r *Runner) succeedOperation(operationID string, machine *pb.Machine, compl
 	lifecycle.SetCondition(machine, lifecycle.ConditionOperationCanceled, false, "OperationSucceeded", "")
 
 	// Update machine phase based on operation type
+	// NOTE: Only ENTER_MAINTENANCE and EXIT_MAINTENANCE change phase.
+	// Other operations do NOT change phase - phase is imperative intent.
 	switch opType {
-	case "ENTER_MAINTENANCE", "enter_maintenance":
+	case pb.Operation_ENTER_MAINTENANCE:
 		lifecycle.SetMachinePhase(machine, pb.MachineStatus_MAINTENANCE)
-	case "EXIT_MAINTENANCE", "exit_maintenance":
+	case pb.Operation_EXIT_MAINTENANCE:
 		lifecycle.SetMachinePhase(machine, pb.MachineStatus_READY)
-	case "REIMAGE", "reimage":
+	case pb.Operation_REIMAGE:
 		if completedReimage {
 			lifecycle.SetCondition(machine, lifecycle.ConditionProvisioned, true, "ReimageComplete", "Machine successfully reimaged")
 			lifecycle.SetCondition(machine, lifecycle.ConditionInCustomerCluster, true, "JoinVerified", "Node joined and verified in cluster")
 		}
-		// Stay in MAINTENANCE after reimage - operator must explicitly exit maintenance
-		lifecycle.SetMachinePhase(machine, pb.MachineStatus_MAINTENANCE)
-	case "REBOOT", "reboot":
+		// Stay in current phase after reimage - operator must explicitly exit maintenance
+	case pb.Operation_REBOOT:
 		// Keep current phase - reboot doesn't change phase
 	default:
 		// Default: keep current phase

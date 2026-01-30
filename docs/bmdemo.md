@@ -96,23 +96,37 @@ Boolean signals tracked on the machine status:
 
 1. **External API = MachineService + OperationService only**
    - No PlanService exposed to customers
-   - Plans are internal implementation details
+   - Plans/steps are internal implementation details
+   - Operations returned to callers have `plan_id` and `steps` fields hidden (sanitized)
 
 2. **Machine.phase limited to 3 values**
    - FACTORY_READY, READY, MAINTENANCE only
-   - No PROVISIONING, IN_SERVICE, RMA, RETIRED exposed to customers
+   - No PROVISIONING, IN_SERVICE, RMA, RETIRED as phases (these are conditions or effective states)
 
-3. **Streaming via WatchOperations + StreamOperationLogs**
+3. **Phase is imperative intent, not modified by failures**
+   - Failures/cancellations do NOT auto-change phase
+   - Only EnterMaintenance/ExitMaintenance modify phase
+   - Failures set `NeedsIntervention=true`, cancellations set `OperationCanceled=true`
+
+4. **Streaming via WatchOperations + StreamOperationLogs**
    - Real-time status updates
    - Log streaming for debugging
 
-4. **Reimage requires MAINTENANCE**
+5. **Reimage requires MAINTENANCE**
    - Safety gate to prevent accidental reimages
    - Must explicitly enter maintenance first
 
-5. **Status fields are backend-owned**
+6. **Status fields are backend-owned**
    - UpdateMachine ignores any client-supplied phase/effective_state
    - Only Spec and Labels can be updated by clients
+
+7. **Operation.type is an enum**
+   - `REBOOT`, `REIMAGE`, `ENTER_MAINTENANCE`, `EXIT_MAINTENANCE`
+   - Invalid types are rejected at the API layer
+
+8. **image_ref is passed through as operation param**
+   - `ReimageMachine(image_ref="ubuntu-2204")` stores in `Operation.params["image_ref"]`
+   - Fake provider logs the image being used
 
 ## Operation Types
 

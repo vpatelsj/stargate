@@ -105,14 +105,22 @@ message Condition {
 }
 
 // Operation represents an async lifecycle operation on a machine.
-// Customers track progress via phase, current_stage, and optionally steps (informational).
+// Customers track progress via phase, current_stage, and error status.
+// Internal workflow details (plan_id, steps) are hidden from external responses.
 message Operation {
   string operation_id = 1;
   string machine_id = 2;
   string request_id = 3;     // Idempotency key
 
-  // Type of operation: REBOOT, REIMAGE, ENTER_MAINTENANCE, EXIT_MAINTENANCE
-  string type = 4;
+  // Type of operation
+  enum OperationType {
+    OPERATION_TYPE_UNSPECIFIED = 0;
+    REBOOT = 1;
+    REIMAGE = 2;
+    ENTER_MAINTENANCE = 3;
+    EXIT_MAINTENANCE = 4;
+  }
+  OperationType type = 4;
 
   enum Phase {
     PHASE_UNSPECIFIED = 0;
@@ -126,14 +134,17 @@ message Operation {
 
   string current_stage = 6;  // Current step name for progress display
 
-  // Internal plan_id - not exposed to customers in requests
+  // Parameters passed to the operation (e.g., image_ref for reimage)
+  map<string, string> params = 8;
+
+  // Internal plan_id - hidden from external responses (server clears before returning)
   string plan_id = 7;
 
   google.protobuf.Timestamp created_at = 10;
   google.protobuf.Timestamp started_at = 11;
   google.protobuf.Timestamp finished_at = 12;
 
-  // Step statuses - informational, customers don't need to reason about these
+  // Step statuses - hidden from external responses (server clears before returning)
   repeated StepStatus steps = 20;
   ErrorStatus error = 21;
 }

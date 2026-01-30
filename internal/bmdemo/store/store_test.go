@@ -75,7 +75,7 @@ func TestIdempotentCreateOperation(t *testing.T) {
 	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
 
 	// First create with request_id
-	op1, created, err := s.CreateOperationIfNotExists("req-123", "m-1", "REIMAGE", "")
+	op1, created, err := s.CreateOperationIfNotExists("req-123", "m-1", pb.Operation_REIMAGE, "", nil)
 	if err != nil {
 		t.Fatalf("CreateOperationIfNotExists failed: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestIdempotentCreateOperation(t *testing.T) {
 	s.CompleteOperation(op1.OperationId, pb.Operation_SUCCEEDED)
 
 	// Second create with same request_id should return same operation
-	op2, created, err := s.CreateOperationIfNotExists("req-123", "m-1", "REIMAGE", "")
+	op2, created, err := s.CreateOperationIfNotExists("req-123", "m-1", pb.Operation_REIMAGE, "", nil)
 	if err != nil {
 		t.Fatalf("CreateOperationIfNotExists failed: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestIdempotentCreateOperation(t *testing.T) {
 	}
 
 	// Different request_id should create new operation
-	op3, created, err := s.CreateOperationIfNotExists("req-456", "m-1", "REIMAGE", "")
+	op3, created, err := s.CreateOperationIfNotExists("req-456", "m-1", pb.Operation_REIMAGE, "", nil)
 	if err != nil {
 		t.Fatalf("CreateOperationIfNotExists failed: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestNoTwoActiveOperationsPerMachine(t *testing.T) {
 	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
 
 	// Start first operation
-	op1, created, err := s.CreateOperationIfNotExists("req-1", "m-1", "REIMAGE", "")
+	op1, created, err := s.CreateOperationIfNotExists("req-1", "m-1", pb.Operation_REIMAGE, "", nil)
 	if err != nil {
 		t.Fatalf("CreateOperationIfNotExists failed: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestNoTwoActiveOperationsPerMachine(t *testing.T) {
 	}
 
 	// Try to start second operation - should fail
-	_, _, err = s.CreateOperationIfNotExists("req-2", "m-1", "REIMAGE", "")
+	_, _, err = s.CreateOperationIfNotExists("req-2", "m-1", pb.Operation_REIMAGE, "", nil)
 	if err == nil {
 		t.Error("Expected error when creating second operation for same machine")
 	}
@@ -142,7 +142,7 @@ func TestNoTwoActiveOperationsPerMachine(t *testing.T) {
 	}
 
 	// Now we should be able to start a new operation
-	op3, created, err := s.CreateOperationIfNotExists("req-3", "m-1", "REIMAGE", "")
+	op3, created, err := s.CreateOperationIfNotExists("req-3", "m-1", pb.Operation_REIMAGE, "", nil)
 	if err != nil {
 		t.Fatalf("CreateOperationIfNotExists failed after completing first operation: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestConcurrentCreateOperations(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			_, created, err := s.CreateOperationIfNotExists("", "m-1", "REIMAGE", "")
+			_, created, err := s.CreateOperationIfNotExists("", "m-1", pb.Operation_REIMAGE, "", nil)
 			if err != nil {
 				results <- err
 				return
@@ -220,7 +220,7 @@ func TestConcurrentIdempotentRequests(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			op, _, err := s.CreateOperationIfNotExists("idempotent-req", "m-1", "REIMAGE", "")
+			op, _, err := s.CreateOperationIfNotExists("idempotent-req", "m-1", pb.Operation_REIMAGE, "", nil)
 			if err != nil {
 				// May get "already has active operation" error, which is fine
 				return
@@ -247,7 +247,7 @@ func TestCancelOperation(t *testing.T) {
 	s := New()
 	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
 
-	op, _, _ := s.CreateOperationIfNotExists("req-1", "m-1", "REIMAGE", "")
+	op, _, _ := s.CreateOperationIfNotExists("req-1", "m-1", pb.Operation_REIMAGE, "", nil)
 
 	// Cancel the operation
 	cancelled, err := s.CancelOperation(op.OperationId)
@@ -265,7 +265,7 @@ func TestCancelOperation(t *testing.T) {
 	}
 
 	// Should be able to start new operation now
-	_, created, err := s.CreateOperationIfNotExists("req-2", "m-1", "REIMAGE", "")
+	_, created, err := s.CreateOperationIfNotExists("req-2", "m-1", pb.Operation_REIMAGE, "", nil)
 	if err != nil {
 		t.Fatalf("CreateOperationIfNotExists after cancel failed: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestUpdateOperationStep(t *testing.T) {
 	s := New()
 	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
 
-	op, _, _ := s.CreateOperationIfNotExists("req-1", "m-1", "REIMAGE", "")
+	op, _, _ := s.CreateOperationIfNotExists("req-1", "m-1", pb.Operation_REIMAGE, "", nil)
 
 	// Add step
 	err := s.UpdateOperationStep(op.OperationId, &pb.StepStatus{
@@ -321,7 +321,7 @@ func TestUpdateOperationStep(t *testing.T) {
 func TestUpdateOperationStep_ClonesInput(t *testing.T) {
 	s := New()
 	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
-	op, _, _ := s.CreateOperationIfNotExists("req-1", "m-1", "REIMAGE", "")
+	op, _, _ := s.CreateOperationIfNotExists("req-1", "m-1", pb.Operation_REIMAGE, "", nil)
 
 	// Create a step and store it
 	originalStep := &pb.StepStatus{
@@ -364,7 +364,7 @@ func TestMachineStatusUpdatedOnOperationCompletion(t *testing.T) {
 	s := New()
 	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
 
-	op, _, _ := s.CreateOperationIfNotExists("req-1", "m-1", "REIMAGE", "")
+	op, _, _ := s.CreateOperationIfNotExists("req-1", "m-1", pb.Operation_REIMAGE, "", nil)
 
 	// Machine should still be FACTORY_READY (store no longer sets phase)
 	// The executor is responsible for phase transitions
@@ -397,7 +397,7 @@ func TestIdempotencyForInFlightOperation(t *testing.T) {
 	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
 
 	// Create an operation (which becomes the active operation)
-	op1, created, err := s.CreateOperationIfNotExists("req-1", "m-1", "REIMAGE", "plan/reimage")
+	op1, created, err := s.CreateOperationIfNotExists("req-1", "m-1", pb.Operation_REIMAGE, "plan/reimage", nil)
 	if err != nil {
 		t.Fatalf("CreateOperationIfNotExists failed: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestIdempotencyForInFlightOperation(t *testing.T) {
 	}
 
 	// Same request_id should return the existing operation (even though machine has active operation)
-	op2, created, err := s.CreateOperationIfNotExists("req-1", "m-1", "REIMAGE", "plan/reimage")
+	op2, created, err := s.CreateOperationIfNotExists("req-1", "m-1", pb.Operation_REIMAGE, "plan/reimage", nil)
 	if err != nil {
 		t.Fatalf("CreateOperationIfNotExists for same request_id failed: %v", err)
 	}
@@ -424,7 +424,7 @@ func TestIdempotencyForInFlightOperation(t *testing.T) {
 	}
 
 	// Different request_id should fail because machine has active operation
-	_, _, err = s.CreateOperationIfNotExists("req-2", "m-1", "REIMAGE", "plan/reimage")
+	_, _, err = s.CreateOperationIfNotExists("req-2", "m-1", pb.Operation_REIMAGE, "plan/reimage", nil)
 	if err == nil {
 		t.Error("Expected error when creating operation with different request_id while machine has active operation")
 	}
@@ -436,7 +436,7 @@ func TestIdempotencyScopedToMachine(t *testing.T) {
 	s.UpsertMachine(&pb.Machine{MachineId: "m-2"})
 
 	// Create operation on m-1 with request_id "req-1"
-	op1, created, err := s.CreateOperationIfNotExists("req-1", "m-1", "REIMAGE", "")
+	op1, created, err := s.CreateOperationIfNotExists("req-1", "m-1", pb.Operation_REIMAGE, "", nil)
 	if err != nil {
 		t.Fatalf("CreateOperationIfNotExists failed: %v", err)
 	}
@@ -448,7 +448,7 @@ func TestIdempotencyScopedToMachine(t *testing.T) {
 	s.CompleteOperation(op1.OperationId, pb.Operation_SUCCEEDED)
 
 	// Same request_id on DIFFERENT machine should create a NEW operation
-	op2, created, err := s.CreateOperationIfNotExists("req-1", "m-2", "REIMAGE", "")
+	op2, created, err := s.CreateOperationIfNotExists("req-1", "m-2", pb.Operation_REIMAGE, "", nil)
 	if err != nil {
 		t.Fatalf("CreateOperationIfNotExists for m-2 failed: %v", err)
 	}
@@ -467,7 +467,7 @@ func TestCancelOperationIdempotent(t *testing.T) {
 	s := New()
 	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
 
-	op, _, _ := s.CreateOperationIfNotExists("req-1", "m-1", "REIMAGE", "")
+	op, _, _ := s.CreateOperationIfNotExists("req-1", "m-1", pb.Operation_REIMAGE, "", nil)
 
 	// First cancel should succeed
 	canceledOp, err := s.CancelOperation(op.OperationId)
@@ -498,7 +498,7 @@ func TestCancelCompletedOperationFails(t *testing.T) {
 	s := New()
 	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
 
-	op, _, _ := s.CreateOperationIfNotExists("req-1", "m-1", "REIMAGE", "")
+	op, _, _ := s.CreateOperationIfNotExists("req-1", "m-1", pb.Operation_REIMAGE, "", nil)
 
 	// Complete the operation
 	s.CompleteOperation(op.OperationId, pb.Operation_SUCCEEDED)
@@ -514,7 +514,7 @@ func TestTryTransitionOperationPhase(t *testing.T) {
 	s := New()
 	s.UpsertMachine(&pb.Machine{MachineId: "m-1"})
 
-	op, _, _ := s.CreateOperationIfNotExists("req-1", "m-1", "REIMAGE", "")
+	op, _, _ := s.CreateOperationIfNotExists("req-1", "m-1", pb.Operation_REIMAGE, "", nil)
 
 	// Operation starts as PENDING
 	if op.Phase != pb.Operation_PENDING {
@@ -576,7 +576,7 @@ func TestCreateOperationConcurrentUpsert(t *testing.T) {
 
 	// Start CreateOperationIfNotExists in a goroutine
 	go func() {
-		op, created, err := s.CreateOperationIfNotExists("req-1", "m-1", "REIMAGE", "")
+		op, created, err := s.CreateOperationIfNotExists("req-1", "m-1", pb.Operation_REIMAGE, "", nil)
 		if err != nil {
 			t.Errorf("CreateOperationIfNotExists failed: %v", err)
 			done <- false

@@ -141,6 +141,62 @@ func (MachineStatus_EffectiveState) EnumDescriptor() ([]byte, []int) {
 	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{3, 1}
 }
 
+// Type of operation
+type Operation_OperationType int32
+
+const (
+	Operation_OPERATION_TYPE_UNSPECIFIED Operation_OperationType = 0
+	Operation_REBOOT                     Operation_OperationType = 1
+	Operation_REIMAGE                    Operation_OperationType = 2
+	Operation_ENTER_MAINTENANCE          Operation_OperationType = 3
+	Operation_EXIT_MAINTENANCE           Operation_OperationType = 4
+)
+
+// Enum value maps for Operation_OperationType.
+var (
+	Operation_OperationType_name = map[int32]string{
+		0: "OPERATION_TYPE_UNSPECIFIED",
+		1: "REBOOT",
+		2: "REIMAGE",
+		3: "ENTER_MAINTENANCE",
+		4: "EXIT_MAINTENANCE",
+	}
+	Operation_OperationType_value = map[string]int32{
+		"OPERATION_TYPE_UNSPECIFIED": 0,
+		"REBOOT":                     1,
+		"REIMAGE":                    2,
+		"ENTER_MAINTENANCE":          3,
+		"EXIT_MAINTENANCE":           4,
+	}
+)
+
+func (x Operation_OperationType) Enum() *Operation_OperationType {
+	p := new(Operation_OperationType)
+	*p = x
+	return p
+}
+
+func (x Operation_OperationType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Operation_OperationType) Descriptor() protoreflect.EnumDescriptor {
+	return file_baremetal_v1_baremetal_proto_enumTypes[2].Descriptor()
+}
+
+func (Operation_OperationType) Type() protoreflect.EnumType {
+	return &file_baremetal_v1_baremetal_proto_enumTypes[2]
+}
+
+func (x Operation_OperationType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Operation_OperationType.Descriptor instead.
+func (Operation_OperationType) EnumDescriptor() ([]byte, []int) {
+	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{5, 0}
+}
+
 type Operation_Phase int32
 
 const (
@@ -183,11 +239,11 @@ func (x Operation_Phase) String() string {
 }
 
 func (Operation_Phase) Descriptor() protoreflect.EnumDescriptor {
-	return file_baremetal_v1_baremetal_proto_enumTypes[2].Descriptor()
+	return file_baremetal_v1_baremetal_proto_enumTypes[3].Descriptor()
 }
 
 func (Operation_Phase) Type() protoreflect.EnumType {
-	return &file_baremetal_v1_baremetal_proto_enumTypes[2]
+	return &file_baremetal_v1_baremetal_proto_enumTypes[3]
 }
 
 func (x Operation_Phase) Number() protoreflect.EnumNumber {
@@ -196,7 +252,7 @@ func (x Operation_Phase) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Operation_Phase.Descriptor instead.
 func (Operation_Phase) EnumDescriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{5, 0}
+	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{5, 1}
 }
 
 type StepStatus_State int32
@@ -238,11 +294,11 @@ func (x StepStatus_State) String() string {
 }
 
 func (StepStatus_State) Descriptor() protoreflect.EnumDescriptor {
-	return file_baremetal_v1_baremetal_proto_enumTypes[3].Descriptor()
+	return file_baremetal_v1_baremetal_proto_enumTypes[4].Descriptor()
 }
 
 func (StepStatus_State) Type() protoreflect.EnumType {
-	return &file_baremetal_v1_baremetal_proto_enumTypes[3]
+	return &file_baremetal_v1_baremetal_proto_enumTypes[4]
 }
 
 func (x StepStatus_State) Number() protoreflect.EnumNumber {
@@ -620,22 +676,24 @@ func (x *Condition) GetLastTransitionTime() *timestamppb.Timestamp {
 }
 
 // Operation represents an async lifecycle operation on a machine.
-// Customers track progress via phase, current_stage, and optionally steps (informational).
+// Customers track progress via phase, current_stage, and error status.
+// Internal workflow details (plan_id, steps) are hidden from external responses.
 type Operation struct {
-	state       protoimpl.MessageState `protogen:"open.v1"`
-	OperationId string                 `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
-	MachineId   string                 `protobuf:"bytes,2,opt,name=machine_id,json=machineId,proto3" json:"machine_id,omitempty"`
-	RequestId   string                 `protobuf:"bytes,3,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"` // Idempotency key
-	// Type of operation: REBOOT, REIMAGE, ENTER_MAINTENANCE, EXIT_MAINTENANCE
-	Type         string          `protobuf:"bytes,4,opt,name=type,proto3" json:"type,omitempty"`
-	Phase        Operation_Phase `protobuf:"varint,5,opt,name=phase,proto3,enum=baremetal.v1.Operation_Phase" json:"phase,omitempty"`
-	CurrentStage string          `protobuf:"bytes,6,opt,name=current_stage,json=currentStage,proto3" json:"current_stage,omitempty"` // Current step name for progress display
-	// Internal plan_id - not exposed to customers in requests
+	state        protoimpl.MessageState  `protogen:"open.v1"`
+	OperationId  string                  `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
+	MachineId    string                  `protobuf:"bytes,2,opt,name=machine_id,json=machineId,proto3" json:"machine_id,omitempty"`
+	RequestId    string                  `protobuf:"bytes,3,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"` // Idempotency key
+	Type         Operation_OperationType `protobuf:"varint,4,opt,name=type,proto3,enum=baremetal.v1.Operation_OperationType" json:"type,omitempty"`
+	Phase        Operation_Phase         `protobuf:"varint,5,opt,name=phase,proto3,enum=baremetal.v1.Operation_Phase" json:"phase,omitempty"`
+	CurrentStage string                  `protobuf:"bytes,6,opt,name=current_stage,json=currentStage,proto3" json:"current_stage,omitempty"` // Current step name for progress display
+	// Parameters passed to the operation (e.g., image_ref for reimage)
+	Params map[string]string `protobuf:"bytes,8,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Internal plan_id - hidden from external responses (server clears before returning)
 	PlanId     string                 `protobuf:"bytes,7,opt,name=plan_id,json=planId,proto3" json:"plan_id,omitempty"`
 	CreatedAt  *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	StartedAt  *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
 	FinishedAt *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
-	// Step statuses - informational, customers don't need to reason about these
+	// Step statuses - hidden from external responses (server clears before returning)
 	Steps         []*StepStatus `protobuf:"bytes,20,rep,name=steps,proto3" json:"steps,omitempty"`
 	Error         *ErrorStatus  `protobuf:"bytes,21,opt,name=error,proto3" json:"error,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -693,11 +751,11 @@ func (x *Operation) GetRequestId() string {
 	return ""
 }
 
-func (x *Operation) GetType() string {
+func (x *Operation) GetType() Operation_OperationType {
 	if x != nil {
 		return x.Type
 	}
-	return ""
+	return Operation_OPERATION_TYPE_UNSPECIFIED
 }
 
 func (x *Operation) GetPhase() Operation_Phase {
@@ -712,6 +770,13 @@ func (x *Operation) GetCurrentStage() string {
 		return x.CurrentStage
 	}
 	return ""
+}
+
+func (x *Operation) GetParams() map[string]string {
+	if x != nil {
+		return x.Params
+	}
+	return nil
 }
 
 func (x *Operation) GetPlanId() string {
@@ -2479,16 +2544,17 @@ const file_baremetal_v1_baremetal_proto_rawDesc = "" +
 	"\x06status\x18\x02 \x01(\bR\x06status\x12\x16\n" +
 	"\x06reason\x18\x03 \x01(\tR\x06reason\x12\x18\n" +
 	"\amessage\x18\x04 \x01(\tR\amessage\x12L\n" +
-	"\x14last_transition_time\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\x12lastTransitionTime\"\xea\x04\n" +
+	"\x14last_transition_time\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\x12lastTransitionTime\"\x80\a\n" +
 	"\tOperation\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\tR\voperationId\x12\x1d\n" +
 	"\n" +
 	"machine_id\x18\x02 \x01(\tR\tmachineId\x12\x1d\n" +
 	"\n" +
-	"request_id\x18\x03 \x01(\tR\trequestId\x12\x12\n" +
-	"\x04type\x18\x04 \x01(\tR\x04type\x123\n" +
+	"request_id\x18\x03 \x01(\tR\trequestId\x129\n" +
+	"\x04type\x18\x04 \x01(\x0e2%.baremetal.v1.Operation.OperationTypeR\x04type\x123\n" +
 	"\x05phase\x18\x05 \x01(\x0e2\x1d.baremetal.v1.Operation.PhaseR\x05phase\x12#\n" +
-	"\rcurrent_stage\x18\x06 \x01(\tR\fcurrentStage\x12\x17\n" +
+	"\rcurrent_stage\x18\x06 \x01(\tR\fcurrentStage\x12;\n" +
+	"\x06params\x18\b \x03(\v2#.baremetal.v1.Operation.ParamsEntryR\x06params\x12\x17\n" +
 	"\aplan_id\x18\a \x01(\tR\x06planId\x129\n" +
 	"\n" +
 	"created_at\x18\n" +
@@ -2498,7 +2564,17 @@ const file_baremetal_v1_baremetal_proto_rawDesc = "" +
 	"\vfinished_at\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"finishedAt\x12.\n" +
 	"\x05steps\x18\x14 \x03(\v2\x18.baremetal.v1.StepStatusR\x05steps\x12/\n" +
-	"\x05error\x18\x15 \x01(\v2\x19.baremetal.v1.ErrorStatusR\x05error\"a\n" +
+	"\x05error\x18\x15 \x01(\v2\x19.baremetal.v1.ErrorStatusR\x05error\x1a9\n" +
+	"\vParamsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"u\n" +
+	"\rOperationType\x12\x1e\n" +
+	"\x1aOPERATION_TYPE_UNSPECIFIED\x10\x00\x12\n" +
+	"\n" +
+	"\x06REBOOT\x10\x01\x12\v\n" +
+	"\aREIMAGE\x10\x02\x12\x15\n" +
+	"\x11ENTER_MAINTENANCE\x10\x03\x12\x14\n" +
+	"\x10EXIT_MAINTENANCE\x10\x04\"a\n" +
 	"\x05Phase\x12\x15\n" +
 	"\x11PHASE_UNSPECIFIED\x10\x00\x12\v\n" +
 	"\aPENDING\x10\x01\x12\v\n" +
@@ -2673,125 +2749,129 @@ func file_baremetal_v1_baremetal_proto_rawDescGZIP() []byte {
 	return file_baremetal_v1_baremetal_proto_rawDescData
 }
 
-var file_baremetal_v1_baremetal_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_baremetal_v1_baremetal_proto_msgTypes = make([]protoimpl.MessageInfo, 39)
+var file_baremetal_v1_baremetal_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
+var file_baremetal_v1_baremetal_proto_msgTypes = make([]protoimpl.MessageInfo, 40)
 var file_baremetal_v1_baremetal_proto_goTypes = []any{
 	(MachineStatus_Phase)(0),           // 0: baremetal.v1.MachineStatus.Phase
 	(MachineStatus_EffectiveState)(0),  // 1: baremetal.v1.MachineStatus.EffectiveState
-	(Operation_Phase)(0),               // 2: baremetal.v1.Operation.Phase
-	(StepStatus_State)(0),              // 3: baremetal.v1.StepStatus.State
-	(*Machine)(nil),                    // 4: baremetal.v1.Machine
-	(*MachineSpec)(nil),                // 5: baremetal.v1.MachineSpec
-	(*TargetClusterRef)(nil),           // 6: baremetal.v1.TargetClusterRef
-	(*MachineStatus)(nil),              // 7: baremetal.v1.MachineStatus
-	(*Condition)(nil),                  // 8: baremetal.v1.Condition
-	(*Operation)(nil),                  // 9: baremetal.v1.Operation
-	(*StepStatus)(nil),                 // 10: baremetal.v1.StepStatus
-	(*ErrorStatus)(nil),                // 11: baremetal.v1.ErrorStatus
-	(*OperationEvent)(nil),             // 12: baremetal.v1.OperationEvent
-	(*LogChunk)(nil),                   // 13: baremetal.v1.LogChunk
-	(*Plan)(nil),                       // 14: baremetal.v1.Plan
-	(*Step)(nil),                       // 15: baremetal.v1.Step
-	(*SshCommand)(nil),                 // 16: baremetal.v1.SshCommand
-	(*Reboot)(nil),                     // 17: baremetal.v1.Reboot
-	(*SetNetboot)(nil),                 // 18: baremetal.v1.SetNetboot
-	(*RepaveImage)(nil),                // 19: baremetal.v1.RepaveImage
-	(*RmaAction)(nil),                  // 20: baremetal.v1.RmaAction
-	(*KubeadmJoin)(nil),                // 21: baremetal.v1.KubeadmJoin
-	(*VerifyInCluster)(nil),            // 22: baremetal.v1.VerifyInCluster
-	(*NetReconfig)(nil),                // 23: baremetal.v1.NetReconfig
-	(*RegisterMachineRequest)(nil),     // 24: baremetal.v1.RegisterMachineRequest
-	(*GetMachineRequest)(nil),          // 25: baremetal.v1.GetMachineRequest
-	(*ListMachinesRequest)(nil),        // 26: baremetal.v1.ListMachinesRequest
-	(*ListMachinesResponse)(nil),       // 27: baremetal.v1.ListMachinesResponse
-	(*UpdateMachineRequest)(nil),       // 28: baremetal.v1.UpdateMachineRequest
-	(*RebootMachineRequest)(nil),       // 29: baremetal.v1.RebootMachineRequest
-	(*ReimageMachineRequest)(nil),      // 30: baremetal.v1.ReimageMachineRequest
-	(*EnterMaintenanceRequest)(nil),    // 31: baremetal.v1.EnterMaintenanceRequest
-	(*ExitMaintenanceRequest)(nil),     // 32: baremetal.v1.ExitMaintenanceRequest
-	(*CancelOperationRequest)(nil),     // 33: baremetal.v1.CancelOperationRequest
-	(*GetOperationRequest)(nil),        // 34: baremetal.v1.GetOperationRequest
-	(*ListOperationsRequest)(nil),      // 35: baremetal.v1.ListOperationsRequest
-	(*ListOperationsResponse)(nil),     // 36: baremetal.v1.ListOperationsResponse
-	(*WatchOperationsRequest)(nil),     // 37: baremetal.v1.WatchOperationsRequest
-	(*StreamOperationLogsRequest)(nil), // 38: baremetal.v1.StreamOperationLogsRequest
-	nil,                                // 39: baremetal.v1.Machine.LabelsEntry
-	nil,                                // 40: baremetal.v1.ErrorStatus.DetailsEntry
-	nil,                                // 41: baremetal.v1.SshCommand.ArgsEntry
-	nil,                                // 42: baremetal.v1.NetReconfig.ParamsEntry
-	(*timestamppb.Timestamp)(nil),      // 43: google.protobuf.Timestamp
+	(Operation_OperationType)(0),       // 2: baremetal.v1.Operation.OperationType
+	(Operation_Phase)(0),               // 3: baremetal.v1.Operation.Phase
+	(StepStatus_State)(0),              // 4: baremetal.v1.StepStatus.State
+	(*Machine)(nil),                    // 5: baremetal.v1.Machine
+	(*MachineSpec)(nil),                // 6: baremetal.v1.MachineSpec
+	(*TargetClusterRef)(nil),           // 7: baremetal.v1.TargetClusterRef
+	(*MachineStatus)(nil),              // 8: baremetal.v1.MachineStatus
+	(*Condition)(nil),                  // 9: baremetal.v1.Condition
+	(*Operation)(nil),                  // 10: baremetal.v1.Operation
+	(*StepStatus)(nil),                 // 11: baremetal.v1.StepStatus
+	(*ErrorStatus)(nil),                // 12: baremetal.v1.ErrorStatus
+	(*OperationEvent)(nil),             // 13: baremetal.v1.OperationEvent
+	(*LogChunk)(nil),                   // 14: baremetal.v1.LogChunk
+	(*Plan)(nil),                       // 15: baremetal.v1.Plan
+	(*Step)(nil),                       // 16: baremetal.v1.Step
+	(*SshCommand)(nil),                 // 17: baremetal.v1.SshCommand
+	(*Reboot)(nil),                     // 18: baremetal.v1.Reboot
+	(*SetNetboot)(nil),                 // 19: baremetal.v1.SetNetboot
+	(*RepaveImage)(nil),                // 20: baremetal.v1.RepaveImage
+	(*RmaAction)(nil),                  // 21: baremetal.v1.RmaAction
+	(*KubeadmJoin)(nil),                // 22: baremetal.v1.KubeadmJoin
+	(*VerifyInCluster)(nil),            // 23: baremetal.v1.VerifyInCluster
+	(*NetReconfig)(nil),                // 24: baremetal.v1.NetReconfig
+	(*RegisterMachineRequest)(nil),     // 25: baremetal.v1.RegisterMachineRequest
+	(*GetMachineRequest)(nil),          // 26: baremetal.v1.GetMachineRequest
+	(*ListMachinesRequest)(nil),        // 27: baremetal.v1.ListMachinesRequest
+	(*ListMachinesResponse)(nil),       // 28: baremetal.v1.ListMachinesResponse
+	(*UpdateMachineRequest)(nil),       // 29: baremetal.v1.UpdateMachineRequest
+	(*RebootMachineRequest)(nil),       // 30: baremetal.v1.RebootMachineRequest
+	(*ReimageMachineRequest)(nil),      // 31: baremetal.v1.ReimageMachineRequest
+	(*EnterMaintenanceRequest)(nil),    // 32: baremetal.v1.EnterMaintenanceRequest
+	(*ExitMaintenanceRequest)(nil),     // 33: baremetal.v1.ExitMaintenanceRequest
+	(*CancelOperationRequest)(nil),     // 34: baremetal.v1.CancelOperationRequest
+	(*GetOperationRequest)(nil),        // 35: baremetal.v1.GetOperationRequest
+	(*ListOperationsRequest)(nil),      // 36: baremetal.v1.ListOperationsRequest
+	(*ListOperationsResponse)(nil),     // 37: baremetal.v1.ListOperationsResponse
+	(*WatchOperationsRequest)(nil),     // 38: baremetal.v1.WatchOperationsRequest
+	(*StreamOperationLogsRequest)(nil), // 39: baremetal.v1.StreamOperationLogsRequest
+	nil,                                // 40: baremetal.v1.Machine.LabelsEntry
+	nil,                                // 41: baremetal.v1.Operation.ParamsEntry
+	nil,                                // 42: baremetal.v1.ErrorStatus.DetailsEntry
+	nil,                                // 43: baremetal.v1.SshCommand.ArgsEntry
+	nil,                                // 44: baremetal.v1.NetReconfig.ParamsEntry
+	(*timestamppb.Timestamp)(nil),      // 45: google.protobuf.Timestamp
 }
 var file_baremetal_v1_baremetal_proto_depIdxs = []int32{
-	5,  // 0: baremetal.v1.Machine.spec:type_name -> baremetal.v1.MachineSpec
-	7,  // 1: baremetal.v1.Machine.status:type_name -> baremetal.v1.MachineStatus
-	39, // 2: baremetal.v1.Machine.labels:type_name -> baremetal.v1.Machine.LabelsEntry
-	6,  // 3: baremetal.v1.MachineSpec.target_cluster:type_name -> baremetal.v1.TargetClusterRef
+	6,  // 0: baremetal.v1.Machine.spec:type_name -> baremetal.v1.MachineSpec
+	8,  // 1: baremetal.v1.Machine.status:type_name -> baremetal.v1.MachineStatus
+	40, // 2: baremetal.v1.Machine.labels:type_name -> baremetal.v1.Machine.LabelsEntry
+	7,  // 3: baremetal.v1.MachineSpec.target_cluster:type_name -> baremetal.v1.TargetClusterRef
 	0,  // 4: baremetal.v1.MachineStatus.phase:type_name -> baremetal.v1.MachineStatus.Phase
 	1,  // 5: baremetal.v1.MachineStatus.effective_state:type_name -> baremetal.v1.MachineStatus.EffectiveState
-	8,  // 6: baremetal.v1.MachineStatus.conditions:type_name -> baremetal.v1.Condition
-	43, // 7: baremetal.v1.MachineStatus.last_seen:type_name -> google.protobuf.Timestamp
-	43, // 8: baremetal.v1.Condition.last_transition_time:type_name -> google.protobuf.Timestamp
-	2,  // 9: baremetal.v1.Operation.phase:type_name -> baremetal.v1.Operation.Phase
-	43, // 10: baremetal.v1.Operation.created_at:type_name -> google.protobuf.Timestamp
-	43, // 11: baremetal.v1.Operation.started_at:type_name -> google.protobuf.Timestamp
-	43, // 12: baremetal.v1.Operation.finished_at:type_name -> google.protobuf.Timestamp
-	10, // 13: baremetal.v1.Operation.steps:type_name -> baremetal.v1.StepStatus
-	11, // 14: baremetal.v1.Operation.error:type_name -> baremetal.v1.ErrorStatus
-	3,  // 15: baremetal.v1.StepStatus.state:type_name -> baremetal.v1.StepStatus.State
-	43, // 16: baremetal.v1.StepStatus.started_at:type_name -> google.protobuf.Timestamp
-	43, // 17: baremetal.v1.StepStatus.finished_at:type_name -> google.protobuf.Timestamp
-	40, // 18: baremetal.v1.ErrorStatus.details:type_name -> baremetal.v1.ErrorStatus.DetailsEntry
-	43, // 19: baremetal.v1.OperationEvent.ts:type_name -> google.protobuf.Timestamp
-	9,  // 20: baremetal.v1.OperationEvent.snapshot:type_name -> baremetal.v1.Operation
-	43, // 21: baremetal.v1.LogChunk.ts:type_name -> google.protobuf.Timestamp
-	15, // 22: baremetal.v1.Plan.steps:type_name -> baremetal.v1.Step
-	16, // 23: baremetal.v1.Step.ssh:type_name -> baremetal.v1.SshCommand
-	17, // 24: baremetal.v1.Step.reboot:type_name -> baremetal.v1.Reboot
-	18, // 25: baremetal.v1.Step.netboot:type_name -> baremetal.v1.SetNetboot
-	19, // 26: baremetal.v1.Step.repave:type_name -> baremetal.v1.RepaveImage
-	21, // 27: baremetal.v1.Step.join:type_name -> baremetal.v1.KubeadmJoin
-	22, // 28: baremetal.v1.Step.verify:type_name -> baremetal.v1.VerifyInCluster
-	23, // 29: baremetal.v1.Step.net:type_name -> baremetal.v1.NetReconfig
-	20, // 30: baremetal.v1.Step.rma:type_name -> baremetal.v1.RmaAction
-	41, // 31: baremetal.v1.SshCommand.args:type_name -> baremetal.v1.SshCommand.ArgsEntry
-	6,  // 32: baremetal.v1.KubeadmJoin.target_cluster:type_name -> baremetal.v1.TargetClusterRef
-	6,  // 33: baremetal.v1.VerifyInCluster.target_cluster:type_name -> baremetal.v1.TargetClusterRef
-	42, // 34: baremetal.v1.NetReconfig.params:type_name -> baremetal.v1.NetReconfig.ParamsEntry
-	4,  // 35: baremetal.v1.RegisterMachineRequest.machine:type_name -> baremetal.v1.Machine
-	4,  // 36: baremetal.v1.ListMachinesResponse.machines:type_name -> baremetal.v1.Machine
-	4,  // 37: baremetal.v1.UpdateMachineRequest.machine:type_name -> baremetal.v1.Machine
-	9,  // 38: baremetal.v1.ListOperationsResponse.operations:type_name -> baremetal.v1.Operation
-	24, // 39: baremetal.v1.MachineService.RegisterMachine:input_type -> baremetal.v1.RegisterMachineRequest
-	25, // 40: baremetal.v1.MachineService.GetMachine:input_type -> baremetal.v1.GetMachineRequest
-	26, // 41: baremetal.v1.MachineService.ListMachines:input_type -> baremetal.v1.ListMachinesRequest
-	28, // 42: baremetal.v1.MachineService.UpdateMachine:input_type -> baremetal.v1.UpdateMachineRequest
-	29, // 43: baremetal.v1.MachineService.RebootMachine:input_type -> baremetal.v1.RebootMachineRequest
-	30, // 44: baremetal.v1.MachineService.ReimageMachine:input_type -> baremetal.v1.ReimageMachineRequest
-	31, // 45: baremetal.v1.MachineService.EnterMaintenance:input_type -> baremetal.v1.EnterMaintenanceRequest
-	32, // 46: baremetal.v1.MachineService.ExitMaintenance:input_type -> baremetal.v1.ExitMaintenanceRequest
-	33, // 47: baremetal.v1.MachineService.CancelOperation:input_type -> baremetal.v1.CancelOperationRequest
-	34, // 48: baremetal.v1.OperationService.GetOperation:input_type -> baremetal.v1.GetOperationRequest
-	35, // 49: baremetal.v1.OperationService.ListOperations:input_type -> baremetal.v1.ListOperationsRequest
-	37, // 50: baremetal.v1.OperationService.WatchOperations:input_type -> baremetal.v1.WatchOperationsRequest
-	38, // 51: baremetal.v1.OperationService.StreamOperationLogs:input_type -> baremetal.v1.StreamOperationLogsRequest
-	4,  // 52: baremetal.v1.MachineService.RegisterMachine:output_type -> baremetal.v1.Machine
-	4,  // 53: baremetal.v1.MachineService.GetMachine:output_type -> baremetal.v1.Machine
-	27, // 54: baremetal.v1.MachineService.ListMachines:output_type -> baremetal.v1.ListMachinesResponse
-	4,  // 55: baremetal.v1.MachineService.UpdateMachine:output_type -> baremetal.v1.Machine
-	9,  // 56: baremetal.v1.MachineService.RebootMachine:output_type -> baremetal.v1.Operation
-	9,  // 57: baremetal.v1.MachineService.ReimageMachine:output_type -> baremetal.v1.Operation
-	9,  // 58: baremetal.v1.MachineService.EnterMaintenance:output_type -> baremetal.v1.Operation
-	9,  // 59: baremetal.v1.MachineService.ExitMaintenance:output_type -> baremetal.v1.Operation
-	9,  // 60: baremetal.v1.MachineService.CancelOperation:output_type -> baremetal.v1.Operation
-	9,  // 61: baremetal.v1.OperationService.GetOperation:output_type -> baremetal.v1.Operation
-	36, // 62: baremetal.v1.OperationService.ListOperations:output_type -> baremetal.v1.ListOperationsResponse
-	12, // 63: baremetal.v1.OperationService.WatchOperations:output_type -> baremetal.v1.OperationEvent
-	13, // 64: baremetal.v1.OperationService.StreamOperationLogs:output_type -> baremetal.v1.LogChunk
-	52, // [52:65] is the sub-list for method output_type
-	39, // [39:52] is the sub-list for method input_type
-	39, // [39:39] is the sub-list for extension type_name
-	39, // [39:39] is the sub-list for extension extendee
-	0,  // [0:39] is the sub-list for field type_name
+	9,  // 6: baremetal.v1.MachineStatus.conditions:type_name -> baremetal.v1.Condition
+	45, // 7: baremetal.v1.MachineStatus.last_seen:type_name -> google.protobuf.Timestamp
+	45, // 8: baremetal.v1.Condition.last_transition_time:type_name -> google.protobuf.Timestamp
+	2,  // 9: baremetal.v1.Operation.type:type_name -> baremetal.v1.Operation.OperationType
+	3,  // 10: baremetal.v1.Operation.phase:type_name -> baremetal.v1.Operation.Phase
+	41, // 11: baremetal.v1.Operation.params:type_name -> baremetal.v1.Operation.ParamsEntry
+	45, // 12: baremetal.v1.Operation.created_at:type_name -> google.protobuf.Timestamp
+	45, // 13: baremetal.v1.Operation.started_at:type_name -> google.protobuf.Timestamp
+	45, // 14: baremetal.v1.Operation.finished_at:type_name -> google.protobuf.Timestamp
+	11, // 15: baremetal.v1.Operation.steps:type_name -> baremetal.v1.StepStatus
+	12, // 16: baremetal.v1.Operation.error:type_name -> baremetal.v1.ErrorStatus
+	4,  // 17: baremetal.v1.StepStatus.state:type_name -> baremetal.v1.StepStatus.State
+	45, // 18: baremetal.v1.StepStatus.started_at:type_name -> google.protobuf.Timestamp
+	45, // 19: baremetal.v1.StepStatus.finished_at:type_name -> google.protobuf.Timestamp
+	42, // 20: baremetal.v1.ErrorStatus.details:type_name -> baremetal.v1.ErrorStatus.DetailsEntry
+	45, // 21: baremetal.v1.OperationEvent.ts:type_name -> google.protobuf.Timestamp
+	10, // 22: baremetal.v1.OperationEvent.snapshot:type_name -> baremetal.v1.Operation
+	45, // 23: baremetal.v1.LogChunk.ts:type_name -> google.protobuf.Timestamp
+	16, // 24: baremetal.v1.Plan.steps:type_name -> baremetal.v1.Step
+	17, // 25: baremetal.v1.Step.ssh:type_name -> baremetal.v1.SshCommand
+	18, // 26: baremetal.v1.Step.reboot:type_name -> baremetal.v1.Reboot
+	19, // 27: baremetal.v1.Step.netboot:type_name -> baremetal.v1.SetNetboot
+	20, // 28: baremetal.v1.Step.repave:type_name -> baremetal.v1.RepaveImage
+	22, // 29: baremetal.v1.Step.join:type_name -> baremetal.v1.KubeadmJoin
+	23, // 30: baremetal.v1.Step.verify:type_name -> baremetal.v1.VerifyInCluster
+	24, // 31: baremetal.v1.Step.net:type_name -> baremetal.v1.NetReconfig
+	21, // 32: baremetal.v1.Step.rma:type_name -> baremetal.v1.RmaAction
+	43, // 33: baremetal.v1.SshCommand.args:type_name -> baremetal.v1.SshCommand.ArgsEntry
+	7,  // 34: baremetal.v1.KubeadmJoin.target_cluster:type_name -> baremetal.v1.TargetClusterRef
+	7,  // 35: baremetal.v1.VerifyInCluster.target_cluster:type_name -> baremetal.v1.TargetClusterRef
+	44, // 36: baremetal.v1.NetReconfig.params:type_name -> baremetal.v1.NetReconfig.ParamsEntry
+	5,  // 37: baremetal.v1.RegisterMachineRequest.machine:type_name -> baremetal.v1.Machine
+	5,  // 38: baremetal.v1.ListMachinesResponse.machines:type_name -> baremetal.v1.Machine
+	5,  // 39: baremetal.v1.UpdateMachineRequest.machine:type_name -> baremetal.v1.Machine
+	10, // 40: baremetal.v1.ListOperationsResponse.operations:type_name -> baremetal.v1.Operation
+	25, // 41: baremetal.v1.MachineService.RegisterMachine:input_type -> baremetal.v1.RegisterMachineRequest
+	26, // 42: baremetal.v1.MachineService.GetMachine:input_type -> baremetal.v1.GetMachineRequest
+	27, // 43: baremetal.v1.MachineService.ListMachines:input_type -> baremetal.v1.ListMachinesRequest
+	29, // 44: baremetal.v1.MachineService.UpdateMachine:input_type -> baremetal.v1.UpdateMachineRequest
+	30, // 45: baremetal.v1.MachineService.RebootMachine:input_type -> baremetal.v1.RebootMachineRequest
+	31, // 46: baremetal.v1.MachineService.ReimageMachine:input_type -> baremetal.v1.ReimageMachineRequest
+	32, // 47: baremetal.v1.MachineService.EnterMaintenance:input_type -> baremetal.v1.EnterMaintenanceRequest
+	33, // 48: baremetal.v1.MachineService.ExitMaintenance:input_type -> baremetal.v1.ExitMaintenanceRequest
+	34, // 49: baremetal.v1.MachineService.CancelOperation:input_type -> baremetal.v1.CancelOperationRequest
+	35, // 50: baremetal.v1.OperationService.GetOperation:input_type -> baremetal.v1.GetOperationRequest
+	36, // 51: baremetal.v1.OperationService.ListOperations:input_type -> baremetal.v1.ListOperationsRequest
+	38, // 52: baremetal.v1.OperationService.WatchOperations:input_type -> baremetal.v1.WatchOperationsRequest
+	39, // 53: baremetal.v1.OperationService.StreamOperationLogs:input_type -> baremetal.v1.StreamOperationLogsRequest
+	5,  // 54: baremetal.v1.MachineService.RegisterMachine:output_type -> baremetal.v1.Machine
+	5,  // 55: baremetal.v1.MachineService.GetMachine:output_type -> baremetal.v1.Machine
+	28, // 56: baremetal.v1.MachineService.ListMachines:output_type -> baremetal.v1.ListMachinesResponse
+	5,  // 57: baremetal.v1.MachineService.UpdateMachine:output_type -> baremetal.v1.Machine
+	10, // 58: baremetal.v1.MachineService.RebootMachine:output_type -> baremetal.v1.Operation
+	10, // 59: baremetal.v1.MachineService.ReimageMachine:output_type -> baremetal.v1.Operation
+	10, // 60: baremetal.v1.MachineService.EnterMaintenance:output_type -> baremetal.v1.Operation
+	10, // 61: baremetal.v1.MachineService.ExitMaintenance:output_type -> baremetal.v1.Operation
+	10, // 62: baremetal.v1.MachineService.CancelOperation:output_type -> baremetal.v1.Operation
+	10, // 63: baremetal.v1.OperationService.GetOperation:output_type -> baremetal.v1.Operation
+	37, // 64: baremetal.v1.OperationService.ListOperations:output_type -> baremetal.v1.ListOperationsResponse
+	13, // 65: baremetal.v1.OperationService.WatchOperations:output_type -> baremetal.v1.OperationEvent
+	14, // 66: baremetal.v1.OperationService.StreamOperationLogs:output_type -> baremetal.v1.LogChunk
+	54, // [54:67] is the sub-list for method output_type
+	41, // [41:54] is the sub-list for method input_type
+	41, // [41:41] is the sub-list for extension type_name
+	41, // [41:41] is the sub-list for extension extendee
+	0,  // [0:41] is the sub-list for field type_name
 }
 
 func init() { file_baremetal_v1_baremetal_proto_init() }
@@ -2814,8 +2894,8 @@ func file_baremetal_v1_baremetal_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_baremetal_v1_baremetal_proto_rawDesc), len(file_baremetal_v1_baremetal_proto_rawDesc)),
-			NumEnums:      4,
-			NumMessages:   39,
+			NumEnums:      5,
+			NumMessages:   40,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

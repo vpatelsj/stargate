@@ -50,7 +50,7 @@ func TestRunner_StartOperation_Success(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	machine := createTestMachine(t, s)
-	run, _, err := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, err := s.CreateOperationIfNotExists("req-1", machine.MachineId, pb.Operation_REBOOT, "", nil)
 	if err != nil {
 		t.Fatalf("failed to create run: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestRunner_StartOperation_Reimage(t *testing.T) {
 
 	machine := createTestMachine(t, s)
 	// First enter maintenance (required for reimage)
-	enterMaintenanceOp, _, err := s.CreateOperationIfNotExists("req-0", machine.MachineId, "ENTER_MAINTENANCE", "")
+	enterMaintenanceOp, _, err := s.CreateOperationIfNotExists("req-0", machine.MachineId, pb.Operation_ENTER_MAINTENANCE, "", nil)
 	if err != nil {
 		t.Fatalf("failed to create enter-maintenance op: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestRunner_StartOperation_Reimage(t *testing.T) {
 	}
 
 	// Now start reimage
-	run, _, err := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REIMAGE", "")
+	run, _, err := s.CreateOperationIfNotExists("req-1", machine.MachineId, pb.Operation_REIMAGE, "", nil)
 	if err != nil {
 		t.Fatalf("failed to create reimage op: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestRunner_StartOperation_EnterMaintenance(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	machine := createTestMachine(t, s)
-	run, _, err := s.CreateOperationIfNotExists("req-1", machine.MachineId, "ENTER_MAINTENANCE", "")
+	run, _, err := s.CreateOperationIfNotExists("req-1", machine.MachineId, pb.Operation_ENTER_MAINTENANCE, "", nil)
 	if err != nil {
 		t.Fatalf("failed to create run: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestRunner_CancelOperation(t *testing.T) {
 	runner.provider = p
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, pb.Operation_REBOOT, "", nil)
 
 	runner.StartOperation(context.Background(), run.OperationId)
 
@@ -242,7 +242,7 @@ func TestRunner_StepRetries(t *testing.T) {
 	runner.baseRetryWait = 10 * time.Millisecond
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, pb.Operation_REBOOT, "", nil)
 
 	runner.StartOperation(context.Background(), run.OperationId)
 
@@ -279,7 +279,7 @@ func TestRunner_LogStreaming(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, pb.Operation_REBOOT, "", nil)
 
 	var logCount int32
 	runner.SubscribeLogs(run.OperationId, func(chunk *pb.LogChunk) {
@@ -307,7 +307,7 @@ func TestRunner_EventStreaming(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, pb.Operation_REBOOT, "", nil)
 
 	var events []*pb.OperationEvent
 	var mu sync.Mutex
@@ -341,7 +341,7 @@ func TestRunner_EventStreaming(t *testing.T) {
 	unsubscribe()
 
 	// Create another run and verify no more events
-	run2, _, _ := s.CreateOperationIfNotExists("req-2", machine.MachineId, "REBOOT", "")
+	run2, _, _ := s.CreateOperationIfNotExists("req-2", machine.MachineId, pb.Operation_REBOOT, "", nil)
 	runner.StartOperation(context.Background(), run2.OperationId)
 
 	time.Sleep(200 * time.Millisecond)
@@ -385,7 +385,7 @@ func TestRunner_ConcurrentRuns(t *testing.T) {
 	// Start runs on all machines concurrently
 	var runs []*pb.Operation
 	for i, m := range machines {
-		run, _, _ := s.CreateOperationIfNotExists("req-"+string(rune('0'+i)), m.MachineId, "REBOOT", "")
+		run, _, _ := s.CreateOperationIfNotExists("req-"+string(rune('0'+i)), m.MachineId, pb.Operation_REBOOT, "", nil)
 		runs = append(runs, run)
 	}
 
@@ -451,7 +451,7 @@ func TestRunner_RunNotPending(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, pb.Operation_REBOOT, "", nil)
 
 	// Complete the run first
 	s.CompleteOperation(run.OperationId, pb.Operation_SUCCEEDED)
@@ -473,7 +473,7 @@ func TestRunner_Shutdown(t *testing.T) {
 	runner.provider = p
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, pb.Operation_REBOOT, "", nil)
 
 	runner.StartOperation(context.Background(), run.OperationId)
 
@@ -502,7 +502,7 @@ func TestRunner_IsOperationRunning(t *testing.T) {
 	runner.provider = p
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, pb.Operation_REBOOT, "", nil)
 
 	if runner.IsRunning(run.OperationId) {
 		t.Error("Run should not be running before start")
@@ -533,7 +533,7 @@ func TestRunner_CancelOperation_SetsMachineState(t *testing.T) {
 	runner.provider = p
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, pb.Operation_REBOOT, "", nil)
 
 	// Start run
 	runner.StartOperation(context.Background(), run.OperationId)
@@ -557,9 +557,11 @@ func TestRunner_CancelOperation_SetsMachineState(t *testing.T) {
 	// Verify machine state was updated
 	finalMachine, _ := s.GetMachine(machine.MachineId)
 
-	// Phase should be MAINTENANCE
-	if finalMachine.Status.Phase != pb.MachineStatus_MAINTENANCE {
-		t.Errorf("Expected machine phase MAINTENANCE, got %v", finalMachine.Status.Phase)
+	// Phase should NOT be changed by cancellation - phase is imperative intent
+	// Only EnterMaintenance/ExitMaintenance should change phase
+	// The original phase (FACTORY_READY) should remain unchanged
+	if finalMachine.Status.Phase != pb.MachineStatus_FACTORY_READY {
+		t.Errorf("Expected machine phase FACTORY_READY (unchanged), got %v", finalMachine.Status.Phase)
 	}
 
 	// ActiveOperationId should be cleared
@@ -590,7 +592,7 @@ func TestRunner_CancelOperation_Idempotent(t *testing.T) {
 	runner.provider = p
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, pb.Operation_REBOOT, "", nil)
 
 	// Start run
 	runner.StartOperation(context.Background(), run.OperationId)
@@ -624,7 +626,7 @@ func TestRunner_VerifyRequiredForProvisioned(t *testing.T) {
 	machine := createTestMachine(t, s)
 
 	// First enter maintenance (required for reimage)
-	enterOp, _, err := s.CreateOperationIfNotExists("req-0", machine.MachineId, "ENTER_MAINTENANCE", "")
+	enterOp, _, err := s.CreateOperationIfNotExists("req-0", machine.MachineId, pb.Operation_ENTER_MAINTENANCE, "", nil)
 	if err != nil {
 		t.Fatalf("failed to create enter-maintenance op: %v", err)
 	}
@@ -642,7 +644,7 @@ func TestRunner_VerifyRequiredForProvisioned(t *testing.T) {
 	}
 
 	// Start a reimage operation (which has a verify step via repave-join plan)
-	run, _, err := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REIMAGE", "")
+	run, _, err := s.CreateOperationIfNotExists("req-1", machine.MachineId, pb.Operation_REIMAGE, "", nil)
 	if err != nil {
 		t.Fatalf("failed to create reimage op: %v", err)
 	}
@@ -698,7 +700,7 @@ func TestRunner_StartOperation_DuplicatePrevention(t *testing.T) {
 	runner.provider = p
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, pb.Operation_REBOOT, "", nil)
 
 	// Call StartOperation twice quickly - only one should actually execute
 	err1 := runner.StartOperation(context.Background(), run.OperationId)
