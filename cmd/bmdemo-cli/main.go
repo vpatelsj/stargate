@@ -240,10 +240,20 @@ func listMachines(conn *grpc.ClientConn) {
 
 func runAndWatch(conn *grpc.ClientConn, args []string, runType, planID string) {
 	if len(args) < 1 {
-		log.Fatalf("usage: %s <machine-id>", strings.ToLower(runType))
+		log.Fatalf("usage: %s <machine-id> [--request-id=<id>]", strings.ToLower(runType))
 	}
 	machineID := args[0]
-	requestID := uuid.New().String()
+
+	// Check for --request-id flag in remaining args
+	requestID := ""
+	for _, arg := range args[1:] {
+		if strings.HasPrefix(arg, "--request-id=") {
+			requestID = strings.TrimPrefix(arg, "--request-id=")
+		}
+	}
+	if requestID == "" {
+		requestID = uuid.New().String()
+	}
 
 	// Create a cancellable context for the entire operation
 	ctx, cancel := context.WithCancel(context.Background())

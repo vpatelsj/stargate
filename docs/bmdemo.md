@@ -1,169 +1,92 @@
 # Baremetal gRPC Demo
 
-A standalone gRPC service demonstrating baremetal machine lifecycle management with hybrid state tracking.
+A gRPC service for baremetal machine lifecycle management with hybrid state tracking.
 
 ## Quick Start
 
 ```bash
-# Terminal 1: Start server
+# Terminal 1: Server
 go run ./cmd/bmdemo-server
 
-# Terminal 2: Run commands
+# Terminal 2: CLI
 go run ./cmd/bmdemo-cli import 3
-go run ./cmd/bmdemo-cli list
 go run ./cmd/bmdemo-cli repave machine-1
-go run ./cmd/bmdemo-cli rma machine-1
+go run ./cmd/bmdemo-cli list
 ```
 
-Or run the interactive demo script:
-```bash
-./scripts/run-bmdemo.sh          # Normal speed
-./scripts/run-bmdemo.sh --slow   # Slower timings for live demos
-```
-
-Or run the scripted demo for design docs:
-```bash
-go run ./cmd/bmdemo-cli demo
-```
+Interactive demo: `./scripts/run-bmdemo.sh` (add `--slow` for live presentations)
 
 ## Build
 
 ```bash
-make bmdemo          # Build binaries to bin/
-make proto           # Regenerate protobuf (requires protoc + plugins)
+make bmdemo    # Build binaries
+make proto     # Regenerate protobuf
 ```
 
-## Commands
+## CLI Commands
 
 | Command | Description |
 |---------|-------------|
-| `import <N>` | Register N machines with predictable IDs (machine-1, machine-2, ...) |
-| `list` | List machines with phase, effective state, conditions |
-| `repave <id>` | Execute plan/repave-join and watch progress |
-| `rma <id>` | Execute plan/rma and watch progress |
-| `reboot <id>` | Execute plan/reboot and watch progress |
+| `import <N>` | Register N machines (machine-1, machine-2, ...) |
+| `list` | Show machines with phase, effective state, conditions |
+| `repave <id>` | Repave and join cluster |
+| `rma <id>` | Return merchandise authorization flow |
+| `reboot <id>` | Simple reboot |
 | `runs` | List all runs |
 | `plans` | List available plans |
-| `watch [machine-id]` | Watch run events (streaming) |
+| `watch [machine-id]` | Stream run events |
 | `logs <run-id>` | Stream run logs |
-| `demo` | Run scripted demo (for design docs) |
+| `cancel <run-id>` | Cancel active run |
 
 ## Hybrid Lifecycle Model
 
-Machines have a **hybrid state** combining three concepts:
+Machines have a **hybrid state** from three sources:
 
-### 1. Explicit Phase
-Operator-set state stored in `status.phase`:
-```
-FACTORY_READY → READY → IN_SERVICE → MAINTENANCE → RMA → RETIRED
-```
+### Explicit Phase
+Operator-set state: `FACTORY_READY → READY → IN_SERVICE → MAINTENANCE → RMA → RETIRED`
 
-### 2. Conditions
-Boolean signals tracking runtime state:
-| Condition | Meaning |
-|-----------|---------|
-| `Reachable` | Machine responds to health probes |
-| `InCustomerCluster` | Successfully joined target cluster |
-| `NeedsIntervention` | Requires manual action |
-| `Provisioned` | Machine has been successfully provisioned |
-| `Healthy` | Machine is operating normally |
+### Conditions
+Boolean signals: `Reachable`, `InCustomerCluster`, `NeedsIntervention`, `Provisioned`, `Healthy`
 
-### 3. Effective State
-Computed view applying precedence rules (from `lifecycle.EffectiveState()`):
-
-```
-1. Active run (PENDING/RUNNING)     → PROVISIONING
-2. Explicit RMA                     → RMA
-3. Explicit RETIRED                 → RETIRED
-4. Explicit MAINTENANCE             → MAINTENANCE
-5. InCustomerCluster condition=true → IN_SERVICE
-6. FACTORY_READY                    → FACTORY_READY
-7. Otherwise                        → READY
-```
-
-**Example:**
-```
-MACHINE      PHASE          EFFECTIVE      CONDITIONS
-machine-1    READY          IN_SERVICE     InCustomerCluster=✓
-machine-2    MAINTENANCE    MAINTENANCE    InCustomerCluster=✓, NeedsIntervention=✓
-machine-3    FACTORY_READY  PROVISIONING   (active run)
-```
+### Effective State
+Computed view with precedence rules:
+1. Active run → `PROVISIONING`
+2. Explicit `RMA/RETIRED/MAINTENANCE` → that phase
+3. `InCustomerCluster=true` → `IN_SERVICE`
+4. `FACTORY_READY` → `FACTORY_READY`
+5. Otherwise → `READY`
 
 ## Plans
 
-Built-in plans in `internal/bmdemo/plans`:
-
 | Plan | Steps |
 |------|-------|
-| `plan/repave-join` | set-netboot → reboot-to-netboot → repave-image → join-cluster → verify-in-cluster |
+| `plan/repave-join` | set-netboot → reboot → repave-image → join-cluster → verify |
 | `plan/rma` | drain-check → graceful-shutdown → mark-rma |
 | `plan/reboot` | reboot |
-| `plan/upgrade` | cordon-node → drain-node → upgrade-kubelet → restart-kubelet → uncordon-node → verify-upgrade |
+| `plan/upgrade` | cordon → drain → upgrade → restart → uncordon → verify |
 | `plan/net-reconfig` | apply-network-config → verify-connectivity |
-
-## Step Types
-
-Steps are defined in proto with specific action kinds:
-
-| Step Kind | Description |
-|-----------|-------------|
-| `Step_Ssh` | Execute SSH command/script on machine |
-| `Step_Reboot` | Reboot machine (graceful or forced) |
-| `Step_Netboot` | Set netboot/PXE profile |
-| `Step_Repave` | Reprovision with new OS image |
-| `Step_Join` | Join machine to Kubernetes cluster |
-| `Step_Verify` | Verify machine is healthy in cluster |
-| `Step_Net` | Apply network reconfiguration |
-| `Step_Rma` | Mark machine for RMA (hardware return) |
 
 ## Run Semantics
 
-A **Run** has both:
-- `type` - operation category (REPAVE, RMA, REBOOT, UPGRADE, NET_RECONFIG)
-- `plan_id` - specific plan executed (e.g., `plan/repave-join`)
-
-**Plan selection precedence:**
-1. If `plan_id` is provided, use that plan
-2. Otherwise, map `type` to default plan (e.g., REPAVE → plan/repave-join)
-
-**Idempotency:** 
-- StartRun requires `request_id` for idempotency
-- Idempotency is scoped to (machine_id, request_id) tuple
-- Same request_id can be reused across different machines
-- Replaying the same request returns the existing run without creating a duplicate
-
-**Retry behavior:**
-- If a run is still PENDING when retried, execution is re-attempted
-- Terminal states (SUCCEEDED, FAILED, CANCELED) are immutable
-
-**Single active run:** Only one run can be active per machine at a time.
+- **Idempotency:** `request_id` required; scoped to `(machine_id, request_id)`
+- **Single active run:** One run per machine at a time
+- **Retry:** PENDING runs re-execute on replay; terminal states are immutable
 
 ## Architecture
 
 ```
-cmd/bmdemo-server          gRPC server wiring all components
-cmd/bmdemo-cli             CLI with real-time streaming output
+cmd/bmdemo-server         gRPC server
+cmd/bmdemo-cli            CLI with streaming output
 
 internal/bmdemo/
-├── store/                 Thread-safe in-memory store
-│                          - Idempotent operations
-│                          - Machine-scoped request deduplication
-├── lifecycle/             Phase/condition helpers, EffectiveState()
-├── plans/                 Plan registry with built-in plans
-├── provider/              Provider interface for extensibility
-│   └── fake/              Simulated provider with configurable timing
-└── executor/              Async run execution
-                           - Exponential backoff retries
-                           - Real-time event/log streaming
-                           - Context-based cancellation
-
-scripts/
-└── run-bmdemo.sh          Interactive demo script with presenter pauses
+├── store/                Thread-safe in-memory store (idempotent ops)
+├── lifecycle/            Phase/condition helpers, EffectiveState()
+├── plans/                Plan registry
+├── provider/fake/        Simulated provider with configurable timing
+└── executor/             Async execution with retries and streaming
 ```
 
 ### Provider Interface
-
-The executor uses a `provider.Provider` interface, making it easy to swap implementations:
 
 ```go
 type Provider interface {
@@ -178,9 +101,7 @@ type Provider interface {
 }
 ```
 
-## Proto
-
-Services defined in `proto/baremetal/v1/baremetal.proto`:
+## gRPC API
 
 ```protobuf
 service MachineService {
@@ -205,116 +126,43 @@ service RunService {
 }
 ```
 
-## Example Session
-
-```bash
-$ go run ./cmd/bmdemo-cli import 3
-Importing 3 fake machines...
-MACHINE_ID  MAC                PHASE
-machine-1   02:00:00:00:00:00  FACTORY_READY
-machine-2   02:00:00:00:00:01  FACTORY_READY
-machine-3   02:00:00:00:00:02  FACTORY_READY
-
-Imported 3 machines.
-
-$ go run ./cmd/bmdemo-cli list
-MACHINE_ID  PHASE          EFFECTIVE      REACHABLE  IN_CLUSTER  NEEDS_HELP  ACTIVE_RUN
-machine-1   FACTORY_READY  FACTORY_READY  -          -           -           -
-machine-2   FACTORY_READY  FACTORY_READY  -          -           -           -
-machine-3   FACTORY_READY  FACTORY_READY  -          -           -           -
-
-$ go run ./cmd/bmdemo-cli repave machine-1
-┌─────────────────────────────────────────────────────────────
-│ Run: run-1234567890...
-│ Machine: machine-1
-│ Type: REPAVE | Plan: plan/repave-join
-│ Request ID: abc12345-...
-└─────────────────────────────────────────────────────────────
-
-  │ [netboot] Setting netboot profile: pxe-ubuntu-22.04
-  [12:00:01] Step set-netboot succeeded
-→ reboot-to-netboot...
-  │ [reboot] Initiating graceful reboot
-  ✓ reboot-to-netboot
-→ repave-image...
-  │ [repave] Downloading image...
-  │ [repave] Writing image to disk...
-  ✓ repave-image
-→ join-cluster...
-  │ [join] Joining node to cluster: default-cluster
-  ✓ join-cluster
-→ verify-in-cluster...
-  │ [verify] Node status: Ready
-  [12:00:05] Run succeeded
-
-┌─────────────────────────────────────────────────────────────
-│ ✓ SUCCEEDED
-│ Duration: 3.5s
-│ Steps: 5/5 completed
-└─────────────────────────────────────────────────────────────
-
-$ go run ./cmd/bmdemo-cli list
-MACHINE_ID  PHASE       EFFECTIVE   REACHABLE  IN_CLUSTER  NEEDS_HELP  ACTIVE_RUN
-machine-1   IN_SERVICE  IN_SERVICE  -          ✓           -           -
-machine-2   FACTORY_READY  ...
-machine-3   FACTORY_READY  ...
-
-$ go run ./cmd/bmdemo-cli rma machine-1
-┌─────────────────────────────────────────────────────────────
-│ Run: run-9876543210...
-│ Machine: machine-1
-│ Type: RMA | Plan: plan/rma
-└─────────────────────────────────────────────────────────────
-
-→ drain-check...
-  ✓ drain-check
-→ graceful-shutdown...
-  ✓ graceful-shutdown
-→ mark-rma...
-  │ [rma] Machine marked for RMA
-  │ [rma] Ticket created: RMA-12345
-  ✓ mark-rma
-
-┌─────────────────────────────────────────────────────────────
-│ ✓ SUCCEEDED
-│ Duration: 1.2s
-│ Steps: 3/3 completed
-└─────────────────────────────────────────────────────────────
-
-$ go run ./cmd/bmdemo-cli list
-MACHINE_ID  PHASE  EFFECTIVE  REACHABLE  IN_CLUSTER  NEEDS_HELP  ACTIVE_RUN
-machine-1   RMA    RMA        -          -           -           -
-...
-```
-
 ## Server Flags
 
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--port` | 50051 | gRPC port |
+| `--slow` | false | Slower timings for demos |
+| `--log-level` | info | debug/info/warn/error |
+
+## Example Session
+
 ```
---port        gRPC port (default: 50051)
---slow        Use slow timing for demos (more realistic durations)
---log-level   debug|info|warn|error (default: info)
+$ go run ./cmd/bmdemo-cli import 3
+machine-1   FACTORY_READY
+machine-2   FACTORY_READY
+machine-3   FACTORY_READY
+
+$ go run ./cmd/bmdemo-cli repave machine-1
+→ set-netboot...      ✓
+→ reboot-to-netboot... ✓
+→ repave-image...     ✓
+→ join-cluster...     ✓
+→ verify-in-cluster... ✓
+✓ SUCCEEDED (3.5s)
+
+$ go run ./cmd/bmdemo-cli list
+machine-1   IN_SERVICE   InCustomerCluster=✓
+machine-2   FACTORY_READY
+machine-3   FACTORY_READY
+
+$ go run ./cmd/bmdemo-cli rma machine-1
+→ drain-check...       ✓
+→ graceful-shutdown... ✓
+→ mark-rma...         ✓
+✓ SUCCEEDED (1.2s)
+
+$ go run ./cmd/bmdemo-cli list
+machine-1   RMA
 ```
 
-## CLI Flags
-
-```
---server      Server address (default: localhost:50051)
-```
-
-## Demo Script
-
-For live demos, use the interactive script:
-
-```bash
-./scripts/run-bmdemo.sh          # Normal speed
-./scripts/run-bmdemo.sh --slow   # Slower for visibility
-```
-
-The script:
-- Builds binaries and starts the server
-- Walks through each feature with pauses for explanation
-- Demonstrates import, repave, idempotency, reboot, and RMA
-- Shows machine lifecycle transitions
-- Cleans up on exit
-
-See [docs/bmdemo-presenter-guide.md](bmdemo-presenter-guide.md) for talking points.
+See [bmdemo-presenter-guide.md](bmdemo-presenter-guide.md) for demo talking points.
