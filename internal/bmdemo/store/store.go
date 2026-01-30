@@ -118,10 +118,12 @@ func (s *Store) ListMachines() []*pb.Machine {
 	return result
 }
 
-// UpdateMachine updates an existing machine. Returns error if not found.
+// UpdateMachine updates an existing machine's Spec and Labels. Returns error if not found.
 // This method clones spec and labels to avoid pointer aliasing.
-// Status is backend-owned; if the caller passes a status, it is applied
-// (the server layer is responsible for ensuring clients don't pass status).
+//
+// Status is backend-owned: API-level callers (e.g., gRPC UpdateMachine) MUST pass
+// Status=nil to prevent clobbering executor-updated status (conditions, active_operation_id,
+// effective_state, phase). Use UpdateMachineStatus for internal status updates.
 func (s *Store) UpdateMachine(m *pb.Machine) (*pb.Machine, error) {
 	if m == nil {
 		return nil, fmt.Errorf("machine is nil")
@@ -140,9 +142,8 @@ func (s *Store) UpdateMachine(m *pb.Machine) (*pb.Machine, error) {
 	if m.Spec != nil {
 		existing.Spec = proto.Clone(m.Spec).(*pb.MachineSpec)
 	}
-	if m.Status != nil {
-		existing.Status = proto.Clone(m.Status).(*pb.MachineStatus)
-	}
+	// Status is intentionally NOT updated here. API callers must pass Status=nil.
+	// Internal callers that need to update status should use UpdateMachineStatus.
 	if m.Labels != nil {
 		// Clone the labels map
 		clonedLabels := make(map[string]string, len(m.Labels))
@@ -153,6 +154,26 @@ func (s *Store) UpdateMachine(m *pb.Machine) (*pb.Machine, error) {
 	}
 
 	s.machines[m.MachineId] = existing
+	return cloneMachine(existing), nil
+}
+
+// UpdateMachineStatus updates only the status of an existing machine.
+// This is for internal use by the executor/backend - API callers should not use this.
+func (s *Store) UpdateMachineStatus(machineID string, status *pb.MachineStatus) (*pb.Machine, error) {
+	if status == nil {
+		return nil, fmt.Errorf("status is nil")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	existing, ok := s.machines[machineID]
+	if !ok {
+		return nil, fmt.Errorf("machine %q not found", machineID)
+	}
+
+	existing.Status = proto.Clone(status).(*pb.MachineStatus)
+	s.machines[machineID] = existing
 	return cloneMachine(existing), nil
 }
 

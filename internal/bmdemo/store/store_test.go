@@ -616,3 +616,133 @@ func TestCreateOperationConcurrentUpsert(t *testing.T) {
 		t.Error("Expected ActiveOperationId to be set on the machine")
 	}
 }
+
+// TestUpdateMachine_DoesNotClobberStatus verifies that UpdateMachine with Status=nil
+// does not overwrite backend-owned status fields (conditions, active_operation_id, etc.).
+// This is a regression test for the bug where API-level UpdateMachine could clobber
+// executor-updated status under concurrency.
+func TestUpdateMachine_DoesNotClobberStatus(t *testing.T) {
+	s := New()
+
+	// Create a machine with backend-owned status (simulating executor state)
+	initialMachine := &pb.Machine{
+		MachineId: "m-status-test",
+		Spec:      &pb.MachineSpec{SshEndpoint: "10.0.0.1:22"},
+		Labels:    map[string]string{"env": "prod"},
+		Status: &pb.MachineStatus{
+			Phase:             pb.MachineStatus_MAINTENANCE,
+			ActiveOperationId: "op-1",
+			Conditions: []*pb.Condition{
+				{
+					Type:    "NeedsIntervention",
+					Status:  true,
+					Reason:  "HardwareFailure",
+					Message: "Disk needs replacement",
+				},
+			},
+		},
+	}
+	_, err := s.UpsertMachine(initialMachine)
+	if err != nil {
+		t.Fatalf("UpsertMachine failed: %v", err)
+	}
+
+	// Simulate API-level UpdateMachine: only Spec/Labels, Status=nil
+	// This is what the gRPC server should pass after the fix
+	update := &pb.Machine{
+		MachineId: "m-status-test",
+		Spec:      &pb.MachineSpec{SshEndpoint: "10.0.0.2:22"}, // Changed endpoint
+		Labels:    map[string]string{"env": "staging"},         // Changed labels
+		Status:    nil,                                         // API callers must pass nil
+	}
+	updated, err := s.UpdateMachine(update)
+	if err != nil {
+		t.Fatalf("UpdateMachine failed: %v", err)
+	}
+
+	// Verify Spec and Labels were updated
+	if updated.Spec.SshEndpoint != "10.0.0.2:22" {
+		t.Errorf("Expected Spec.SshEndpoint to be updated to '10.0.0.2:22', got %q", updated.Spec.SshEndpoint)
+	}
+	if updated.Labels["env"] != "staging" {
+		t.Errorf("Expected Labels['env'] to be 'staging', got %q", updated.Labels["env"])
+	}
+
+	// CRITICAL: Verify Status was NOT clobbered
+	if updated.Status == nil {
+		t.Fatal("Status was unexpectedly nil after update")
+	}
+	if updated.Status.ActiveOperationId != "op-1" {
+		t.Errorf("ActiveOperationId was clobbered: expected 'op-1', got %q", updated.Status.ActiveOperationId)
+	}
+	if updated.Status.Phase != pb.MachineStatus_MAINTENANCE {
+		t.Errorf("Phase was clobbered: expected MAINTENANCE, got %v", updated.Status.Phase)
+	}
+	if len(updated.Status.Conditions) != 1 {
+		t.Fatalf("Conditions were clobbered: expected 1 condition, got %d", len(updated.Status.Conditions))
+	}
+	cond := updated.Status.Conditions[0]
+	if cond.Type != "NeedsIntervention" || !cond.Status {
+		t.Errorf("Condition was clobbered: expected NeedsIntervention=true, got %s=%v", cond.Type, cond.Status)
+	}
+
+	// Also verify via GetMachine (to ensure internal state is correct)
+	fetched, ok := s.GetMachine("m-status-test")
+	if !ok {
+		t.Fatal("Machine not found after update")
+	}
+	if fetched.Status.ActiveOperationId != "op-1" {
+		t.Errorf("GetMachine: ActiveOperationId was clobbered: expected 'op-1', got %q", fetched.Status.ActiveOperationId)
+	}
+}
+
+// TestUpdateMachineStatus_InternalUse verifies that UpdateMachineStatus correctly
+// updates only the status field for internal/executor use.
+func TestUpdateMachineStatus_InternalUse(t *testing.T) {
+	s := New()
+
+	// Create a machine with initial state
+	_, err := s.UpsertMachine(&pb.Machine{
+		MachineId: "m-status-internal",
+		Spec:      &pb.MachineSpec{SshEndpoint: "10.0.0.1:22"},
+		Labels:    map[string]string{"role": "worker"},
+		Status: &pb.MachineStatus{
+			Phase: pb.MachineStatus_FACTORY_READY,
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpsertMachine failed: %v", err)
+	}
+
+	// Use UpdateMachineStatus (internal method) to update status
+	newStatus := &pb.MachineStatus{
+		Phase:             pb.MachineStatus_READY,
+		ActiveOperationId: "op-internal",
+		Conditions: []*pb.Condition{
+			{Type: "Provisioned", Status: true},
+		},
+	}
+	updated, err := s.UpdateMachineStatus("m-status-internal", newStatus)
+	if err != nil {
+		t.Fatalf("UpdateMachineStatus failed: %v", err)
+	}
+
+	// Verify status was updated
+	if updated.Status.Phase != pb.MachineStatus_READY {
+		t.Errorf("Expected Phase READY, got %v", updated.Status.Phase)
+	}
+	if updated.Status.ActiveOperationId != "op-internal" {
+		t.Errorf("Expected ActiveOperationId 'op-internal', got %q", updated.Status.ActiveOperationId)
+	}
+	if len(updated.Status.Conditions) != 1 || updated.Status.Conditions[0].Type != "Provisioned" {
+		t.Error("Conditions not updated correctly")
+	}
+
+	// Verify Spec and Labels were NOT touched
+	if updated.Spec.SshEndpoint != "10.0.0.1:22" {
+		t.Errorf("Spec was unexpectedly modified: got %q", updated.Spec.SshEndpoint)
+	}
+	if updated.Labels["role"] != "worker" {
+		t.Errorf("Labels were unexpectedly modified: got %v", updated.Labels)
+	}
+}

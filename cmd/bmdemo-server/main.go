@@ -216,22 +216,23 @@ func (s *machineServer) UpdateMachine(ctx context.Context, req *pb.UpdateMachine
 		return nil, status.Error(codes.InvalidArgument, "machine is required")
 	}
 
-	// Get existing machine to preserve status
-	existing, ok := s.store.GetMachine(req.Machine.MachineId)
-	if !ok {
+	// Check if machine exists first
+	if _, ok := s.store.GetMachine(req.Machine.MachineId); !ok {
 		return nil, status.Errorf(codes.NotFound, "machine %q not found", req.Machine.MachineId)
 	}
 
-	// Only update Spec and Labels - ignore Status from client entirely
-	// Status fields (phase, effective_state, conditions) are backend-owned
-	if req.Machine.Spec != nil {
-		existing.Spec = req.Machine.Spec
-	}
-	if req.Machine.Labels != nil {
-		existing.Labels = req.Machine.Labels
+	// Construct update object with only Spec and Labels.
+	// Status is explicitly nil to prevent clobbering backend-owned status
+	// (conditions, active_operation_id, effective_state, phase).
+	// The store treats nil Spec/Labels as "no change".
+	update := &pb.Machine{
+		MachineId: req.Machine.MachineId,
+		Spec:      req.Machine.Spec,
+		Labels:    req.Machine.Labels,
+		Status:    nil, // Never pass client status to store
 	}
 
-	m, err := s.store.UpdateMachine(existing)
+	m, err := s.store.UpdateMachine(update)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}

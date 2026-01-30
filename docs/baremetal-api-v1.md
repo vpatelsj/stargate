@@ -207,7 +207,7 @@ service MachineService {
   // List all machines with optional filtering
   rpc ListMachines(ListMachinesRequest) returns (ListMachinesResponse);
 
-  // Update machine spec/labels (status is server-managed)
+  // Update machine spec/labels (status is entirely server-managed; any client-supplied status is ignored)
   rpc UpdateMachine(UpdateMachineRequest) returns (Machine);
 
   // === Operation RPCs ===

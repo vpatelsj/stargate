@@ -218,7 +218,7 @@ func (r *Runner) CancelOperation(operationID string) error {
 	if ok {
 		lifecycle.SetCondition(machine, lifecycle.ConditionOperationCanceled, true, "UserCanceled", "Operation was canceled by user")
 		machine.Status.ActiveOperationId = ""
-		r.store.UpdateMachine(machine)
+		r.store.UpdateMachineStatus(op.MachineId, machine.Status)
 	}
 
 	// Cancel the active context if the operation is still executing
@@ -290,7 +290,7 @@ func (r *Runner) executeOperation(ctx context.Context, operationID string) {
 
 	// Update machine: set active operation ID
 	machine.Status.ActiveOperationId = operationID
-	r.store.UpdateMachine(machine)
+	r.store.UpdateMachineStatus(op.MachineId, machine.Status)
 
 	// Execute steps
 	var lastErr error
@@ -528,7 +528,7 @@ func (r *Runner) handlePanic(operationID string, recovered interface{}) {
 	if ok {
 		lifecycle.SetCondition(machine, lifecycle.ConditionNeedsIntervention, true, "Panic", panicMsg)
 		machine.Status.ActiveOperationId = ""
-		r.store.UpdateMachine(machine)
+		r.store.UpdateMachineStatus(op.MachineId, machine.Status)
 	}
 }
 
@@ -557,8 +557,8 @@ func (r *Runner) failOperationWithMachine(operationID string, machine *pb.Machin
 	lifecycle.SetCondition(machine, lifecycle.ConditionNeedsIntervention, true, "OperationFailed", message)
 	machine.Status.ActiveOperationId = ""
 
-	// Persist the updated machine
-	r.store.UpdateMachine(machine)
+	// Persist the updated machine status
+	r.store.UpdateMachineStatus(machine.MachineId, machine.Status)
 }
 
 // cancelOperation is called when an operation is canceled via context (internal path).
@@ -581,7 +581,7 @@ func (r *Runner) cancelOperation(operationID string) {
 	if ok {
 		lifecycle.SetCondition(machine, lifecycle.ConditionOperationCanceled, true, "Canceled", "Operation was canceled")
 		machine.Status.ActiveOperationId = ""
-		r.store.UpdateMachine(machine)
+		r.store.UpdateMachineStatus(op.MachineId, machine.Status)
 	}
 
 	// Emit events
@@ -626,8 +626,8 @@ func (r *Runner) succeedOperation(operationID string, machine *pb.Machine, compl
 		// Default: keep current phase
 	}
 
-	// Persist the updated machine
-	r.store.UpdateMachine(machine)
+	// Persist the updated machine status
+	r.store.UpdateMachineStatus(machine.MachineId, machine.Status)
 }
 
 // IsRunning returns true if the runner has an active operation.

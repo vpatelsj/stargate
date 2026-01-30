@@ -182,7 +182,7 @@ A: Yes, across machines. Only one active operation per machine is allowed.
 A: Plans/steps are internal Go types (not in proto). Add a new `StepKind` in `workflow/types.go`, implement executor handling + provider method. SDK consumers don't see step details.
 
 **Q: Can clients update machine status directly?**  
-A: No. UpdateMachine only accepts Spec and Labels; status is owned by the backend/executor.
+A: No. UpdateMachine only accepts Spec and Labels; the entire status (phase, effective_state, conditions, active_operation_id) is owned by the backend/executor. Any client-supplied status is ignored to prevent race conditions.
 
 **Q: In-memory store a problem?**  
 A: For production, back with PostgreSQL or etcd. The store interface is abstracted.

@@ -116,9 +116,10 @@ Boolean signals tracked on the machine status:
    - Safety gate to prevent accidental reimages
    - Must explicitly enter maintenance first
 
-6. **Status fields are backend-owned**
-   - UpdateMachine ignores any client-supplied phase/effective_state
-   - Only Spec and Labels can be updated by clients
+6. **Status is entirely backend-owned**
+   - UpdateMachine only accepts Spec and Labels
+   - All status fields are protected: phase, effective_state, conditions, active_operation_id
+   - Client-supplied status is ignored to prevent clobbering executor state
 
 7. **Operation.type is an enum**
    - `REBOOT`, `REIMAGE`, `ENTER_MAINTENANCE`, `EXIT_MAINTENANCE`
