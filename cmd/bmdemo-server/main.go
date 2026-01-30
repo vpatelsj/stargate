@@ -20,6 +20,7 @@ import (
 
 	pb "github.com/vpatelsj/stargate/gen/baremetal/v1"
 	"github.com/vpatelsj/stargate/internal/bmdemo/executor"
+	"github.com/vpatelsj/stargate/internal/bmdemo/lifecycle"
 	"github.com/vpatelsj/stargate/internal/bmdemo/plans"
 	"github.com/vpatelsj/stargate/internal/bmdemo/provider/fake"
 	"github.com/vpatelsj/stargate/internal/bmdemo/store"
@@ -137,6 +138,21 @@ type machineServer struct {
 	opCtx  context.Context // Long-lived context for operation execution
 }
 
+// populateEffectiveState computes and sets the effective_state field on a machine.
+// This looks up the active operation (if any) to determine the correct state.
+func (s *machineServer) populateEffectiveState(m *pb.Machine) {
+	if m == nil || m.Status == nil {
+		return
+	}
+
+	var activeOp *pb.Operation
+	if m.Status.ActiveOperationId != "" {
+		activeOp, _ = s.store.GetOperation(m.Status.ActiveOperationId)
+	}
+
+	lifecycle.PopulateEffectiveState(m, activeOp)
+}
+
 func (s *machineServer) RegisterMachine(ctx context.Context, req *pb.RegisterMachineRequest) (*pb.Machine, error) {
 	if req.Machine == nil {
 		return nil, status.Error(codes.InvalidArgument, "machine is required")
@@ -147,6 +163,9 @@ func (s *machineServer) RegisterMachine(ctx context.Context, req *pb.RegisterMac
 		s.logger.Error("failed to register machine", "error", err)
 		return nil, status.Errorf(codes.Internal, "failed to register: %v", err)
 	}
+
+	// Populate effective_state before returning
+	s.populateEffectiveState(m)
 
 	s.logger.Info("registered machine",
 		"machine_id", m.MachineId,
@@ -159,17 +178,28 @@ func (s *machineServer) GetMachine(ctx context.Context, req *pb.GetMachineReques
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "machine %q not found", req.MachineId)
 	}
+
+	// Populate effective_state before returning
+	s.populateEffectiveState(m)
+
 	return m, nil
 }
 
 func (s *machineServer) ListMachines(ctx context.Context, req *pb.ListMachinesRequest) (*pb.ListMachinesResponse, error) {
 	machines := s.store.ListMachines()
+
+	// Populate effective_state for each machine before returning
+	for _, m := range machines {
+		s.populateEffectiveState(m)
+	}
+
 	return &pb.ListMachinesResponse{Machines: machines}, nil
 }
 
 // UpdateMachine updates a machine's Spec and Labels.
 // NOTE: Status changes from clients are ignored - status is owned by the backend/executor.
 // This prevents clients from accidentally corrupting machine lifecycle state.
+// The effective_state and phase fields in status are backend-owned and will be ignored.
 func (s *machineServer) UpdateMachine(ctx context.Context, req *pb.UpdateMachineRequest) (*pb.Machine, error) {
 	if req.Machine == nil {
 		return nil, status.Error(codes.InvalidArgument, "machine is required")
@@ -181,7 +211,8 @@ func (s *machineServer) UpdateMachine(ctx context.Context, req *pb.UpdateMachine
 		return nil, status.Errorf(codes.NotFound, "machine %q not found", req.Machine.MachineId)
 	}
 
-	// Only update Spec and Labels - ignore Status from client
+	// Only update Spec and Labels - ignore Status from client entirely
+	// Status fields (phase, effective_state, conditions) are backend-owned
 	if req.Machine.Spec != nil {
 		existing.Spec = req.Machine.Spec
 	}
@@ -193,6 +224,9 @@ func (s *machineServer) UpdateMachine(ctx context.Context, req *pb.UpdateMachine
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
+
+	// Populate effective_state before returning
+	s.populateEffectiveState(m)
 
 	s.logger.Info("updated machine", "machine_id", m.MachineId)
 	return m, nil

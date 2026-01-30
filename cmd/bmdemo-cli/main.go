@@ -81,7 +81,7 @@ Usage: bmdemo-cli [flags] <command> [args]
 
 Commands:
   import <N>                  Import N fake machines (factory-ready, provider=fake)
-  list                        List machines with phase and conditions
+  list                        List machines with phase (intent) and effective state (observed)
   reboot <machine-id>         Reboot a machine (requires READY or MAINTENANCE)
   reimage <machine-id>        Reimage a machine (requires MAINTENANCE)
   enter-maintenance <machine-id>  Enter maintenance mode
@@ -91,6 +91,10 @@ Commands:
   watch [machine-id]          Watch operation events (streaming)
   logs <operation-id>         Stream operation logs
   demo                        Run scripted demo for design docs
+
+Columns in 'list' output:
+  PHASE     - Imperative intent (FACTORY, READY, MAINT)
+  EFFECTIVE - Observed state (NEW, IDLE, BUSY, MAINT, ⚠ATTN, ⛔BLOCK)
 
 Flags:`)
 	flag.PrintDefaults()
@@ -152,7 +156,7 @@ func importMachines(conn *grpc.ClientConn, args []string) {
 }
 
 // ============================================================================
-// list - List machines with phase and conditions
+// list - List machines with phase, effective state, and conditions
 // ============================================================================
 
 func listMachines(conn *grpc.ClientConn) {
@@ -172,17 +176,18 @@ func listMachines(conn *grpc.ClientConn) {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "MACHINE_ID\tPHASE\tREACHABLE\tPROVISIONED\tNEEDS_HELP\tACTIVE_OP")
+	fmt.Fprintln(w, "MACHINE_ID\tPHASE\tEFFECTIVE\tREACHABLE\tPROVISIONED\tACTIVE_OP")
 
 	for _, m := range resp.Machines {
 		phase := "UNKNOWN"
+		effective := "UNKNOWN"
 		reachable := "-"
 		provisioned := "-"
-		needsHelp := "-"
 		activeOp := "-"
 
 		if m.Status != nil {
-			phase = m.Status.Phase.String()
+			phase = formatPhase(m.Status.Phase)
+			effective = formatEffectiveState(m.Status.EffectiveState)
 
 			// Conditions
 			if c := lifecycle.GetCondition(m.Status, lifecycle.ConditionReachable); c != nil {
@@ -199,13 +204,6 @@ func listMachines(conn *grpc.ClientConn) {
 					provisioned = "✗"
 				}
 			}
-			if c := lifecycle.GetCondition(m.Status, lifecycle.ConditionNeedsIntervention); c != nil {
-				if c.Status {
-					needsHelp = "⚠"
-				} else {
-					needsHelp = "-"
-				}
-			}
 
 			if m.Status.ActiveOperationId != "" {
 				activeOp = m.Status.ActiveOperationId[:8] // Short ID
@@ -213,9 +211,43 @@ func listMachines(conn *grpc.ClientConn) {
 		}
 
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			m.MachineId, phase, reachable, provisioned, needsHelp, activeOp)
+			m.MachineId, phase, effective, reachable, provisioned, activeOp)
 	}
 	w.Flush()
+}
+
+// formatPhase returns a human-readable string for machine phase (imperative intent).
+func formatPhase(phase pb.MachineStatus_Phase) string {
+	switch phase {
+	case pb.MachineStatus_FACTORY_READY:
+		return "FACTORY"
+	case pb.MachineStatus_READY:
+		return "READY"
+	case pb.MachineStatus_MAINTENANCE:
+		return "MAINT"
+	default:
+		return "?"
+	}
+}
+
+// formatEffectiveState returns a human-readable string for effective state (observed).
+func formatEffectiveState(state pb.MachineStatus_EffectiveState) string {
+	switch state {
+	case pb.MachineStatus_NEW:
+		return "NEW"
+	case pb.MachineStatus_IDLE:
+		return "IDLE"
+	case pb.MachineStatus_BUSY:
+		return "BUSY"
+	case pb.MachineStatus_MAINTENANCE_IDLE:
+		return "MAINT"
+	case pb.MachineStatus_ATTENTION:
+		return "⚠ATTN"
+	case pb.MachineStatus_BLOCKED:
+		return "⛔BLOCK"
+	default:
+		return "?"
+	}
 }
 
 // ============================================================================
@@ -861,7 +893,7 @@ func demoListMachines(ctx context.Context, machineClient pb.MachineServiceClient
 
 	resp, _ := machineClient.ListMachines(ctx, &pb.ListMachinesRequest{})
 
-	fmt.Printf("%-12s  %-14s  %s\n", "MACHINE", "PHASE", "CONDITIONS")
+	fmt.Printf("%-12s  %-8s  %-8s  %s\n", "MACHINE", "PHASE", "OBSERVED", "CONDITIONS")
 	for _, m := range resp.Machines {
 		if m.Status == nil {
 			continue
@@ -878,8 +910,8 @@ func demoListMachines(ctx context.Context, machineClient pb.MachineServiceClient
 			condStr = strings.Join(conds, ", ")
 		}
 
-		fmt.Printf("%-12s  %-14s  %s\n",
-			m.MachineId, m.Status.Phase, condStr)
+		fmt.Printf("%-12s  %-8s  %-8s  %s\n",
+			m.MachineId, formatPhase(m.Status.Phase), formatEffectiveState(m.Status.EffectiveState), condStr)
 	}
 	fmt.Println("```")
 	fmt.Println()

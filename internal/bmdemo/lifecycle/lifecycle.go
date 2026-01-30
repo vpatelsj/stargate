@@ -16,6 +16,8 @@ const (
 	ConditionHealthy           = "Healthy"
 	ConditionProvisioned       = "Provisioned"
 	ConditionOperationCanceled = "OperationCanceled"
+	ConditionRMA               = "RMA"     // Machine flagged for RMA
+	ConditionRetired           = "Retired" // Machine retired from service
 )
 
 // SetMachinePhase sets the phase on a machine's status.
@@ -124,4 +126,67 @@ func IsActiveOperationPhase(phase pb.Operation_Phase) bool {
 		return true
 	}
 	return false
+}
+
+// ComputeEffectiveState computes the derived effective state for a machine.
+// This implements deterministic precedence rules:
+//  1. If condition Retired==true OR condition RMA==true => BLOCKED
+//  2. Else if condition NeedsIntervention==true => ATTENTION
+//  3. Else if active operation exists AND operation.phase in {PENDING,RUNNING} => BUSY
+//  4. Else if phase == MAINTENANCE => MAINTENANCE_IDLE
+//  5. Else if phase == FACTORY_READY => NEW
+//  6. Else => IDLE
+//
+// The activeOp parameter should be the current active operation if known,
+// or nil if no operation is active or the operation's phase is unknown.
+func ComputeEffectiveState(machine *pb.Machine, activeOp *pb.Operation) pb.MachineStatus_EffectiveState {
+	if machine == nil || machine.Status == nil {
+		return pb.MachineStatus_EFFECTIVE_UNSPECIFIED
+	}
+
+	status := machine.Status
+
+	// Rule 1: BLOCKED if RMA or Retired condition is true
+	if HasCondition(status, ConditionRetired, true) || HasCondition(status, ConditionRMA, true) {
+		return pb.MachineStatus_BLOCKED
+	}
+
+	// Rule 2: ATTENTION if NeedsIntervention condition is true
+	if HasCondition(status, ConditionNeedsIntervention, true) {
+		return pb.MachineStatus_ATTENTION
+	}
+
+	// Rule 3: BUSY if active operation in PENDING/RUNNING phase
+	if status.ActiveOperationId != "" {
+		if activeOp != nil && IsActiveOperationPhase(activeOp.Phase) {
+			return pb.MachineStatus_BUSY
+		}
+		// If we have an active_operation_id but no operation provided,
+		// we assume it's still active (conservative)
+		if activeOp == nil {
+			return pb.MachineStatus_BUSY
+		}
+	}
+
+	// Rule 4: MAINTENANCE_IDLE if phase is MAINTENANCE
+	if status.Phase == pb.MachineStatus_MAINTENANCE {
+		return pb.MachineStatus_MAINTENANCE_IDLE
+	}
+
+	// Rule 5: NEW if phase is FACTORY_READY
+	if status.Phase == pb.MachineStatus_FACTORY_READY {
+		return pb.MachineStatus_NEW
+	}
+
+	// Rule 6: IDLE otherwise (including READY phase)
+	return pb.MachineStatus_IDLE
+}
+
+// PopulateEffectiveState populates the effective_state field on a machine's status.
+// This should be called before returning machines to clients.
+func PopulateEffectiveState(machine *pb.Machine, activeOp *pb.Operation) {
+	if machine == nil || machine.Status == nil {
+		return
+	}
+	machine.Status.EffectiveState = ComputeEffectiveState(machine, activeOp)
 }

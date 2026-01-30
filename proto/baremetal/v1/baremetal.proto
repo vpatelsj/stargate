@@ -66,8 +66,9 @@ message TargetClusterRef {
 }
 
 message MachineStatus {
-  // Phase represents the machine's current lifecycle phase.
-  // Customers use this to understand permission intent.
+  // Phase represents the machine's current lifecycle phase (imperative/intent).
+  // This is the only field set explicitly by API calls.
+  // Allowed values: FACTORY_READY, READY, MAINTENANCE.
   enum Phase {
     PHASE_UNSPECIFIED = 0;
     FACTORY_READY = 1;    // Machine received, not yet provisioned
@@ -75,6 +76,20 @@ message MachineStatus {
     MAINTENANCE = 3;      // Machine in maintenance mode (required for reimage)
   }
   Phase phase = 1;
+
+  // EffectiveState is a derived/observed state computed by the server.
+  // It combines phase, conditions, and active operation status.
+  // This is READ-ONLY from the client perspective.
+  enum EffectiveState {
+    EFFECTIVE_UNSPECIFIED = 0;
+    NEW = 1;              // phase == FACTORY_READY
+    IDLE = 2;             // phase == READY and no active operation
+    BUSY = 3;             // active operation PENDING/RUNNING
+    MAINTENANCE_IDLE = 4; // phase == MAINTENANCE and no active operation
+    ATTENTION = 5;        // NeedsIntervention condition true
+    BLOCKED = 6;          // RMA or Retired condition true
+  }
+  EffectiveState effective_state = 5;
 
   repeated Condition conditions = 2;
   string active_operation_id = 3;     // Currently running operation (empty if idle)

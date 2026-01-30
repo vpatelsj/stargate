@@ -242,3 +242,208 @@ func TestIsActiveOperationPhase(t *testing.T) {
 		}
 	}
 }
+
+// TestComputeEffectiveState tests the precedence rules for effective state computation.
+func TestComputeEffectiveState(t *testing.T) {
+	tests := []struct {
+		name     string
+		machine  *pb.Machine
+		activeOp *pb.Operation
+		want     pb.MachineStatus_EffectiveState
+	}{
+		{
+			name:    "nil machine",
+			machine: nil,
+			want:    pb.MachineStatus_EFFECTIVE_UNSPECIFIED,
+		},
+		{
+			name:    "nil status",
+			machine: &pb.Machine{},
+			want:    pb.MachineStatus_EFFECTIVE_UNSPECIFIED,
+		},
+		{
+			name: "BLOCKED - Retired condition true (highest precedence)",
+			machine: &pb.Machine{
+				Status: &pb.MachineStatus{
+					Phase:             pb.MachineStatus_READY,
+					ActiveOperationId: "op-1",
+					Conditions: []*pb.Condition{
+						{Type: ConditionRetired, Status: true},
+						{Type: ConditionNeedsIntervention, Status: true},
+					},
+				},
+			},
+			activeOp: &pb.Operation{Phase: pb.Operation_RUNNING},
+			want:     pb.MachineStatus_BLOCKED,
+		},
+		{
+			name: "BLOCKED - RMA condition true",
+			machine: &pb.Machine{
+				Status: &pb.MachineStatus{
+					Phase: pb.MachineStatus_MAINTENANCE,
+					Conditions: []*pb.Condition{
+						{Type: ConditionRMA, Status: true},
+					},
+				},
+			},
+			want: pb.MachineStatus_BLOCKED,
+		},
+		{
+			name: "ATTENTION - NeedsIntervention overrides BUSY",
+			machine: &pb.Machine{
+				Status: &pb.MachineStatus{
+					Phase:             pb.MachineStatus_READY,
+					ActiveOperationId: "op-1",
+					Conditions: []*pb.Condition{
+						{Type: ConditionNeedsIntervention, Status: true},
+					},
+				},
+			},
+			activeOp: &pb.Operation{Phase: pb.Operation_RUNNING},
+			want:     pb.MachineStatus_ATTENTION,
+		},
+		{
+			name: "BUSY - active RUNNING operation",
+			machine: &pb.Machine{
+				Status: &pb.MachineStatus{
+					Phase:             pb.MachineStatus_READY,
+					ActiveOperationId: "op-1",
+				},
+			},
+			activeOp: &pb.Operation{Phase: pb.Operation_RUNNING},
+			want:     pb.MachineStatus_BUSY,
+		},
+		{
+			name: "BUSY - active PENDING operation",
+			machine: &pb.Machine{
+				Status: &pb.MachineStatus{
+					Phase:             pb.MachineStatus_MAINTENANCE,
+					ActiveOperationId: "op-1",
+				},
+			},
+			activeOp: &pb.Operation{Phase: pb.Operation_PENDING},
+			want:     pb.MachineStatus_BUSY,
+		},
+		{
+			name: "BUSY - active_operation_id set, no op provided (conservative)",
+			machine: &pb.Machine{
+				Status: &pb.MachineStatus{
+					Phase:             pb.MachineStatus_READY,
+					ActiveOperationId: "op-1",
+				},
+			},
+			activeOp: nil,
+			want:     pb.MachineStatus_BUSY,
+		},
+		{
+			name: "BUSY overrides MAINTENANCE - machine in MAINTENANCE but op RUNNING",
+			machine: &pb.Machine{
+				Status: &pb.MachineStatus{
+					Phase:             pb.MachineStatus_MAINTENANCE,
+					ActiveOperationId: "op-1",
+				},
+			},
+			activeOp: &pb.Operation{Phase: pb.Operation_RUNNING},
+			want:     pb.MachineStatus_BUSY,
+		},
+		{
+			name: "MAINTENANCE_IDLE - phase MAINTENANCE, no active operation",
+			machine: &pb.Machine{
+				Status: &pb.MachineStatus{
+					Phase: pb.MachineStatus_MAINTENANCE,
+				},
+			},
+			want: pb.MachineStatus_MAINTENANCE_IDLE,
+		},
+		{
+			name: "MAINTENANCE_IDLE - phase MAINTENANCE, operation completed",
+			machine: &pb.Machine{
+				Status: &pb.MachineStatus{
+					Phase:             pb.MachineStatus_MAINTENANCE,
+					ActiveOperationId: "op-1",
+				},
+			},
+			activeOp: &pb.Operation{Phase: pb.Operation_SUCCEEDED},
+			want:     pb.MachineStatus_MAINTENANCE_IDLE,
+		},
+		{
+			name: "NEW - phase FACTORY_READY",
+			machine: &pb.Machine{
+				Status: &pb.MachineStatus{
+					Phase: pb.MachineStatus_FACTORY_READY,
+				},
+			},
+			want: pb.MachineStatus_NEW,
+		},
+		{
+			name: "IDLE - phase READY, no active operation",
+			machine: &pb.Machine{
+				Status: &pb.MachineStatus{
+					Phase: pb.MachineStatus_READY,
+				},
+			},
+			want: pb.MachineStatus_IDLE,
+		},
+		{
+			name: "IDLE - phase READY, operation completed",
+			machine: &pb.Machine{
+				Status: &pb.MachineStatus{
+					Phase:             pb.MachineStatus_READY,
+					ActiveOperationId: "op-1",
+				},
+			},
+			activeOp: &pb.Operation{Phase: pb.Operation_SUCCEEDED},
+			want:     pb.MachineStatus_IDLE,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ComputeEffectiveState(tt.machine, tt.activeOp)
+			if got != tt.want {
+				t.Errorf("ComputeEffectiveState() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestComputeEffectiveState_PrecedenceOrder verifies that precedence is correctly ordered.
+func TestComputeEffectiveState_PrecedenceOrder(t *testing.T) {
+	// Test: BLOCKED > ATTENTION > BUSY > MAINTENANCE > NEW > IDLE
+
+	// BLOCKED beats everything
+	m := &pb.Machine{
+		Status: &pb.MachineStatus{
+			Phase:             pb.MachineStatus_MAINTENANCE,
+			ActiveOperationId: "op-1",
+			Conditions: []*pb.Condition{
+				{Type: ConditionRetired, Status: true},
+				{Type: ConditionNeedsIntervention, Status: true},
+			},
+		},
+	}
+	op := &pb.Operation{Phase: pb.Operation_RUNNING}
+	if got := ComputeEffectiveState(m, op); got != pb.MachineStatus_BLOCKED {
+		t.Errorf("BLOCKED should beat everything, got %v", got)
+	}
+
+	// ATTENTION beats BUSY
+	m.Status.Conditions = []*pb.Condition{
+		{Type: ConditionNeedsIntervention, Status: true},
+	}
+	if got := ComputeEffectiveState(m, op); got != pb.MachineStatus_ATTENTION {
+		t.Errorf("ATTENTION should beat BUSY, got %v", got)
+	}
+
+	// BUSY beats MAINTENANCE
+	m.Status.Conditions = nil
+	if got := ComputeEffectiveState(m, op); got != pb.MachineStatus_BUSY {
+		t.Errorf("BUSY should beat MAINTENANCE_IDLE, got %v", got)
+	}
+
+	// MAINTENANCE_IDLE when no active op
+	m.Status.ActiveOperationId = ""
+	if got := ComputeEffectiveState(m, nil); got != pb.MachineStatus_MAINTENANCE_IDLE {
+		t.Errorf("Expected MAINTENANCE_IDLE when in MAINTENANCE phase with no active op, got %v", got)
+	}
+}

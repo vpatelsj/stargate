@@ -80,9 +80,12 @@ print_header "Baremetal Provisioning Demo"
 echo "This demo shows our gRPC-based baremetal provisioning system."
 echo ""
 echo "Key components:"
-echo "  • MachineService - Register and manage physical machines"
-echo "  • PlanService    - Define multi-step provisioning workflows"
-echo "  • RunService     - Execute plans with retries and streaming logs"
+echo "  • MachineService   - Register machines, trigger lifecycle operations"
+echo "  • OperationService - Track operations with streaming logs/events"
+echo ""
+echo "Key concepts:"
+echo "  • Phase          - Imperative intent (FACTORY_READY, READY, MAINTENANCE)"
+echo "  • EffectiveState - Observed state (NEW, IDLE, BUSY, MAINT, ATTENTION, BLOCKED)"
 echo ""
 
 wait_for_input
@@ -124,17 +127,27 @@ print_info "Server running on port $SERVER_PORT (PID: $SERVER_PID)"
 wait_for_input
 
 # ============================================================================
-# Step 2: Show Available Plans
+# Step 2: Explain Dual State Model
 # ============================================================================
 
-print_header "Step 2: View Available Provisioning Plans"
+print_header "Step 2: Understanding Phase vs Effective State"
 
-print_step "Listing built-in plans..."
-run_cli plans
-
+echo "The CLI shows two state columns:"
 echo ""
-print_info "Plans define the steps to execute during provisioning."
-print_info "Each step has timeouts, retry policies, and specific actions."
+echo "  PHASE     - Operator intent (gates which operations are allowed)"
+echo "              Values: FACTORY, READY, MAINT"
+echo ""
+echo "  EFFECTIVE - Observed state computed by the server"
+echo "              Values: NEW, IDLE, BUSY, MAINT, ⚠ATTN, ⛔BLOCK"
+echo ""
+echo "Precedence rules for EFFECTIVE:"
+echo "  1. Retired/RMA condition  → BLOCKED"
+echo "  2. NeedsIntervention      → ATTENTION"
+echo "  3. Active operation       → BUSY"
+echo "  4. Phase=MAINTENANCE      → MAINT"
+echo "  5. Phase=FACTORY_READY    → NEW"
+echo "  6. Otherwise              → IDLE"
+echo ""
 
 wait_for_input
 
@@ -152,109 +165,150 @@ print_step "Verifying machines were imported..."
 run_cli list
 
 echo ""
-print_info "Machines are registered with SSH endpoints and target cluster info."
+print_info "Machines are registered with SSH endpoints."
+print_info "Notice: PHASE=FACTORY (intent), EFFECTIVE=NEW (observed)."
 
 wait_for_input
 
 # ============================================================================
-# Step 4: List Machines
+# Step 4: Enter Maintenance
 # ============================================================================
 
-print_header "Step 4: View Machine Inventory"
+print_header "Step 4: Enter Maintenance Mode"
 
-print_step "Listing all registered machines..."
-run_cli list
-
-# Machine IDs are now predictable: machine-1, machine-2, machine-3
 MACHINE_1="machine-1"
 MACHINE_2="machine-2"
 MACHINE_3="machine-3"
 
+print_step "Entering maintenance mode on $MACHINE_1..."
+print_info "This is required before reimage (safety gate)."
 echo ""
-print_info "Machines start in FACTORY_READY phase, ready for provisioning."
+
+run_cli enter-maintenance "$MACHINE_1"
+
+echo ""
+print_step "Checking machine state..."
+run_cli list
+
+echo ""
+print_info "$MACHINE_1 is now in MAINTENANCE phase (EFFECTIVE=MAINT)."
 
 wait_for_input
 
 # ============================================================================
-# Step 5: Repave a Machine
+# Step 5: Reimage a Machine
 # ============================================================================
 
-print_header "Step 5: Repave Machine (Full Provisioning Flow)"
+print_header "Step 5: Reimage Machine (Full Provisioning Flow)"
 
-print_step "Starting repave operation on $MACHINE_1..."
+print_step "Starting reimage operation on $MACHINE_1..."
 print_info "This will: set netboot → reboot → repave image → join cluster → verify"
 echo ""
 
-run_cli repave "$MACHINE_1"
+run_cli reimage "$MACHINE_1"
 
 echo ""
-print_step "Checking run status..."
-run_cli runs
+print_step "Checking operation status..."
+run_cli ops
 
 echo ""
-print_step "Checking machine state after repave..."
+print_step "Checking machine state after reimage..."
 run_cli list
+
+echo ""
+print_info "Machine stays in MAINTENANCE after reimage - must explicitly exit."
 
 wait_for_input
 
 # ============================================================================
-# Step 6: Demonstrate Idempotency
+# Step 6: Exit Maintenance
 # ============================================================================
 
-print_header "Step 6: Idempotency Demonstration"
+print_header "Step 6: Exit Maintenance Mode"
 
-print_step "Trying to repave $MACHINE_2 with same request_id twice..."
+print_step "Exiting maintenance mode on $MACHINE_1..."
+run_cli exit-maintenance "$MACHINE_1"
+
+echo ""
+print_step "Final state of $MACHINE_1..."
+run_cli list
+
+echo ""
+print_info "$MACHINE_1 is now READY/IDLE and provisioned!"
+
+wait_for_input
+
+# ============================================================================
+# Step 7: Demonstrate Idempotency
+# ============================================================================
+
+print_header "Step 7: Idempotency Demonstration"
+
+print_step "Entering maintenance on $MACHINE_2..."
+run_cli enter-maintenance "$MACHINE_2"
+
+echo ""
+print_step "Trying to reimage $MACHINE_2 with same request_id twice..."
 echo ""
 
 REQUEST_ID="demo-idempotent-$(date +%s)"
 
 print_info "First request with request_id: $REQUEST_ID"
-run_cli repave "$MACHINE_2" --request-id="$REQUEST_ID"
+run_cli reimage "$MACHINE_2" --request-id="$REQUEST_ID"
 
 echo ""
-print_info "Second request with SAME request_id (should return same run)..."
-run_cli repave "$MACHINE_2" --request-id="$REQUEST_ID"
+print_info "Second request with SAME request_id (should return same operation)..."
+run_cli reimage "$MACHINE_2" --request-id="$REQUEST_ID"
 
 echo ""
-print_info "Idempotency prevents duplicate runs for retried requests."
+print_info "Idempotency prevents duplicate operations for retried requests."
 
 wait_for_input
 
 # ============================================================================
-# Step 7: Reboot Operation
+# Step 8: Reboot Operation
 # ============================================================================
 
-print_header "Step 7: Simple Reboot Operation"
+print_header "Step 8: Simple Reboot Operation"
 
-print_step "Executing reboot on $MACHINE_3..."
-run_cli reboot "$MACHINE_3"
+print_step "Exiting maintenance on $MACHINE_2 first..."
+run_cli exit-maintenance "$MACHINE_2"
 
 echo ""
-print_step "Checking run history..."
-run_cli runs
+print_step "Executing reboot on $MACHINE_2..."
+print_info "Reboot works on READY machines (no maintenance required)."
+run_cli reboot "$MACHINE_2"
+
+echo ""
+print_step "Checking operation history..."
+run_cli ops
 
 wait_for_input
 
 # ============================================================================
-# Step 8: Cancel Operation
+# Step 9: Cancel Operation
 # ============================================================================
 
-print_header "Step 8: Cancellation Handling"
+print_header "Step 9: Cancellation Handling"
 
-print_step "Starting a new repave on $MACHINE_2..."
+print_step "Entering maintenance on $MACHINE_3..."
+run_cli enter-maintenance "$MACHINE_3"
+
+echo ""
+print_step "Starting a new reimage on $MACHINE_3..."
 # Start in background so we can cancel it
-go run ./cmd/bmdemo-cli repave "$MACHINE_2" --request-id="cancel-demo" &
+go run ./cmd/bmdemo-cli reimage "$MACHINE_3" --request-id="cancel-demo" &
 CLI_PID=$!
 sleep 1
 
 echo ""
-print_step "Canceling the run mid-flight..."
-# Get the latest run for machine-2
-CANCEL_RUN_ID=$(go run ./cmd/bmdemo-cli runs 2>/dev/null | grep "$MACHINE_2" | grep RUNNING | awk '{print $1}' | head -1)
-if [[ -n "$CANCEL_RUN_ID" ]]; then
-    run_cli cancel "$CANCEL_RUN_ID"
+print_step "Canceling the operation mid-flight..."
+# Get the latest operation for machine-3
+CANCEL_OP_ID=$(go run ./cmd/bmdemo-cli ops 2>/dev/null | grep "$MACHINE_3" | grep -E "PENDING|RUNNING" | awk '{print $1}' | head -1)
+if [[ -n "$CANCEL_OP_ID" ]]; then
+    run_cli cancel "$CANCEL_OP_ID"
 else
-    print_info "Run completed before we could cancel - that's OK!"
+    print_info "Operation completed before we could cancel - that's OK!"
 fi
 
 # Wait for background CLI to finish
@@ -265,40 +319,22 @@ print_step "Checking machine state after cancellation..."
 run_cli list
 
 echo ""
-print_info "Canceled runs set machine to MAINTENANCE with NeedsIntervention condition."
-print_info "This signals that manual investigation may be needed."
+print_info "Canceled operations set OperationCanceled condition."
+print_info "Machine stays in MAINTENANCE for investigation."
 
 wait_for_input
 
 # ============================================================================
-# Step 9: RMA Flow
+# Step 10: View All Operations
 # ============================================================================
 
-print_header "Step 9: RMA (Return Merchandise Authorization)"
+print_header "Step 10: Operation History and Audit Trail"
 
-print_step "Initiating RMA for $MACHINE_1 (hardware failure scenario)..."
-run_cli rma "$MACHINE_1"
-
-echo ""
-print_step "Final machine states..."
-run_cli list
+print_step "Viewing all operations across the system..."
+run_cli ops
 
 echo ""
-print_info "$MACHINE_1 is now in RMA phase, awaiting hardware replacement."
-
-wait_for_input
-
-# ============================================================================
-# Step 10: View All Runs
-# ============================================================================
-
-print_header "Step 10: Run History and Audit Trail"
-
-print_step "Viewing all runs across the system..."
-run_cli runs
-
-echo ""
-print_info "Each run has: ID, machine, type, phase, timing, and step status."
+print_info "Each operation has: ID, machine, type, phase, stage, and error."
 print_info "This provides a complete audit trail for compliance."
 
 wait_for_input
@@ -311,19 +347,18 @@ print_header "Demo Complete!"
 
 echo "What we demonstrated:"
 echo ""
-echo "  ✓ gRPC-based API with streaming support"
-echo "  ✓ Machine lifecycle management (AVAILABLE → PROVISIONING → IN_SERVICE → RMA)"
-echo "  ✓ Multi-step provisioning plans with retries"
+echo "  ✓ Dual state model: Phase (intent) vs EffectiveState (observed)"
+echo "  ✓ Lifecycle operations: reboot, reimage, enter/exit-maintenance"
+echo "  ✓ Safety gates: Reimage requires MAINTENANCE phase"
 echo "  ✓ Idempotent operations for safe retries"
 echo "  ✓ Real-time logging and event streaming"
 echo "  ✓ Complete audit trail for all operations"
 echo ""
-echo "Architecture highlights:"
+echo "API design:"
 echo ""
-echo "  • Provider interface allows swapping fake/real implementations"
-echo "  • Thread-safe in-memory store (can be backed by database)"
-echo "  • Async execution with cancellation support"
-echo "  • Condition-based status tracking"
+echo "  • MachineService  - CRUD + lifecycle operations (reboot, reimage, etc.)"
+echo "  • OperationService - Read-only: Get, List, Watch, StreamLogs"
+echo "  • No PlanService exposed - plans are internal implementation details"
 echo ""
 echo -e "${GREEN}Thank you for watching the demo!${NC}"
 echo ""

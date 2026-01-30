@@ -30,7 +30,7 @@ make proto     # Regenerate protobuf
 | Command | Description |
 |---------|-------------|
 | `import <N>` | Register N machines (machine-1, machine-2, ...) |
-| `list` | Show machines with phase and conditions |
+| `list` | Show machines with phase, effective state, and conditions |
 | `reboot <id>` | Reboot a machine (READY or MAINTENANCE required) |
 | `reimage <id>` | Reimage a machine (MAINTENANCE required) |
 | `enter-maintenance <id>` | Enter maintenance mode |
@@ -43,21 +43,54 @@ make proto     # Regenerate protobuf
 
 ## Lifecycle Model
 
-Machines have a **simple three-phase lifecycle** plus boolean conditions:
+Machines use a **dual-state model**: imperative `phase` (intent gate) and observed `effective_state`.
 
-### Machine Phases
-| Phase | Description |
-|-------|-------------|
-| `FACTORY_READY` | New machine, never provisioned |
-| `READY` | Provisioned and in service |
-| `MAINTENANCE` | Out of service for maintenance/reimage |
+### Phase (Imperative Intent)
+
+The `phase` field represents the operator's **intent** for the machine. It gates which operations are allowed.
+
+| Phase | Description | Allowed Operations |
+|-------|-------------|-------------------|
+| `FACTORY_READY` | New machine, never provisioned | enter-maintenance |
+| `READY` | Provisioned and in service | reboot, enter-maintenance |
+| `MAINTENANCE` | Out of service for maintenance | reboot, reimage, exit-maintenance |
+
+Phase changes **only** via explicit API calls:
+- `EnterMaintenance` → sets phase to MAINTENANCE
+- `ExitMaintenance` → sets phase to READY
+- `RegisterMachine` → initial phase (FACTORY_READY or READY)
+
+### Effective State (Observed)
+
+The `effective_state` field is a **read-only derived value** computed server-side. It combines phase, conditions, and active operation status to answer: "What is this machine doing right now?"
+
+| EffectiveState | Meaning |
+|----------------|---------|
+| `NEW` | phase == FACTORY_READY |
+| `IDLE` | phase == READY, no active operation |
+| `BUSY` | Active operation PENDING/RUNNING |
+| `MAINTENANCE` | phase == MAINTENANCE, no active operation |
+| `ATTENTION` | NeedsIntervention condition true |
+| `BLOCKED` | RMA or Retired condition true |
+
+#### Precedence Rules (server computes in this order)
+
+1. **BLOCKED** if `Retired=true` OR `RMA=true`
+2. **ATTENTION** if `NeedsIntervention=true`
+3. **BUSY** if active operation in PENDING/RUNNING
+4. **MAINTENANCE** if phase == MAINTENANCE (and no active op)
+5. **NEW** if phase == FACTORY_READY
+6. **IDLE** otherwise
 
 ### Conditions
+
 Boolean signals tracked on the machine status:
 - `Reachable` - Machine is reachable via SSH
 - `Provisioned` - Machine has been successfully imaged
 - `NeedsIntervention` - Requires operator attention
 - `OperationCanceled` - Last operation was canceled
+- `RMA` - Machine flagged for RMA
+- `Retired` - Machine retired from service
 
 ### Key Design Decisions
 
@@ -76,6 +109,10 @@ Boolean signals tracked on the machine status:
 4. **Reimage requires MAINTENANCE**
    - Safety gate to prevent accidental reimages
    - Must explicitly enter maintenance first
+
+5. **Status fields are backend-owned**
+   - UpdateMachine ignores any client-supplied phase/effective_state
+   - Only Spec and Labels can be updated by clients
 
 ## Operation Types
 
@@ -168,10 +205,22 @@ machine-1   FACTORY_READY
 machine-2   FACTORY_READY
 machine-3   FACTORY_READY
 
+$ go run ./cmd/bmdemo-cli list
+MACHINE_ID   PHASE    EFFECTIVE  REACHABLE  PROVISIONED  ACTIVE_OP
+machine-1    FACTORY  NEW        -          -            -
+machine-2    FACTORY  NEW        -          -            -
+machine-3    FACTORY  NEW        -          -            -
+
 $ go run ./cmd/bmdemo-cli enter-maintenance machine-1
 Operation: abc12345...
 → entering maintenance...
 ✓ SUCCEEDED
+
+$ go run ./cmd/bmdemo-cli list
+MACHINE_ID   PHASE    EFFECTIVE  REACHABLE  PROVISIONED  ACTIVE_OP
+machine-1    MAINT    MAINT      -          -            -
+machine-2    FACTORY  NEW        -          -            -
+machine-3    FACTORY  NEW        -          -            -
 
 $ go run ./cmd/bmdemo-cli reimage machine-1
 Operation: def67890...
@@ -187,10 +236,10 @@ Operation: ghi11111...
 ✓ SUCCEEDED
 
 $ go run ./cmd/bmdemo-cli list
-MACHINE_ID   PHASE   REACHABLE  PROVISIONED  NEEDS_HELP  ACTIVE_OP
-machine-1    READY   ✓          ✓            -           -
-machine-2    FACTORY_READY  -  -            -           -
-machine-3    FACTORY_READY  -  -            -           -
+MACHINE_ID   PHASE    EFFECTIVE  REACHABLE  PROVISIONED  ACTIVE_OP
+machine-1    READY    IDLE       ✓          ✓            -
+machine-2    FACTORY  NEW        -          -            -
+machine-3    FACTORY  NEW        -          -            -
 ```
 
 See [bmdemo-presenter-guide.md](bmdemo-presenter-guide.md) for demo talking points.
