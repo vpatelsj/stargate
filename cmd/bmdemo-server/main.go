@@ -10,7 +10,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"google.golang.org/grpc"
@@ -340,11 +339,11 @@ func (s *machineServer) CancelOperation(ctx context.Context, req *pb.CancelOpera
 	}
 
 	if err := s.runner.CancelOperation(req.OperationId); err != nil {
-		errMsg := err.Error()
-		if strings.Contains(errMsg, "not found") {
-			return nil, status.Errorf(codes.NotFound, "operation %q not found", req.OperationId)
+		// Map sentinel errors to gRPC codes
+		if errors.Is(err, store.ErrOperationNotFound) {
+			return nil, status.Errorf(codes.NotFound, "%v", err)
 		}
-		if strings.Contains(errMsg, "already finished") {
+		if errors.Is(err, store.ErrOperationAlreadyFinished) {
 			return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
 		}
 		return nil, status.Errorf(codes.Internal, "%v", err)

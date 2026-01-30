@@ -71,12 +71,14 @@ machine-5    READY          ⛔BLOCK        RMA=✓
 
 > "To reimage a machine, we first enter maintenance mode. This is a safety gate - the API rejects reimage requests on machines in READY phase. Watch the logs and events stream in real-time - you're seeing two gRPC streams interleaved."
 
-**The 5-step reimage flow:**
+**The internal 5-step reimage flow** (not visible in SDK, just logs):
 1. **set-netboot** - Configure PXE/iPXE for network boot
 2. **reboot-to-netboot** - BMC reboot, machine boots from network
 3. **repave-image** - Download image, write to disk, configure bootloader
 4. **join-cluster** - Mint join token, run kubeadm join
 5. **verify-in-cluster** - Confirm node is Ready in K8s
+
+**Note:** Clients only see `current_stage` field - the full step list is internal.
 
 ### Step 6: Exit Maintenance
 
@@ -164,7 +166,7 @@ Second request: request_id=demo-idempotent-123 → op-ABC returned immediately (
 
 ### Closing
 
-> "Summary: Type-safe gRPC API with streaming, dual state model (Phase + EffectiveState), idempotent operations, complete observability, extensible Provider interface. The fake provider simulates hardware - in production this calls BMC APIs, Ansible, or Kubernetes APIs."
+> "Summary: Type-safe gRPC API with streaming, dual state model (Phase + EffectiveState), idempotent operations, complete observability, extensible Provider interface. Plans and steps are internal - clients only see operation type, phase, and current_stage. This keeps the SDK stable while letting us evolve the workflow engine."
 
 ---
 
@@ -180,7 +182,7 @@ A: Operation → FAILED, NeedsIntervention condition set. Machine stays in its c
 A: Yes, across machines. Only one active operation per machine is allowed.
 
 **Q: How do we add new step types?**  
-A: Add a proto message, regenerate, implement executor handling + provider method.
+A: Plans/steps are internal Go types (not in proto). Add a new `StepKind` in `workflow/types.go`, implement executor handling + provider method. SDK consumers don't see step details.
 
 **Q: Can clients update machine status directly?**  
 A: No. UpdateMachine only accepts Spec and Labels; status is owned by the backend/executor.

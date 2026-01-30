@@ -19,6 +19,7 @@ var (
 	ErrMachineNotFound           = errors.New("machine not found")
 	ErrMachineHasActiveOperation = errors.New("machine has active operation")
 	ErrOperationNotFound         = errors.New("operation not found")
+	ErrOperationAlreadyFinished  = errors.New("operation already finished")
 )
 
 // cloneMachine returns a deep copy of a machine.
@@ -301,13 +302,17 @@ func (s *Store) UpdateOperation(op *pb.Operation) error {
 
 // CancelOperation cancels an operation if it's still active.
 // Idempotent: canceling an already-canceled operation returns success.
+// Returns:
+//   - ErrOperationNotFound if operation doesn't exist
+//   - ErrOperationAlreadyFinished if operation is in SUCCEEDED or FAILED phase
+//   - nil (success) if operation is canceled or was already canceled
 func (s *Store) CancelOperation(opID string) (*pb.Operation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	op, ok := s.operations[opID]
 	if !ok {
-		return nil, fmt.Errorf("operation %q not found", opID)
+		return nil, fmt.Errorf("%w: %q", ErrOperationNotFound, opID)
 	}
 
 	// Already canceled - return success (idempotent)
@@ -317,7 +322,7 @@ func (s *Store) CancelOperation(opID string) (*pb.Operation, error) {
 
 	// Already finished with success or failure - cannot cancel
 	if op.Phase == pb.Operation_SUCCEEDED || op.Phase == pb.Operation_FAILED {
-		return nil, fmt.Errorf("operation %q already finished with phase %s", opID, op.Phase)
+		return nil, fmt.Errorf("%w: %q (phase=%s)", ErrOperationAlreadyFinished, opID, op.Phase)
 	}
 
 	op.Phase = pb.Operation_CANCELED

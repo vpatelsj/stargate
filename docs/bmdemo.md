@@ -95,9 +95,9 @@ Boolean signals tracked on the machine status:
 ### Key Design Decisions
 
 1. **External API = MachineService + OperationService only**
-   - No PlanService exposed to customers
-   - Plans/steps are internal implementation details
-   - Operations returned to callers have `plan_id` and `steps` fields hidden (sanitized)
+   - Plans/steps are internal implementation details (not in public proto)
+   - Operations expose only: `type`, `phase`, `current_stage`, `params`, `error`, timestamps
+   - Internal workflow engine can evolve without breaking SDK consumers
 
 2. **Machine.phase limited to 3 values**
    - FACTORY_READY, READY, MAINTENANCE only

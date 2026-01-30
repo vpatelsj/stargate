@@ -28,7 +28,10 @@ type StepKind interface {
 
 // Step kind implementations
 type (
-	SSHCommand      struct{ ScriptRef string; Args map[string]string }
+	SSHCommand struct {
+		ScriptRef string
+		Args      map[string]string
+	}
 	Reboot          struct{ Force bool }
 	SetNetboot      struct{ Profile string }
 	RepaveImage     struct{ ImageRef, CloudInitRef string }

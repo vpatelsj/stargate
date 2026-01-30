@@ -1,7 +1,7 @@
-# Bare Metal Provisioning API v1 (gRPC + Hybrid Lifecycle)
+# Bare Metal Provisioning API v1 (gRPC)
 
 ## Summary
-A minimal, customer-facing gRPC API for managing bare-metal inventory and long-running operations (repave, join, reboot, upgrade, RMA, network reconfig) across multiple providers. The API focuses on **what** happens (operation type, machine, phase, result) while keeping the internal workflow engine (plans, steps) hidden from SDK consumers.
+A minimal, customer-facing gRPC API for managing bare-metal inventory and long-running operations (repave, reboot, maintenance) across multiple providers. The API focuses on **what** happens (operation type, machine, phase, result) while the internal workflow engine (plans, steps) is hidden from SDK consumers.
 
 ## Why this exists
 We need a single inventory and operations surface that works across:
@@ -14,63 +14,53 @@ The API must support asynchronous operations with observable progress and idempo
 - Minimal gRPC API usable by other workstreams
 - Async, idempotent operations with observable state (phase + logs)
 - Provider-agnostic adapters using capability-based interfaces
-- Hybrid lifecycle: explicit phase + derived conditions + computed EffectiveState
-- **Internal workflow engine**: plans/steps are NOT exposed in SDK; only server-side
+- Hybrid lifecycle: explicit phase + derived effective_state
+- **Internal workflow engine**: plans/steps are NOT exposed in SDK; server-side only
 
 ## Non-goals (v1)
 - Full IPAM/network modeling like MAAS/Ironic
-- Workflow DSL (plans are internal typed step lists)
+- Client-visible workflow details (plans/steps are internal)
 - Multi-machine atomic orchestration
-- Client-visible step details (workflow is internal)
+- Workflow DSL exposed to clients
 
 ---
 
 ## Core Concepts
 
 ### Machine (customer-visible inventory)
-A stable identity plus inventory facts and a minimal explicit lifecycle phase. Conditions are derived asynchronously.
+A stable identity plus inventory facts and a minimal explicit lifecycle phase.
 
 Conceptual fields:
 - Identity: `machine_id`, `labels/tags`, `provider`, `location/rack`
 - Access hints: `ssh_endpoint`, `bmc_endpoint`, network identifiers (MACs, serial)
-- Lifecycle: explicit `phase`, derived `conditions[]`, `active_run_id`
+- Lifecycle: explicit `phase`, derived `effective_state`, `active_operation_id`
 - References: `customer_id`, `target_cluster_ref` (optional)
-
-### Plan (internal workflow engine)
-Plans are **internal** to the server - they are NOT exposed in the public proto or SDK.
-The client specifies only the operation type (REBOOT, REIMAGE, etc.) and the server
-selects and executes the appropriate internal plan.
-
-Internal Plan details:
-- Plan identity: `plan_id` is internal; not visible to SDK consumers
-- Execution model: steps run strictly in order; stop on first failed step after retries
-- Defaults: per-step `timeout_seconds` and `max_retries` configured server-side
-- Step naming: `step.name` is internal; SDK only sees `current_stage` field
-- Validation: plans are validated server-side
-- Versioning: plans are server-managed; clients don't specify plans
-
-Internal Step kinds (v1 core):
-- `SSHCommand`: run an SSH command on the host
-- `Reboot`: reboot via BMC or in-band
-- `SetNetboot`: set next boot device or PXE mode  
-- `RepaveImage`: install an OS image
-- `KubeadmJoin`: run cluster join flow
-- `VerifyInCluster`: confirm node registration and readiness
-- `NetReconfig`: apply network changes
-- `RMAAction`: finalize RMA workflow steps
 
 ### Operation (execution record)
 An immutable record of running an operation type (REBOOT, REIMAGE, etc.) on a machine.
 Operations are the customer-facing handle for long-running work and expose:
-- `phase`: PENDING, RUNNING, SUCCEEDED, FAILED, CANCELED
-- `current_stage`: human-readable current step name (for progress)
-- `error`: structured error info on failure
-- Timestamps: `created_at`, `started_at`, `finished_at`
-- Logs: streamable via `StreamOperationLogs()`
+
+| Field | Description |
+|-------|-------------|
+| `type` | REBOOT, REIMAGE, ENTER_MAINTENANCE, EXIT_MAINTENANCE |
+| `phase` | PENDING, RUNNING, SUCCEEDED, FAILED, CANCELED |
+| `current_stage` | Human-readable current step name (for progress) |
+| `params` | Key-value parameters for the operation |
+| `error` | Structured error info on failure |
+| Timestamps | `created_at`, `started_at`, `finished_at` |
 
 **Note**: Internal workflow details (plan_id, step list, step status) are NOT exposed
 in the public proto. This separation allows the workflow engine to evolve without
 breaking SDK consumers.
+
+### Internal Workflow Engine (server-side only)
+The server maintains an internal workflow engine with:
+- **Plan**: A sequence of typed steps (SSHCommand, Reboot, SetNetboot, etc.)
+- **Step**: Individual actions with timeout, retry, and execution state
+
+This is entirely server-managed. Clients only see:
+- `current_stage`: which step is running (for progress display)
+- `phase`: overall operation state
 
 ---
 
@@ -79,92 +69,39 @@ breaking SDK consumers.
 ### Machine Phase (explicit, minimal)
 We intentionally keep phases few and avoid an ERROR phase (errors are conditions).
 
-Phases:
-- `FACTORY_READY` (arrived w/ base OS + baseline networking)
-- `READY` (imported/manageable by us)
-- `PROVISIONING` (a run is actively modifying it)
-- `IN_SERVICE` (serving workloads in customer cluster)
-- `MAINTENANCE` (drained; disruptive ops allowed)
-- `RMA` (removed from service for return/replace)
-- `RETIRED` (removed from inventory; no ops)
+| Phase | Meaning |
+|-------|---------|
+| `FACTORY_READY` | Arrived with base OS + baseline networking |
+| `READY` | Imported/manageable by us |
+| `MAINTENANCE` | Drained; disruptive ops allowed |
 
-### Conditions (derived truth/health)
-Minimal v1 conditions:
-- Connectivity: `Reachable`, `BMCReachable`
-- Truth: `Provisioned`, `InCustomerCluster`, `Drained`
-- Health/attention: `Degraded`, `NeedsIntervention`
+Phase is an **imperative intent gate** - it controls what operations are allowed.
 
-### EffectiveState (UI-facing)
-Computed on read for a simple, truthful UI state.
+### EffectiveState (derived, read-only)
+Computed on read for a simple, truthful UI state. Combines:
+- Current phase
+- Whether an operation is running
+- Condition flags (future: Reachable, Degraded, etc.)
 
-Precedence:
-1) If `active_run.phase in {PENDING,RUNNING}` => `PROVISIONING`
-2) Else if `phase in {RMA, RETIRED, MAINTENANCE}` => `phase`
-3) Else if `InCustomerCluster == true` => `IN_SERVICE`
-4) Else if `phase == FACTORY_READY` => `FACTORY_READY`
-5) Else => `READY`
-
-Overlays:
-- `NeedsIntervention=true` => banner
-- `Degraded=true` => banner
+Clients should display `effective_state` in UIs, not `phase` directly.
 
 ---
 
-## Run State Machine
+## Operation State Machine
 
-Run phases:
-- `PENDING -> RUNNING -> (SUCCEEDED | FAILED | CANCELED)`
+```
+PENDING -> RUNNING -> (SUCCEEDED | FAILED | CANCELED)
+```
 
-Step states:
-- `WAITING, RUNNING, SUCCEEDED, FAILED`
-
-All step transitions and logs are stored on the Run, not the Machine.
-
----
-
-
-## Provider Adapter Model
-
-Providers differ by capabilities; we standardize around Step execution, not provider-specific APIs.
-
-Capability-based interface:
-- Inspect/Discover
-- PowerControl
-- Netboot/PXE
-- Imaging/Repave
-- RemoteExec (SSH via router/jump)
-- ClusterJoin (mint join material + run join)
-
-Run executor behavior:
-- Select provider by `machine.provider`
-- Execute `plan.steps` sequentially
-- Persist step status + logs
-- Update `machine.phase` at run boundaries
-- Recompute conditions asynchronously
+- `PENDING`: Created, waiting for executor to pick up
+- `RUNNING`: Executor is actively executing steps
+- `SUCCEEDED`: All steps completed successfully
+- `FAILED`: A step failed after retries
+- `CANCELED`: Canceled by user or system
 
 ---
 
-## Operational Guarantees
-
-- Idempotency: `StartRun` requires `request_id`; server returns existing Run if replayed
-- Concurrency: at most one active Run per machine (DB/lock enforced)
-- Recovery: executor resumes from persisted Run step state after crash
-- Auditing: all Run transitions + logs preserved
-
----
-
-## v1 Deliverables
-
-- Proto definitions + Go server skeleton
-- Run executor with core step kinds:
-  - `SshCommand`, `Reboot`, `SetNetboot`, `RepaveImage`, `KubeadmJoin`, `VerifyInCluster`
-- Minimal condition reconciler (`Reachable`, `InCustomerCluster`)
-
----
-
-## Design Details
-
-### Architecture
+## Architecture
 
 ```mermaid
 flowchart TB
@@ -175,35 +112,34 @@ flowchart TB
     end
 
     subgraph api["Baremetal API (gRPC)"]
-        ms["MachineService<br/>• RegisterMachine<br/>• GetMachine<br/>• ListMachines<br/>• UpdateMachine"]
-        rs["RunService<br/>• StartRun<br/>• GetRun / ListRuns<br/>• CancelRun<br/>• WatchRuns<br/>• StreamRunLogs"]
-        ps["PlanService<br/>• GetPlan<br/>• ListPlans"]
+        ms["MachineService<br/>• RegisterMachine<br/>• GetMachine<br/>• ListMachines<br/>• UpdateMachine<br/>• RebootMachine<br/>• ReimageMachine<br/>• EnterMaintenance<br/>• ExitMaintenance<br/>• CancelOperation"]
+        os["OperationService<br/>• GetOperation<br/>• ListOperations<br/>• WatchOperations (stream)<br/>• StreamOperationLogs (stream)"]
     end
 
-    exec["Run Executor<br/>• Sequential step execution<br/>• Retry with backoff<br/>• Real-time logs/events"]
+    exec["Executor<br/>(internal workflow engine)<br/>• Sequential step execution<br/>• Retry with backoff<br/>• Real-time logs/events"]
 
     subgraph providers["Provider Adapters"]
         dc["Datacenter<br/>(BMC + SSH)"]
         third["3P Provider<br/>(API)"]
-        cloud["Cloud BMC<br/>(IPMI/Redfish)"]
         fake["Fake<br/>(demo)"]
     end
 
-    auto -->|"StartRun<br/>(repave/rma)"| rs
-    orch -->|"WatchRuns<br/>StreamLogs"| rs
-    ui -->|"ListMachines<br/>GetRun"| ms
+    auto -->|"RebootMachine<br/>ReimageMachine"| ms
+    orch -->|"WatchOperations<br/>StreamLogs"| os
+    ui -->|"ListMachines<br/>GetOperation"| ms
 
     ms --> exec
-    rs --> exec
+    os --> exec
     exec --> dc
     exec --> third
-    exec --> cloud
     exec --> fake
 ```
 
-### Customer API Interaction Patterns
+---
 
-**1) Trigger-and-observe (async)**
+## Customer API Interaction Patterns
+
+### 1) Trigger-and-observe (async)
 
 ```mermaid
 sequenceDiagram
@@ -211,51 +147,52 @@ sequenceDiagram
     participant A as API
     participant E as Executor
 
-    C->>A: StartRun(repave, m-1)
-    A-->>C: Run{id, PENDING}
+    C->>A: ReimageMachine(m-1)
+    A-->>C: Operation{id, PENDING}
     A->>E: execute async
-    C->>A: WatchRuns
+    C->>A: WatchOperations
     E-->>A: step 1 complete
-    A-->>C: RunEvent{RUNNING, step1}
+    A-->>C: OperationEvent{RUNNING, stage1}
     E-->>A: step 2 complete
-    A-->>C: RunEvent{RUNNING, step2}
+    A-->>C: OperationEvent{RUNNING, stage2}
     E-->>A: done
-    A-->>C: RunEvent{SUCCEEDED}
+    A-->>C: OperationEvent{SUCCEEDED}
 ```
 
-**2) Idempotent retry**
+### 2) Idempotent retry
 
 ```mermaid
 sequenceDiagram
     participant C as Customer
     participant A as API
 
-    C->>A: StartRun(req-123, m-1)
-    A-->>C: Run{run-456, PENDING}
+    C->>A: ReimageMachine(req-123, m-1)
+    A-->>C: Operation{op-456, PENDING}
     Note over C: network timeout
-    C->>A: StartRun(req-123, m-1)
-    A-->>C: Run{run-456, RUNNING}
-    Note right of A: same run returned
+    C->>A: ReimageMachine(req-123, m-1)
+    A-->>C: Operation{op-456, RUNNING}
+    Note right of A: same operation returned
 ```
 
-**3) Poll for completion**
+### 3) Poll for completion
 
 ```mermaid
 sequenceDiagram
     participant C as Customer
     participant A as API
 
-    C->>A: StartRun
-    A-->>C: Run{id, PENDING}
+    C->>A: RebootMachine
+    A-->>C: Operation{id, PENDING}
     loop until terminal
-        C->>A: GetRun(id)
-        A-->>C: Run{phase, step}
+        C->>A: GetOperation(id)
+        A-->>C: Operation{phase, current_stage}
     end
-    C->>A: GetRun(id)
-    A-->>C: Run{SUCCEEDED}
+    C->>A: GetOperation(id)
+    A-->>C: Operation{SUCCEEDED}
 ```
 
 ---
+
 ## gRPC API
 
 ### MachineService
@@ -273,106 +210,40 @@ service MachineService {
 
   // Update machine spec/labels (status is server-managed)
   rpc UpdateMachine(UpdateMachineRequest) returns (Machine);
-}
 
-message RegisterMachineRequest {
-  Machine machine = 1;  // machine_id optional (auto-generated if empty)
-}
+  // === Operation RPCs ===
+  // Reboot a machine (requires READY or MAINTENANCE)
+  rpc RebootMachine(RebootMachineRequest) returns (Operation);
 
-message GetMachineRequest {
-  string machine_id = 1;
-}
+  // Reimage a machine (requires MAINTENANCE)
+  rpc ReimageMachine(ReimageMachineRequest) returns (Operation);
 
-message ListMachinesRequest {
-  string filter = 1;      // e.g., "phase=IN_SERVICE"
-  int32 page_size = 2;
-  string page_token = 3;
-}
+  // Transition to MAINTENANCE phase
+  rpc EnterMaintenance(EnterMaintenanceRequest) returns (Operation);
 
-message ListMachinesResponse {
-  repeated Machine machines = 1;
-  string next_page_token = 2;
-}
+  // Exit MAINTENANCE phase back to READY
+  rpc ExitMaintenance(ExitMaintenanceRequest) returns (Operation);
 
-message UpdateMachineRequest {
-  Machine machine = 1;    // Only spec and labels are updated
+  // Cancel an in-progress operation
+  rpc CancelOperation(CancelOperationRequest) returns (Operation);
 }
 ```
 
-### PlanService
+### OperationService
 
 ```protobuf
-service PlanService {
-  // Get a plan by ID
-  rpc GetPlan(GetPlanRequest) returns (Plan);
+service OperationService {
+  // Get an operation by ID
+  rpc GetOperation(GetOperationRequest) returns (Operation);
 
-  // List all available plans
-  rpc ListPlans(ListPlansRequest) returns (ListPlansResponse);
-}
+  // List operations with optional filtering
+  rpc ListOperations(ListOperationsRequest) returns (ListOperationsResponse);
 
-message GetPlanRequest {
-  string plan_id = 1;
-}
+  // Stream operation events (server-streaming)
+  rpc WatchOperations(WatchOperationsRequest) returns (stream OperationEvent);
 
-message ListPlansRequest {}
-
-message ListPlansResponse {
-  repeated Plan plans = 1;
-}
-```
-
-### RunService
-
-```protobuf
-service RunService {
-  // Start a run (idempotent with request_id)
-  rpc StartRun(StartRunRequest) returns (Run);
-
-  // Get run by ID
-  rpc GetRun(GetRunRequest) returns (Run);
-
-  // List runs with optional filtering
-  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
-
-  // Cancel an active run
-  rpc CancelRun(CancelRunRequest) returns (Run);
-
-  // Stream run events (server-streaming)
-  rpc WatchRuns(WatchRunsRequest) returns (stream RunEvent);
-
-  // Stream run logs (server-streaming)
-  rpc StreamRunLogs(StreamRunLogsRequest) returns (stream LogChunk);
-}
-
-message StartRunRequest {
-  string request_id = 1;  // Required for idempotency
-  string machine_id = 2;  // Target machine
-  string type = 3;        // REPAVE, RMA, REBOOT, UPGRADE, NET_RECONFIG
-  string plan_id = 4;     // Optional: override default plan for type
-}
-
-message GetRunRequest {
-  string run_id = 1;
-}
-
-message ListRunsRequest {
-  string filter = 1;      // e.g., "machine_id=m-1"
-}
-
-message ListRunsResponse {
-  repeated Run runs = 1;
-}
-
-message CancelRunRequest {
-  string run_id = 1;
-}
-
-message WatchRunsRequest {
-  string filter = 1;      // e.g., "machine_id=m-1"
-}
-
-message StreamRunLogsRequest {
-  string run_id = 1;
+  // Stream operation logs (server-streaming)
+  rpc StreamOperationLogs(StreamOperationLogsRequest) returns (stream LogChunk);
 }
 ```
 
@@ -383,7 +254,7 @@ message Machine {
   string machine_id = 1;
   map<string, string> labels = 2;
   MachineSpec spec = 3;
-  MachineStatus status = 4;
+  MachineStatus status = 4;  // Server-managed, read-only
 }
 
 message MachineSpec {
@@ -394,63 +265,38 @@ message MachineSpec {
 }
 
 message MachineStatus {
-  Phase phase = 1;
-  repeated Condition conditions = 2;
-  string active_run_id = 3;
+  Phase phase = 1;              // Explicit lifecycle gate (FACTORY_READY, READY, MAINTENANCE)
+  string effective_state = 2;   // Derived UI-friendly state
+  string active_operation_id = 3;
 
   enum Phase {
     PHASE_UNSPECIFIED = 0;
     FACTORY_READY = 1;
     READY = 2;
-    PROVISIONING = 3;
-    IN_SERVICE = 4;
-    MAINTENANCE = 5;
-    RMA = 6;
-    RETIRED = 7;
+    MAINTENANCE = 3;
   }
 }
 
-message Condition {
-  string type = 1;        // Reachable, InCustomerCluster, NeedsIntervention
-  bool status = 2;
-  string reason = 3;
-  google.protobuf.Timestamp last_transition = 4;
-}
-
-message Plan {
-  string plan_id = 1;
-  string display_name = 2;
-  repeated Step steps = 3;
-}
-
-message Step {
-  string name = 1;
-  int32 timeout_seconds = 2;
-  int32 max_retries = 3;
-  oneof kind {
-    SshCommand ssh = 10;
-    Reboot reboot = 11;
-    SetNetboot netboot = 12;
-    RepaveImage repave = 13;
-    KubeadmJoin join = 14;
-    VerifyInCluster verify = 15;
-    NetReconfig net = 16;
-    RmaAction rma = 17;
-  }
-}
-
-message Run {
-  string run_id = 1;
+message Operation {
+  string operation_id = 1;
   string machine_id = 2;
   string request_id = 3;
-  string type = 4;
-  string plan_id = 5;
-  Phase phase = 6;
-  repeated StepStatus steps = 7;
-  string current_step = 8;
+  OperationType type = 4;
+  Phase phase = 5;
+  string current_stage = 6;       // Human-readable progress indicator
+  map<string, string> params = 7;
+  OperationError error = 8;
   google.protobuf.Timestamp created_at = 9;
   google.protobuf.Timestamp started_at = 10;
   google.protobuf.Timestamp finished_at = 11;
+
+  enum OperationType {
+    OPERATION_TYPE_UNSPECIFIED = 0;
+    REBOOT = 1;
+    REIMAGE = 2;
+    ENTER_MAINTENANCE = 3;
+    EXIT_MAINTENANCE = 4;
+  }
 
   enum Phase {
     PHASE_UNSPECIFIED = 0;
@@ -462,38 +308,25 @@ message Run {
   }
 }
 
-message StepStatus {
-  string name = 1;
-  State state = 2;
-  int32 retry_count = 3;
-  google.protobuf.Timestamp started_at = 4;
-  google.protobuf.Timestamp finished_at = 5;
-  string message = 6;
-
-  enum State {
-    STATE_UNSPECIFIED = 0;
-    WAITING = 1;
-    RUNNING = 2;
-    SUCCEEDED = 3;
-    FAILED = 4;
-  }
+message OperationError {
+  string code = 1;
+  string message = 2;
+  string step_name = 3;
 }
 
-message RunEvent {
+message OperationEvent {
   google.protobuf.Timestamp ts = 1;
-  Run snapshot = 2;
+  Operation snapshot = 2;
   string message = 3;
 }
 
 message LogChunk {
   google.protobuf.Timestamp ts = 1;
-  string run_id = 2;
+  string operation_id = 2;
   string stream = 3;  // stdout | stderr
   bytes data = 4;
 }
 ```
-
-Pattern: `StartRun` returns a Run handle; clients `WatchRuns` or poll `GetRun` for completion.
 
 ---
 
@@ -517,100 +350,82 @@ Pattern: `StartRun` returns a Run handle; clients `WatchRuns` or poll `GetRun` f
   },
   "status": {
     "phase": "READY",
-    "conditions": [
-      {"type": "Reachable", "status": true, "reason": "PingOK"},
-      {"type": "BMCReachable", "status": true, "reason": "RedfishOK"},
-      {"type": "InCustomerCluster", "status": false, "reason": "NotJoined"}
-    ],
-    "active_run_id": ""
+    "effective_state": "ready",
+    "active_operation_id": ""
   }
 }
 ```
 
-### Plan (sample)
+### Operation (sample - in progress)
 
 ```json
 {
-  "plan_id": "plan-repave-ubuntu-2204-v1",
-  "display_name": "Repave Ubuntu 22.04 + Join Cluster",
-  "steps": [
-    {"name": "set-netboot", "timeout_seconds": 60, "max_retries": 2, "netboot": {"mode": "PXE"}},
-    {"name": "repave-os", "timeout_seconds": 1800, "max_retries": 1, "repave": {"image": "ubuntu-22.04"}},
-    {"name": "reboot", "timeout_seconds": 300, "max_retries": 2, "reboot": {"mode": "bmc"}},
-    {"name": "join-cluster", "timeout_seconds": 600, "max_retries": 1, "join": {"cluster_ref": "cluster-a"}},
-    {"name": "verify", "timeout_seconds": 300, "max_retries": 0, "verify": {"cluster_ref": "cluster-a"}}
-  ]
-}
-```
-
-### Run (sample)
-
-```json
-{
-  "run_id": "run-789",
+  "operation_id": "op-789",
   "machine_id": "m-123",
   "request_id": "req-456",
-  "type": "REPAVE",
-  "plan_id": "plan-repave-ubuntu-2204-v1",
+  "type": "REIMAGE",
   "phase": "RUNNING",
-  "current_step": "repave-os",
-  "steps": [
-    {"name": "set-netboot", "state": "SUCCEEDED", "retry_count": 0},
-    {"name": "repave-os", "state": "RUNNING", "retry_count": 0}
-  ],
+  "current_stage": "repave-os",
+  "params": {
+    "image_ref": "ubuntu-2204-lab"
+  },
   "created_at": "2026-01-29T15:10:00Z",
   "started_at": "2026-01-29T15:10:05Z",
   "finished_at": null
 }
 ```
 
-Notes:
-- Example step payloads show shape only; actual step message fields are defined in the proto.
-- Timestamps are RFC 3339 for readability; protobuf uses `google.protobuf.Timestamp`.
+### Operation (sample - completed)
+
+```json
+{
+  "operation_id": "op-789",
+  "machine_id": "m-123",
+  "request_id": "req-456",
+  "type": "REIMAGE",
+  "phase": "SUCCEEDED",
+  "current_stage": "",
+  "params": {
+    "image_ref": "ubuntu-2204-lab"
+  },
+  "created_at": "2026-01-29T15:10:00Z",
+  "started_at": "2026-01-29T15:10:05Z",
+  "finished_at": "2026-01-29T15:25:00Z"
+}
+```
 
 ---
 
-
 ## Key Design Decisions
 
-1) Separation of concerns
-- Machine = identity + inventory + lifecycle state
-- Plan = reusable recipe (sequence of typed steps)
-- Run = execution record for a plan on a machine
+1. **Separation of concerns**
+   - Machine = identity + inventory + lifecycle state
+   - Operation = execution record for work on a machine
+   - Internal workflow = plans/steps (server-side only)
 
-2) Hybrid lifecycle
-- Explicit phase for operator intent (7 states)
-- Conditions for derived truth (Reachable, InCustomerCluster, etc.)
-- EffectiveState computed at read time with clear precedence rules
+2. **Hybrid lifecycle**
+   - `phase` = imperative intent gate (FACTORY_READY, READY, MAINTENANCE)
+   - `effective_state` = derived truth for UI display
+   - Clear separation of what operator intends vs. what system observes
 
-3) Idempotency
-- `request_id` scoped to `(machine_id, request_id)`
-- Same request returns existing Run, never creates duplicate
-- Essential for safe retries in distributed systems
+3. **Idempotency**
+   - `request_id` scoped to `(machine_id, request_id)`
+   - Same request returns existing Operation, never creates duplicate
+   - Essential for safe retries in distributed systems
 
-4) Single active run per machine
-- Prevents conflicting operations
-- Enforced at store level with atomic check-and-set
+4. **Single active operation per machine**
+   - Prevents conflicting operations
+   - Enforced at store level with atomic check-and-set
 
-5) Async execution with streaming
-- StartRun returns immediately with Run handle
-- Executor runs asynchronously with long-lived context
-- Real-time logs/events via gRPC streaming
+5. **Internal workflow engine**
+   - Plans/steps are NOT part of SDK contract
+   - Allows workflow engine to evolve without breaking clients
+   - Clients see only `current_stage` for progress display
 
-6) Store immutability
-- All reads return cloned protos
-- Writes clone inputs before storing
-- Prevents data races from external mutation
-
-7) Provider abstraction
-- Capability-based interface, not monolithic
-- Easy to swap fake (demo) vs real (BMC, SSH, Ansible)
-- Step execution delegated to provider methods
-
-8) Context lifecycle
-- Run execution uses long-lived server context, not RPC context
-- Runs survive after StartRun RPC returns
-- Graceful shutdown cancels all active runs
+6. **Async execution with streaming**
+   - Operation RPCs return immediately with handle
+   - Executor runs asynchronously with long-lived context
+   - Real-time logs/events via gRPC streaming
 
 ---
 
@@ -619,9 +434,16 @@ Notes:
 | Error | gRPC Code | Behavior |
 |-------|-----------|----------|
 | Machine not found | NOT_FOUND | Request rejected |
-| Machine has active run | FAILED_PRECONDITION | Request rejected |
-| Plan not found | NOT_FOUND | Request rejected |
-| Step fails after retries | - | Run → FAILED, Machine → MAINTENANCE |
-| Run canceled | - | Run → CANCELED, Machine → MAINTENANCE |
+| Machine has active operation | FAILED_PRECONDITION | Request rejected |
+| Operation not found | NOT_FOUND | Request rejected |
+| Operation already finished | FAILED_PRECONDITION | Cannot cancel |
+| Wrong phase for operation | FAILED_PRECONDITION | Request rejected |
 
 ---
+
+## Operational Guarantees
+
+- **Idempotency**: All operation RPCs require `request_id`; server returns existing operation if replayed
+- **Concurrency**: At most one active operation per machine (store-enforced)
+- **Recovery**: Executor resumes from persisted operation state after crash
+- **Auditing**: All operation transitions + logs preserved

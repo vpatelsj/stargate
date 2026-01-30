@@ -415,20 +415,24 @@ func printOperationHeader(op *pb.Operation, opType string) {
 }
 
 func watchAndStreamOperation(ctx context.Context, client pb.OperationServiceClient, op *pb.Operation) {
+	// Create a child context we can cancel to stop goroutines
+	streamCtx, streamCancel := context.WithCancel(ctx)
+	defer streamCancel()
+
 	var wg sync.WaitGroup
 
 	// Event watcher
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		watchOperationEvents(ctx, client, op.OperationId, op.MachineId)
+		watchOperationEvents(streamCtx, client, op.OperationId, op.MachineId)
 	}()
 
 	// Log streamer
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		streamOperationLogs(ctx, client, op.OperationId)
+		streamOperationLogs(streamCtx, client, op.OperationId)
 	}()
 
 	// Poll for completion
@@ -440,6 +444,7 @@ func watchAndStreamOperation(ctx context.Context, client pb.OperationServiceClie
 	for {
 		select {
 		case <-ctx.Done():
+			streamCancel()
 			wg.Wait()
 			return
 		case <-ticker.C:
@@ -463,6 +468,7 @@ func watchAndStreamOperation(ctx context.Context, client pb.OperationServiceClie
 			if lifecycle.IsTerminalOperationPhase(o.Phase) {
 				fmt.Println()
 				printOperationResult(o)
+				streamCancel() // Cancel streams before waiting
 				wg.Wait()
 				return
 			}
