@@ -1,10 +1,9 @@
 // Package plans provides built-in plan definitions for baremetal provisioning workflows.
+// These are internal types not exposed in the public API.
 package plans
 
 import (
-	"google.golang.org/protobuf/proto"
-
-	pb "github.com/vpatelsj/stargate/gen/baremetal/v1"
+	"github.com/vpatelsj/stargate/internal/bmdemo/workflow"
 )
 
 // Built-in plan IDs
@@ -17,41 +16,41 @@ const (
 )
 
 // builtinPlans contains all pre-defined plans.
-var builtinPlans = map[string]*pb.Plan{
+var builtinPlans = map[string]*workflow.Plan{
 	PlanRepaveJoin: {
-		PlanId:      PlanRepaveJoin,
+		PlanID:      PlanRepaveJoin,
 		DisplayName: "Repave and Join Cluster",
-		Steps: []*pb.Step{
+		Steps: []*workflow.Step{
 			{
 				Name:           "set-netboot",
-				Kind:           &pb.Step_Netboot{Netboot: &pb.SetNetboot{Profile: "pxe-ubuntu-22.04"}},
+				Kind:           workflow.SetNetboot{Profile: "pxe-ubuntu-22.04"},
 				TimeoutSeconds: 60,
 				MaxRetries:     2,
 			},
 			{
 				Name:           "reboot-to-netboot",
-				Kind:           &pb.Step_Reboot{Reboot: &pb.Reboot{Force: false}},
+				Kind:           workflow.Reboot{Force: false},
 				TimeoutSeconds: 300,
 				MaxRetries:     1,
 			},
 			{
 				Name: "repave-image",
-				Kind: &pb.Step_Repave{Repave: &pb.RepaveImage{
+				Kind: workflow.RepaveImage{
 					ImageRef:     "ubuntu:22.04-k8s",
 					CloudInitRef: "cloud-init/worker-node",
-				}},
+				},
 				TimeoutSeconds: 600,
 				MaxRetries:     1,
 			},
 			{
 				Name:           "join-cluster",
-				Kind:           &pb.Step_Join{Join: &pb.KubeadmJoin{}},
+				Kind:           workflow.KubeadmJoin{},
 				TimeoutSeconds: 300,
 				MaxRetries:     2,
 			},
 			{
 				Name:           "verify-in-cluster",
-				Kind:           &pb.Step_Verify{Verify: &pb.VerifyInCluster{}},
+				Kind:           workflow.VerifyInCluster{},
 				TimeoutSeconds: 120,
 				MaxRetries:     3,
 			},
@@ -59,29 +58,29 @@ var builtinPlans = map[string]*pb.Plan{
 	},
 
 	PlanRMA: {
-		PlanId:      PlanRMA,
+		PlanID:      PlanRMA,
 		DisplayName: "Return Merchandise Authorization",
-		Steps: []*pb.Step{
+		Steps: []*workflow.Step{
 			{
 				Name: "drain-check",
-				Kind: &pb.Step_Ssh{Ssh: &pb.SshCommand{
+				Kind: workflow.SSHCommand{
 					ScriptRef: "drain_check.sh",
 					Args:      map[string]string{"force": "false"},
-				}},
+				},
 				TimeoutSeconds: 120,
 				MaxRetries:     1,
 			},
 			{
 				Name:           "graceful-shutdown",
-				Kind:           &pb.Step_Reboot{Reboot: &pb.Reboot{Force: false}},
+				Kind:           workflow.Reboot{Force: false},
 				TimeoutSeconds: 120,
 				MaxRetries:     1,
 			},
 			{
 				Name: "mark-rma",
-				Kind: &pb.Step_Rma{Rma: &pb.RmaAction{
+				Kind: workflow.RMAAction{
 					Reason: "hardware failure",
-				}},
+				},
 				TimeoutSeconds: 60,
 				MaxRetries:     1,
 			},
@@ -89,12 +88,12 @@ var builtinPlans = map[string]*pb.Plan{
 	},
 
 	PlanReboot: {
-		PlanId:      PlanReboot,
+		PlanID:      PlanReboot,
 		DisplayName: "Simple Reboot",
-		Steps: []*pb.Step{
+		Steps: []*workflow.Step{
 			{
 				Name:           "reboot",
-				Kind:           &pb.Step_Reboot{Reboot: &pb.Reboot{Force: false}},
+				Kind:           workflow.Reboot{Force: false},
 				TimeoutSeconds: 300,
 				MaxRetries:     1,
 			},
@@ -102,54 +101,54 @@ var builtinPlans = map[string]*pb.Plan{
 	},
 
 	PlanUpgrade: {
-		PlanId:      PlanUpgrade,
+		PlanID:      PlanUpgrade,
 		DisplayName: "Kubernetes Upgrade",
-		Steps: []*pb.Step{
+		Steps: []*workflow.Step{
 			{
 				Name: "cordon-node",
-				Kind: &pb.Step_Ssh{Ssh: &pb.SshCommand{
+				Kind: workflow.SSHCommand{
 					ScriptRef: "cordon_node.sh",
 					Args:      map[string]string{},
-				}},
+				},
 				TimeoutSeconds: 60,
 				MaxRetries:     2,
 			},
 			{
 				Name: "drain-node",
-				Kind: &pb.Step_Ssh{Ssh: &pb.SshCommand{
+				Kind: workflow.SSHCommand{
 					ScriptRef: "drain_node.sh",
 					Args:      map[string]string{"timeout": "300"},
-				}},
+				},
 				TimeoutSeconds: 600,
 				MaxRetries:     1,
 			},
 			{
 				Name: "upgrade-kubelet",
-				Kind: &pb.Step_Ssh{Ssh: &pb.SshCommand{
+				Kind: workflow.SSHCommand{
 					ScriptRef: "upgrade_k8s.sh",
 					Args:      map[string]string{"version": "1.33.0"},
-				}},
+				},
 				TimeoutSeconds: 300,
 				MaxRetries:     1,
 			},
 			{
 				Name:           "restart-kubelet",
-				Kind:           &pb.Step_Reboot{Reboot: &pb.Reboot{Force: false}},
+				Kind:           workflow.Reboot{Force: false},
 				TimeoutSeconds: 300,
 				MaxRetries:     1,
 			},
 			{
 				Name: "uncordon-node",
-				Kind: &pb.Step_Ssh{Ssh: &pb.SshCommand{
+				Kind: workflow.SSHCommand{
 					ScriptRef: "uncordon_node.sh",
 					Args:      map[string]string{},
-				}},
+				},
 				TimeoutSeconds: 60,
 				MaxRetries:     2,
 			},
 			{
 				Name:           "verify-upgrade",
-				Kind:           &pb.Step_Verify{Verify: &pb.VerifyInCluster{}},
+				Kind:           workflow.VerifyInCluster{},
 				TimeoutSeconds: 120,
 				MaxRetries:     3,
 			},
@@ -157,25 +156,25 @@ var builtinPlans = map[string]*pb.Plan{
 	},
 
 	PlanNetReconfig: {
-		PlanId:      PlanNetReconfig,
+		PlanID:      PlanNetReconfig,
 		DisplayName: "Network Reconfiguration",
-		Steps: []*pb.Step{
+		Steps: []*workflow.Step{
 			{
 				Name: "apply-network-config",
-				Kind: &pb.Step_Net{Net: &pb.NetReconfig{
+				Kind: workflow.NetReconfig{
 					Params: map[string]string{
 						"action": "reconfigure",
 					},
-				}},
+				},
 				TimeoutSeconds: 120,
 				MaxRetries:     2,
 			},
 			{
 				Name: "verify-connectivity",
-				Kind: &pb.Step_Ssh{Ssh: &pb.SshCommand{
+				Kind: workflow.SSHCommand{
 					ScriptRef: "verify_network.sh",
 					Args:      map[string]string{},
-				}},
+				},
 				TimeoutSeconds: 60,
 				MaxRetries:     3,
 			},
@@ -185,13 +184,13 @@ var builtinPlans = map[string]*pb.Plan{
 
 // Registry holds plan definitions and provides lookup.
 type Registry struct {
-	plans map[string]*pb.Plan
+	plans map[string]*workflow.Plan
 }
 
 // NewRegistry creates a new plan registry with built-in plans.
 func NewRegistry() *Registry {
 	r := &Registry{
-		plans: make(map[string]*pb.Plan),
+		plans: make(map[string]*workflow.Plan),
 	}
 	// Clone built-in plans so the registry is immutable from outside mutation
 	for id, plan := range builtinPlans {
@@ -201,15 +200,26 @@ func NewRegistry() *Registry {
 }
 
 // clonePlan returns a deep copy of a plan to prevent callers from mutating shared state.
-func clonePlan(p *pb.Plan) *pb.Plan {
+func clonePlan(p *workflow.Plan) *workflow.Plan {
 	if p == nil {
 		return nil
 	}
-	return proto.Clone(p).(*pb.Plan)
+	clone := &workflow.Plan{
+		PlanID:      p.PlanID,
+		DisplayName: p.DisplayName,
+	}
+	if p.Steps != nil {
+		clone.Steps = make([]*workflow.Step, len(p.Steps))
+		for i, s := range p.Steps {
+			stepClone := *s
+			clone.Steps[i] = &stepClone
+		}
+	}
+	return clone
 }
 
 // GetPlan retrieves a plan by ID. Returns a deep clone so callers can't mutate registry state.
-func (r *Registry) GetPlan(planID string) (*pb.Plan, bool) {
+func (r *Registry) GetPlan(planID string) (*workflow.Plan, bool) {
 	plan, ok := r.plans[planID]
 	if !ok {
 		return nil, false
@@ -218,8 +228,8 @@ func (r *Registry) GetPlan(planID string) (*pb.Plan, bool) {
 }
 
 // ListPlans returns all available plans. Returns deep clones so callers can't mutate registry state.
-func (r *Registry) ListPlans() []*pb.Plan {
-	result := make([]*pb.Plan, 0, len(r.plans))
+func (r *Registry) ListPlans() []*workflow.Plan {
+	result := make([]*workflow.Plan, 0, len(r.plans))
 	for _, plan := range r.plans {
 		result = append(result, clonePlan(plan))
 	}
@@ -228,9 +238,9 @@ func (r *Registry) ListPlans() []*pb.Plan {
 
 // RegisterPlan adds a custom plan to the registry.
 // The plan is cloned before storing so the registry is immutable from outside mutation.
-func (r *Registry) RegisterPlan(plan *pb.Plan) {
-	if plan != nil && plan.PlanId != "" {
-		r.plans[plan.PlanId] = clonePlan(plan)
+func (r *Registry) RegisterPlan(plan *workflow.Plan) {
+	if plan != nil && plan.PlanID != "" {
+		r.plans[plan.PlanID] = clonePlan(plan)
 	}
 }
 

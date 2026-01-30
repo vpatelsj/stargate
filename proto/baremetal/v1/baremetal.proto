@@ -106,7 +106,6 @@ message Condition {
 
 // Operation represents an async lifecycle operation on a machine.
 // Customers track progress via phase, current_stage, and error status.
-// Internal workflow details (plan_id, steps) are hidden from external responses.
 message Operation {
   string operation_id = 1;
   string machine_id = 2;
@@ -137,32 +136,11 @@ message Operation {
   // Parameters passed to the operation (e.g., image_ref for reimage)
   map<string, string> params = 8;
 
-  // Internal plan_id - hidden from external responses (server clears before returning)
-  string plan_id = 7;
-
   google.protobuf.Timestamp created_at = 10;
   google.protobuf.Timestamp started_at = 11;
   google.protobuf.Timestamp finished_at = 12;
 
-  // Step statuses - hidden from external responses (server clears before returning)
-  repeated StepStatus steps = 20;
   ErrorStatus error = 21;
-}
-
-message StepStatus {
-  string name = 1;
-  enum State {
-    STATE_UNSPECIFIED = 0;
-    WAITING = 1;
-    RUNNING = 2;
-    SUCCEEDED = 3;
-    FAILED = 4;
-  }
-  State state = 2;
-  int32 retry_count = 3;
-  google.protobuf.Timestamp started_at = 4;
-  google.protobuf.Timestamp finished_at = 5;
-  string message = 6;
 }
 
 message ErrorStatus {
@@ -184,43 +162,6 @@ message LogChunk {
   string stream = 3; // stdout|stderr
   bytes data = 4;
 }
-
-// ============================================================================
-// Internal Plan/Step Types (kept for workflow engine, not exposed to customers)
-// ============================================================================
-
-message Plan {
-  string plan_id = 1;
-  string display_name = 2;
-  repeated Step steps = 3;
-}
-
-message Step {
-  string name = 1;
-
-  oneof kind {
-    SshCommand ssh = 10;
-    Reboot reboot = 11;
-    SetNetboot netboot = 12;
-    RepaveImage repave = 13;
-    KubeadmJoin join = 14;
-    VerifyInCluster verify = 15;
-    NetReconfig net = 16;
-    RmaAction rma = 17;
-  }
-
-  int32 timeout_seconds = 50;
-  int32 max_retries = 51;
-}
-
-message SshCommand { string script_ref = 1; map<string,string> args = 2; }
-message Reboot { bool force = 1; }
-message SetNetboot { string profile = 1; }
-message RepaveImage { string image_ref = 1; string cloud_init_ref = 2; }
-message RmaAction { string reason = 1; }
-message KubeadmJoin { TargetClusterRef target_cluster = 1; }
-message VerifyInCluster { TargetClusterRef target_cluster = 1; }
-message NetReconfig { map<string,string> params = 1; }
 
 // ============================================================================
 // Request/Response Messages

@@ -11,6 +11,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	pb "github.com/vpatelsj/stargate/gen/baremetal/v1"
+	"github.com/vpatelsj/stargate/internal/bmdemo/workflow"
 )
 
 // Sentinel errors for typed error handling
@@ -44,6 +45,9 @@ type Store struct {
 	machines   map[string]*pb.Machine
 	operations map[string]*pb.Operation
 
+	// Internal workflow state - NOT exposed in public API
+	workflows map[string]*workflow.OperationWorkflow
+
 	// Indexes
 	requestIndex map[string]string // (machine_id:request_id) -> operation_id for idempotent operations
 
@@ -57,6 +61,7 @@ func New() *Store {
 	return &Store{
 		machines:         make(map[string]*pb.Machine),
 		operations:       make(map[string]*pb.Operation),
+		workflows:        make(map[string]*workflow.OperationWorkflow),
 		requestIndex:     make(map[string]string),
 		machineLocks:     make(map[string]*sync.Mutex),
 		machineOperating: make(map[string]bool),
@@ -150,6 +155,18 @@ func (s *Store) UpdateMachine(m *pb.Machine) (*pb.Machine, error) {
 	return cloneMachine(existing), nil
 }
 
+// cloneParams returns a deep copy of a params map.
+func cloneParams(params map[string]string) map[string]string {
+	if params == nil {
+		return nil
+	}
+	clone := make(map[string]string, len(params))
+	for k, v := range params {
+		clone[k] = v
+	}
+	return clone
+}
+
 // CreateOperationIfNotExists creates a new operation if the request_id hasn't been seen before.
 // Returns the operation and whether it was newly created (true) or already existed (false).
 // Enforces that only one operation can be active per machine at a time.
@@ -158,7 +175,7 @@ func (s *Store) UpdateMachine(m *pb.Machine) (*pb.Machine, error) {
 // Errors returned:
 //   - ErrMachineNotFound if machine doesn't exist
 //   - ErrMachineHasActiveOperation if machine already has an active operation
-func (s *Store) CreateOperationIfNotExists(requestID, machineID string, opType pb.Operation_OperationType, planID string, params map[string]string) (*pb.Operation, bool, error) {
+func (s *Store) CreateOperationIfNotExists(requestID, machineID string, opType pb.Operation_OperationType, params map[string]string) (*pb.Operation, bool, error) {
 	s.mu.RLock()
 	if requestID != "" {
 		idempotencyKey := machineID + ":" + requestID
@@ -213,12 +230,16 @@ func (s *Store) CreateOperationIfNotExists(requestID, machineID string, opType p
 		Phase:       pb.Operation_PENDING,
 		RequestId:   requestID,
 		Type:        opType,
-		PlanId:      planID,
-		Params:      params,
+		Params:      cloneParams(params), // Clone params to prevent caller mutation
 		CreatedAt:   timestamppb.Now(),
 	}
 
 	s.operations[opID] = op
+
+	// Create internal workflow state
+	s.workflows[opID] = &workflow.OperationWorkflow{
+		OperationID: opID,
+	}
 
 	if requestID != "" {
 		idempotencyKey := machineID + ":" + requestID
@@ -336,17 +357,19 @@ func (s *Store) clearMachineActiveOperation(machineID string) {
 	}
 }
 
-// cloneStepStatus returns a deep copy of a step status.
-func cloneStepStatus(st *pb.StepStatus) *pb.StepStatus {
-	if st == nil {
-		return nil
+// GetWorkflow retrieves the internal workflow state for an operation.
+func (s *Store) GetWorkflow(opID string) (*workflow.OperationWorkflow, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	w, ok := s.workflows[opID]
+	if !ok {
+		return nil, false
 	}
-	return proto.Clone(st).(*pb.StepStatus)
+	return w.Clone(), true
 }
 
-// UpdateOperationStep adds or updates a step status for an operation.
-// The step is cloned before storing to prevent external mutation.
-func (s *Store) UpdateOperationStep(opID string, step *pb.StepStatus) error {
+// UpdateWorkflowStep adds or updates a step status in the internal workflow.
+func (s *Store) UpdateWorkflowStep(opID string, step *workflow.StepStatus) error {
 	if step == nil {
 		return fmt.Errorf("step is nil")
 	}
@@ -354,27 +377,31 @@ func (s *Store) UpdateOperationStep(opID string, step *pb.StepStatus) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	op, ok := s.operations[opID]
+	wf, ok := s.workflows[opID]
 	if !ok {
-		return fmt.Errorf("operation %q not found", opID)
+		return fmt.Errorf("workflow for operation %q not found", opID)
 	}
 
-	// Clone the step to prevent external mutation from affecting store state
-	stepClone := cloneStepStatus(step)
+	// Also update the public operation's CurrentStage field for visibility
+	if op, ok := s.operations[opID]; ok {
+		op.CurrentStage = step.Name
+	}
+
+	// Clone the step to prevent external mutation
+	stepClone := *step
 
 	found := false
-	for i, existing := range op.Steps {
+	for i, existing := range wf.Steps {
 		if existing.Name == stepClone.Name {
-			op.Steps[i] = stepClone
+			wf.Steps[i] = &stepClone
 			found = true
 			break
 		}
 	}
 	if !found {
-		op.Steps = append(op.Steps, stepClone)
+		wf.Steps = append(wf.Steps, &stepClone)
 	}
 
-	op.CurrentStage = stepClone.Name
 	return nil
 }
 

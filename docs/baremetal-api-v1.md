@@ -1,7 +1,7 @@
 # Bare Metal Provisioning API v1 (gRPC + Hybrid Lifecycle)
 
 ## Summary
-A minimal, customer-facing gRPC API for managing bare-metal inventory and long-running operations (repave, join, reboot, upgrade, RMA, network reconfig) across multiple providers. The API separates machine identity, reusable plans, and execution runs. Machines expose a small explicit phase plus derived conditions; runs expose step-by-step progress and logs.
+A minimal, customer-facing gRPC API for managing bare-metal inventory and long-running operations (repave, join, reboot, upgrade, RMA, network reconfig) across multiple providers. The API focuses on **what** happens (operation type, machine, phase, result) while keeping the internal workflow engine (plans, steps) hidden from SDK consumers.
 
 ## Why this exists
 We need a single inventory and operations surface that works across:
@@ -12,14 +12,16 @@ The API must support asynchronous operations with observable progress and idempo
 
 ## Goals
 - Minimal gRPC API usable by other workstreams
-- Async, idempotent operations with observable state (steps + logs)
+- Async, idempotent operations with observable state (phase + logs)
 - Provider-agnostic adapters using capability-based interfaces
 - Hybrid lifecycle: explicit phase + derived conditions + computed EffectiveState
+- **Internal workflow engine**: plans/steps are NOT exposed in SDK; only server-side
 
 ## Non-goals (v1)
 - Full IPAM/network modeling like MAAS/Ironic
-- Workflow DSL (plans are small typed step lists)
+- Workflow DSL (plans are internal typed step lists)
 - Multi-machine atomic orchestration
+- Client-visible step details (workflow is internal)
 
 ---
 
@@ -34,30 +36,41 @@ Conceptual fields:
 - Lifecycle: explicit `phase`, derived `conditions[]`, `active_run_id`
 - References: `customer_id`, `target_cluster_ref` (optional)
 
-### Plan (reusable recipe)
-A small sequence of typed steps executed in order (e.g., set netboot, repave image, run SSH command). Plans are not a workflow DSL.
+### Plan (internal workflow engine)
+Plans are **internal** to the server - they are NOT exposed in the public proto or SDK.
+The client specifies only the operation type (REBOOT, REIMAGE, etc.) and the server
+selects and executes the appropriate internal plan.
 
-Plan details (v1):
-- Plan identity: `plan_id` is stable; `display_name` is human readable
+Internal Plan details:
+- Plan identity: `plan_id` is internal; not visible to SDK consumers
 - Execution model: steps run strictly in order; stop on first failed step after retries
-- Defaults: per-step `timeout_seconds` and `max_retries` inherit from server defaults when unset
-- Step naming: `step.name` must be unique within a plan (used for step status lookup)
-- Validation: plans are rejected if they contain unknown step kinds or duplicate step names
-- Referencing: runs may supply `plan_id` explicitly or use a server-defined default plan per `Run.type`
-- Versioning: a plan is immutable once referenced by a run; updates require a new `plan_id`
+- Defaults: per-step `timeout_seconds` and `max_retries` configured server-side
+- Step naming: `step.name` is internal; SDK only sees `current_stage` field
+- Validation: plans are validated server-side
+- Versioning: plans are server-managed; clients don't specify plans
 
-Sample Step kinds (v1 core):
-- `SshCommand`: run an SSH command on the host (via jump/agent as needed)
-- `Reboot`: reboot via BMC or in-band, with reachability check
-- `SetNetboot`: set next boot device or PXE mode
+Internal Step kinds (v1 core):
+- `SSHCommand`: run an SSH command on the host
+- `Reboot`: reboot via BMC or in-band
+- `SetNetboot`: set next boot device or PXE mode  
 - `RepaveImage`: install an OS image
-- `KubeadmJoin`: run cluster join flow using provided join material
+- `KubeadmJoin`: run cluster join flow
 - `VerifyInCluster`: confirm node registration and readiness
-- `NetReconfig`: apply network changes (optional in v1)
-- `RmaAction`: finalize RMA workflow steps (optional in v1)
+- `NetReconfig`: apply network changes
+- `RMAAction`: finalize RMA workflow steps
 
-### Run (execution record)
-An immutable record of applying a plan (or operation type) to a machine. Runs are the customer-facing handle for long-running operations and expose phase, step status, timestamps, and logs.
+### Operation (execution record)
+An immutable record of running an operation type (REBOOT, REIMAGE, etc.) on a machine.
+Operations are the customer-facing handle for long-running work and expose:
+- `phase`: PENDING, RUNNING, SUCCEEDED, FAILED, CANCELED
+- `current_stage`: human-readable current step name (for progress)
+- `error`: structured error info on failure
+- Timestamps: `created_at`, `started_at`, `finished_at`
+- Logs: streamable via `StreamOperationLogs()`
+
+**Note**: Internal workflow details (plan_id, step list, step status) are NOT exposed
+in the public proto. This separation allows the workflow engine to evolve without
+breaking SDK consumers.
 
 ---
 

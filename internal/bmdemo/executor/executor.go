@@ -18,6 +18,7 @@ import (
 	"github.com/vpatelsj/stargate/internal/bmdemo/plans"
 	"github.com/vpatelsj/stargate/internal/bmdemo/provider"
 	"github.com/vpatelsj/stargate/internal/bmdemo/store"
+	"github.com/vpatelsj/stargate/internal/bmdemo/workflow"
 )
 
 // EventCallback is called on operation state transitions.
@@ -130,7 +131,6 @@ func (r *Runner) emitEvent(op *pb.Operation, message string) {
 }
 
 // emitEventFromStore fetches the latest operation state from store and emits an event.
-// This ensures event snapshots reflect actual persisted state (including Steps[]).
 func (r *Runner) emitEventFromStore(operationID string, message string) {
 	op, ok := r.store.GetOperation(operationID)
 	if !ok {
@@ -306,17 +306,17 @@ func (r *Runner) executeOperation(ctx context.Context, operationID string) {
 
 		r.emitLog(operationID, "stdout", []byte(fmt.Sprintf("\n--- Step %d/%d: %s ---\n", i+1, len(plan.Steps), step.Name)))
 
-		// Set step to WAITING then RUNNING
-		stepStatus := &pb.StepStatus{
+		// Set step to WAITING then RUNNING using internal workflow types
+		stepStatus := &workflow.StepStatus{
 			Name:      step.Name,
-			State:     pb.StepStatus_WAITING,
-			StartedAt: timestamppb.Now(),
+			State:     workflow.StepStateWaiting,
+			StartedAt: time.Now(),
 		}
-		r.store.UpdateOperationStep(operationID, stepStatus)
+		r.store.UpdateWorkflowStep(operationID, stepStatus)
 
-		stepStatus.State = pb.StepStatus_RUNNING
-		r.store.UpdateOperationStep(operationID, stepStatus)
-		// Emit event with fresh operation state from store (includes StepStatus[])
+		stepStatus.State = workflow.StepStateRunning
+		r.store.UpdateWorkflowStep(operationID, stepStatus)
+		// Emit event with fresh operation state from store
 		r.emitEventFromStore(operationID, fmt.Sprintf("Step %s started", step.Name))
 
 		// Execute with retries
@@ -354,23 +354,23 @@ func (r *Runner) executeOperation(ctx context.Context, operationID string) {
 			stepStatus.RetryCount = int32(attempt + 1)
 		}
 
-		stepStatus.FinishedAt = timestamppb.Now()
+		stepStatus.FinishedAt = time.Now()
 		if stepErr != nil {
-			stepStatus.State = pb.StepStatus_FAILED
+			stepStatus.State = workflow.StepStateFailed
 			stepStatus.Message = stepErr.Error()
-			r.store.UpdateOperationStep(operationID, stepStatus)
+			r.store.UpdateWorkflowStep(operationID, stepStatus)
 			r.emitEventFromStore(operationID, fmt.Sprintf("Step %s failed: %v", step.Name, stepErr))
 			lastErr = stepErr
 			break
 		}
 
-		stepStatus.State = pb.StepStatus_SUCCEEDED
-		r.store.UpdateOperationStep(operationID, stepStatus)
+		stepStatus.State = workflow.StepStateSucceeded
+		r.store.UpdateWorkflowStep(operationID, stepStatus)
 		r.emitEventFromStore(operationID, fmt.Sprintf("Step %s succeeded", step.Name))
 
 		// Track specific step completions
 		switch step.Kind.(type) {
-		case *pb.Step_Repave:
+		case workflow.RepaveImage:
 			completedReimage = true
 		}
 	}
@@ -384,16 +384,9 @@ func (r *Runner) executeOperation(ctx context.Context, operationID string) {
 }
 
 // getPlanForOperation retrieves the plan for an operation.
-// Priority: plan_id > type-based lookup > fallback
-func (r *Runner) getPlanForOperation(op *pb.Operation) *pb.Plan {
-	// First, try explicit plan_id
-	if op.PlanId != "" {
-		if plan, ok := r.plans.GetPlan(op.PlanId); ok {
-			return plan
-		}
-	}
-
-	// Second, map type to default plan
+// Uses internal workflow.Plan types, NOT proto types.
+func (r *Runner) getPlanForOperation(op *pb.Operation) *workflow.Plan {
+	// Map operation type to default plan
 	switch op.Type {
 	case pb.Operation_REIMAGE:
 		if plan, ok := r.plans.GetPlan(plans.PlanRepaveJoin); ok {
@@ -405,17 +398,17 @@ func (r *Runner) getPlanForOperation(op *pb.Operation) *pb.Plan {
 		}
 	case pb.Operation_ENTER_MAINTENANCE:
 		// Simple no-op plan for entering maintenance
-		return &pb.Plan{
-			PlanId:      "plan/enter-maintenance",
+		return &workflow.Plan{
+			PlanID:      "plan/enter-maintenance",
 			DisplayName: "Enter Maintenance",
-			Steps:       []*pb.Step{}, // No steps - just a phase transition
+			Steps:       []*workflow.Step{}, // No steps - just a phase transition
 		}
 	case pb.Operation_EXIT_MAINTENANCE:
 		// Simple no-op plan for exiting maintenance
-		return &pb.Plan{
-			PlanId:      "plan/exit-maintenance",
+		return &workflow.Plan{
+			PlanID:      "plan/exit-maintenance",
 			DisplayName: "Exit Maintenance",
-			Steps:       []*pb.Step{}, // No steps - just a phase transition
+			Steps:       []*workflow.Step{}, // No steps - just a phase transition
 		}
 	}
 
@@ -424,9 +417,8 @@ func (r *Runner) getPlanForOperation(op *pb.Operation) *pb.Plan {
 	return plan
 }
 
-// executeStep executes a single step.
-// The operation is passed to access params like image_ref.
-func (r *Runner) executeStep(ctx context.Context, op *pb.Operation, machine *pb.Machine, step *pb.Step) error {
+// executeStep executes a single step using internal workflow types.
+func (r *Runner) executeStep(ctx context.Context, op *pb.Operation, machine *pb.Machine, step *workflow.Step) error {
 	timeout := time.Duration(step.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
@@ -438,29 +430,26 @@ func (r *Runner) executeStep(ctx context.Context, op *pb.Operation, machine *pb.
 	operationID := op.OperationId
 
 	switch kind := step.Kind.(type) {
-	case *pb.Step_Ssh:
-		return r.provider.ExecuteSSHCommand(stepCtx, operationID, machine, kind.Ssh.ScriptRef, kind.Ssh.Args)
+	case workflow.SSHCommand:
+		return r.provider.ExecuteSSHCommand(stepCtx, operationID, machine, kind.ScriptRef, kind.Args)
 
-	case *pb.Step_Reboot:
-		return r.provider.Reboot(stepCtx, operationID, machine, kind.Reboot.Force)
+	case workflow.Reboot:
+		return r.provider.Reboot(stepCtx, operationID, machine, kind.Force)
 
-	case *pb.Step_Netboot:
-		return r.provider.SetNetboot(stepCtx, operationID, machine, kind.Netboot.Profile)
+	case workflow.SetNetboot:
+		return r.provider.SetNetboot(stepCtx, operationID, machine, kind.Profile)
 
-	case *pb.Step_Repave:
+	case workflow.RepaveImage:
 		// Use image_ref from operation params if available, otherwise use plan default
-		imageRef := kind.Repave.ImageRef
+		imageRef := kind.ImageRef
 		if opImageRef := op.Params["image_ref"]; opImageRef != "" {
 			imageRef = opImageRef
 		}
-		return r.provider.Repave(stepCtx, operationID, machine, imageRef, kind.Repave.CloudInitRef)
+		return r.provider.Repave(stepCtx, operationID, machine, imageRef, kind.CloudInitRef)
 
-	case *pb.Step_Join:
+	case workflow.KubeadmJoin:
 		// Mint join material and join
-		targetCluster := kind.Join.TargetCluster
-		if targetCluster == nil {
-			targetCluster = machine.Spec.GetTargetCluster()
-		}
+		targetCluster := machine.Spec.GetTargetCluster()
 		if targetCluster == nil {
 			targetCluster = &pb.TargetClusterRef{ClusterId: "default-cluster"}
 		}
@@ -471,25 +460,22 @@ func (r *Runner) executeStep(ctx context.Context, op *pb.Operation, machine *pb.
 		}
 		return r.provider.JoinNode(stepCtx, operationID, machine, material)
 
-	case *pb.Step_Verify:
-		targetCluster := kind.Verify.TargetCluster
-		if targetCluster == nil {
-			targetCluster = machine.Spec.GetTargetCluster()
-		}
+	case workflow.VerifyInCluster:
+		targetCluster := machine.Spec.GetTargetCluster()
 		if targetCluster == nil {
 			targetCluster = &pb.TargetClusterRef{ClusterId: "default-cluster"}
 		}
 		return r.provider.VerifyInCluster(stepCtx, operationID, machine, targetCluster)
 
-	case *pb.Step_Net:
+	case workflow.NetReconfig:
 		// Net reconfig is a stub - just log and succeed
-		r.emitLog(operationID, "stdout", []byte(fmt.Sprintf("[net-reconfig] Applying config: %v\n", kind.Net.Params)))
+		r.emitLog(operationID, "stdout", []byte(fmt.Sprintf("[net-reconfig] Applying config: %v\n", kind.Params)))
 		time.Sleep(500 * time.Millisecond)
 		r.emitLog(operationID, "stdout", []byte("[net-reconfig] Network reconfiguration complete\n"))
 		return nil
 
-	case *pb.Step_Rma:
-		reason := kind.Rma.Reason
+	case workflow.RMAAction:
+		reason := kind.Reason
 		if reason == "" {
 			reason = "no reason specified"
 		}

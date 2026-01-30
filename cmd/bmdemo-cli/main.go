@@ -540,19 +540,9 @@ func printOperationResult(op *pb.Operation) {
 		fmt.Printf("│ Duration: %s\n", duration.Round(time.Millisecond))
 	}
 
-	// Steps summary
-	succeeded := 0
-	failed := 0
-	for _, s := range op.Steps {
-		switch s.State {
-		case pb.StepStatus_SUCCEEDED:
-			succeeded++
-		case pb.StepStatus_FAILED:
-			failed++
-		}
-	}
-	if len(op.Steps) > 0 {
-		fmt.Printf("│ Steps: %d/%d completed\n", succeeded, len(op.Steps))
+	// Current stage (progress indicator - workflow steps are internal)
+	if op.CurrentStage != "" {
+		fmt.Printf("│ Stage: %s\n", op.CurrentStage)
 	}
 
 	// Error details

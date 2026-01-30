@@ -255,61 +255,6 @@ func (Operation_Phase) EnumDescriptor() ([]byte, []int) {
 	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{5, 1}
 }
 
-type StepStatus_State int32
-
-const (
-	StepStatus_STATE_UNSPECIFIED StepStatus_State = 0
-	StepStatus_WAITING           StepStatus_State = 1
-	StepStatus_RUNNING           StepStatus_State = 2
-	StepStatus_SUCCEEDED         StepStatus_State = 3
-	StepStatus_FAILED            StepStatus_State = 4
-)
-
-// Enum value maps for StepStatus_State.
-var (
-	StepStatus_State_name = map[int32]string{
-		0: "STATE_UNSPECIFIED",
-		1: "WAITING",
-		2: "RUNNING",
-		3: "SUCCEEDED",
-		4: "FAILED",
-	}
-	StepStatus_State_value = map[string]int32{
-		"STATE_UNSPECIFIED": 0,
-		"WAITING":           1,
-		"RUNNING":           2,
-		"SUCCEEDED":         3,
-		"FAILED":            4,
-	}
-)
-
-func (x StepStatus_State) Enum() *StepStatus_State {
-	p := new(StepStatus_State)
-	*p = x
-	return p
-}
-
-func (x StepStatus_State) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (StepStatus_State) Descriptor() protoreflect.EnumDescriptor {
-	return file_baremetal_v1_baremetal_proto_enumTypes[4].Descriptor()
-}
-
-func (StepStatus_State) Type() protoreflect.EnumType {
-	return &file_baremetal_v1_baremetal_proto_enumTypes[4]
-}
-
-func (x StepStatus_State) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use StepStatus_State.Descriptor instead.
-func (StepStatus_State) EnumDescriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{6, 0}
-}
-
 type Machine struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	MachineId     string                 `protobuf:"bytes,1,opt,name=machine_id,json=machineId,proto3" json:"machine_id,omitempty"`
@@ -677,7 +622,6 @@ func (x *Condition) GetLastTransitionTime() *timestamppb.Timestamp {
 
 // Operation represents an async lifecycle operation on a machine.
 // Customers track progress via phase, current_stage, and error status.
-// Internal workflow details (plan_id, steps) are hidden from external responses.
 type Operation struct {
 	state        protoimpl.MessageState  `protogen:"open.v1"`
 	OperationId  string                  `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
@@ -687,15 +631,11 @@ type Operation struct {
 	Phase        Operation_Phase         `protobuf:"varint,5,opt,name=phase,proto3,enum=baremetal.v1.Operation_Phase" json:"phase,omitempty"`
 	CurrentStage string                  `protobuf:"bytes,6,opt,name=current_stage,json=currentStage,proto3" json:"current_stage,omitempty"` // Current step name for progress display
 	// Parameters passed to the operation (e.g., image_ref for reimage)
-	Params map[string]string `protobuf:"bytes,8,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	// Internal plan_id - hidden from external responses (server clears before returning)
-	PlanId     string                 `protobuf:"bytes,7,opt,name=plan_id,json=planId,proto3" json:"plan_id,omitempty"`
-	CreatedAt  *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	StartedAt  *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
-	FinishedAt *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
-	// Step statuses - hidden from external responses (server clears before returning)
-	Steps         []*StepStatus `protobuf:"bytes,20,rep,name=steps,proto3" json:"steps,omitempty"`
-	Error         *ErrorStatus  `protobuf:"bytes,21,opt,name=error,proto3" json:"error,omitempty"`
+	Params        map[string]string      `protobuf:"bytes,8,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	StartedAt     *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
+	FinishedAt    *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
+	Error         *ErrorStatus           `protobuf:"bytes,21,opt,name=error,proto3" json:"error,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -779,13 +719,6 @@ func (x *Operation) GetParams() map[string]string {
 	return nil
 }
 
-func (x *Operation) GetPlanId() string {
-	if x != nil {
-		return x.PlanId
-	}
-	return ""
-}
-
 func (x *Operation) GetCreatedAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.CreatedAt
@@ -807,102 +740,11 @@ func (x *Operation) GetFinishedAt() *timestamppb.Timestamp {
 	return nil
 }
 
-func (x *Operation) GetSteps() []*StepStatus {
-	if x != nil {
-		return x.Steps
-	}
-	return nil
-}
-
 func (x *Operation) GetError() *ErrorStatus {
 	if x != nil {
 		return x.Error
 	}
 	return nil
-}
-
-type StepStatus struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	State         StepStatus_State       `protobuf:"varint,2,opt,name=state,proto3,enum=baremetal.v1.StepStatus_State" json:"state,omitempty"`
-	RetryCount    int32                  `protobuf:"varint,3,opt,name=retry_count,json=retryCount,proto3" json:"retry_count,omitempty"`
-	StartedAt     *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
-	FinishedAt    *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
-	Message       string                 `protobuf:"bytes,6,opt,name=message,proto3" json:"message,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *StepStatus) Reset() {
-	*x = StepStatus{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[6]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *StepStatus) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*StepStatus) ProtoMessage() {}
-
-func (x *StepStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[6]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use StepStatus.ProtoReflect.Descriptor instead.
-func (*StepStatus) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{6}
-}
-
-func (x *StepStatus) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-func (x *StepStatus) GetState() StepStatus_State {
-	if x != nil {
-		return x.State
-	}
-	return StepStatus_STATE_UNSPECIFIED
-}
-
-func (x *StepStatus) GetRetryCount() int32 {
-	if x != nil {
-		return x.RetryCount
-	}
-	return 0
-}
-
-func (x *StepStatus) GetStartedAt() *timestamppb.Timestamp {
-	if x != nil {
-		return x.StartedAt
-	}
-	return nil
-}
-
-func (x *StepStatus) GetFinishedAt() *timestamppb.Timestamp {
-	if x != nil {
-		return x.FinishedAt
-	}
-	return nil
-}
-
-func (x *StepStatus) GetMessage() string {
-	if x != nil {
-		return x.Message
-	}
-	return ""
 }
 
 type ErrorStatus struct {
@@ -917,7 +759,7 @@ type ErrorStatus struct {
 
 func (x *ErrorStatus) Reset() {
 	*x = ErrorStatus{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[7]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -929,7 +771,7 @@ func (x *ErrorStatus) String() string {
 func (*ErrorStatus) ProtoMessage() {}
 
 func (x *ErrorStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[7]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -942,7 +784,7 @@ func (x *ErrorStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ErrorStatus.ProtoReflect.Descriptor instead.
 func (*ErrorStatus) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{7}
+	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ErrorStatus) GetCode() string {
@@ -984,7 +826,7 @@ type OperationEvent struct {
 
 func (x *OperationEvent) Reset() {
 	*x = OperationEvent{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[8]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -996,7 +838,7 @@ func (x *OperationEvent) String() string {
 func (*OperationEvent) ProtoMessage() {}
 
 func (x *OperationEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[8]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1009,7 +851,7 @@ func (x *OperationEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationEvent.ProtoReflect.Descriptor instead.
 func (*OperationEvent) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{8}
+	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *OperationEvent) GetTs() *timestamppb.Timestamp {
@@ -1045,7 +887,7 @@ type LogChunk struct {
 
 func (x *LogChunk) Reset() {
 	*x = LogChunk{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[9]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1057,7 +899,7 @@ func (x *LogChunk) String() string {
 func (*LogChunk) ProtoMessage() {}
 
 func (x *LogChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[9]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1070,7 +912,7 @@ func (x *LogChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogChunk.ProtoReflect.Descriptor instead.
 func (*LogChunk) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{9}
+	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *LogChunk) GetTs() *timestamppb.Timestamp {
@@ -1101,636 +943,6 @@ func (x *LogChunk) GetData() []byte {
 	return nil
 }
 
-type Plan struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	PlanId        string                 `protobuf:"bytes,1,opt,name=plan_id,json=planId,proto3" json:"plan_id,omitempty"`
-	DisplayName   string                 `protobuf:"bytes,2,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
-	Steps         []*Step                `protobuf:"bytes,3,rep,name=steps,proto3" json:"steps,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *Plan) Reset() {
-	*x = Plan{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[10]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *Plan) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*Plan) ProtoMessage() {}
-
-func (x *Plan) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[10]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use Plan.ProtoReflect.Descriptor instead.
-func (*Plan) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{10}
-}
-
-func (x *Plan) GetPlanId() string {
-	if x != nil {
-		return x.PlanId
-	}
-	return ""
-}
-
-func (x *Plan) GetDisplayName() string {
-	if x != nil {
-		return x.DisplayName
-	}
-	return ""
-}
-
-func (x *Plan) GetSteps() []*Step {
-	if x != nil {
-		return x.Steps
-	}
-	return nil
-}
-
-type Step struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	// Types that are valid to be assigned to Kind:
-	//
-	//	*Step_Ssh
-	//	*Step_Reboot
-	//	*Step_Netboot
-	//	*Step_Repave
-	//	*Step_Join
-	//	*Step_Verify
-	//	*Step_Net
-	//	*Step_Rma
-	Kind           isStep_Kind `protobuf_oneof:"kind"`
-	TimeoutSeconds int32       `protobuf:"varint,50,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
-	MaxRetries     int32       `protobuf:"varint,51,opt,name=max_retries,json=maxRetries,proto3" json:"max_retries,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
-}
-
-func (x *Step) Reset() {
-	*x = Step{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[11]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *Step) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*Step) ProtoMessage() {}
-
-func (x *Step) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[11]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use Step.ProtoReflect.Descriptor instead.
-func (*Step) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{11}
-}
-
-func (x *Step) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-func (x *Step) GetKind() isStep_Kind {
-	if x != nil {
-		return x.Kind
-	}
-	return nil
-}
-
-func (x *Step) GetSsh() *SshCommand {
-	if x != nil {
-		if x, ok := x.Kind.(*Step_Ssh); ok {
-			return x.Ssh
-		}
-	}
-	return nil
-}
-
-func (x *Step) GetReboot() *Reboot {
-	if x != nil {
-		if x, ok := x.Kind.(*Step_Reboot); ok {
-			return x.Reboot
-		}
-	}
-	return nil
-}
-
-func (x *Step) GetNetboot() *SetNetboot {
-	if x != nil {
-		if x, ok := x.Kind.(*Step_Netboot); ok {
-			return x.Netboot
-		}
-	}
-	return nil
-}
-
-func (x *Step) GetRepave() *RepaveImage {
-	if x != nil {
-		if x, ok := x.Kind.(*Step_Repave); ok {
-			return x.Repave
-		}
-	}
-	return nil
-}
-
-func (x *Step) GetJoin() *KubeadmJoin {
-	if x != nil {
-		if x, ok := x.Kind.(*Step_Join); ok {
-			return x.Join
-		}
-	}
-	return nil
-}
-
-func (x *Step) GetVerify() *VerifyInCluster {
-	if x != nil {
-		if x, ok := x.Kind.(*Step_Verify); ok {
-			return x.Verify
-		}
-	}
-	return nil
-}
-
-func (x *Step) GetNet() *NetReconfig {
-	if x != nil {
-		if x, ok := x.Kind.(*Step_Net); ok {
-			return x.Net
-		}
-	}
-	return nil
-}
-
-func (x *Step) GetRma() *RmaAction {
-	if x != nil {
-		if x, ok := x.Kind.(*Step_Rma); ok {
-			return x.Rma
-		}
-	}
-	return nil
-}
-
-func (x *Step) GetTimeoutSeconds() int32 {
-	if x != nil {
-		return x.TimeoutSeconds
-	}
-	return 0
-}
-
-func (x *Step) GetMaxRetries() int32 {
-	if x != nil {
-		return x.MaxRetries
-	}
-	return 0
-}
-
-type isStep_Kind interface {
-	isStep_Kind()
-}
-
-type Step_Ssh struct {
-	Ssh *SshCommand `protobuf:"bytes,10,opt,name=ssh,proto3,oneof"`
-}
-
-type Step_Reboot struct {
-	Reboot *Reboot `protobuf:"bytes,11,opt,name=reboot,proto3,oneof"`
-}
-
-type Step_Netboot struct {
-	Netboot *SetNetboot `protobuf:"bytes,12,opt,name=netboot,proto3,oneof"`
-}
-
-type Step_Repave struct {
-	Repave *RepaveImage `protobuf:"bytes,13,opt,name=repave,proto3,oneof"`
-}
-
-type Step_Join struct {
-	Join *KubeadmJoin `protobuf:"bytes,14,opt,name=join,proto3,oneof"`
-}
-
-type Step_Verify struct {
-	Verify *VerifyInCluster `protobuf:"bytes,15,opt,name=verify,proto3,oneof"`
-}
-
-type Step_Net struct {
-	Net *NetReconfig `protobuf:"bytes,16,opt,name=net,proto3,oneof"`
-}
-
-type Step_Rma struct {
-	Rma *RmaAction `protobuf:"bytes,17,opt,name=rma,proto3,oneof"`
-}
-
-func (*Step_Ssh) isStep_Kind() {}
-
-func (*Step_Reboot) isStep_Kind() {}
-
-func (*Step_Netboot) isStep_Kind() {}
-
-func (*Step_Repave) isStep_Kind() {}
-
-func (*Step_Join) isStep_Kind() {}
-
-func (*Step_Verify) isStep_Kind() {}
-
-func (*Step_Net) isStep_Kind() {}
-
-func (*Step_Rma) isStep_Kind() {}
-
-type SshCommand struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ScriptRef     string                 `protobuf:"bytes,1,opt,name=script_ref,json=scriptRef,proto3" json:"script_ref,omitempty"`
-	Args          map[string]string      `protobuf:"bytes,2,rep,name=args,proto3" json:"args,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *SshCommand) Reset() {
-	*x = SshCommand{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[12]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *SshCommand) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SshCommand) ProtoMessage() {}
-
-func (x *SshCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[12]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SshCommand.ProtoReflect.Descriptor instead.
-func (*SshCommand) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{12}
-}
-
-func (x *SshCommand) GetScriptRef() string {
-	if x != nil {
-		return x.ScriptRef
-	}
-	return ""
-}
-
-func (x *SshCommand) GetArgs() map[string]string {
-	if x != nil {
-		return x.Args
-	}
-	return nil
-}
-
-type Reboot struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Force         bool                   `protobuf:"varint,1,opt,name=force,proto3" json:"force,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *Reboot) Reset() {
-	*x = Reboot{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[13]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *Reboot) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*Reboot) ProtoMessage() {}
-
-func (x *Reboot) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[13]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use Reboot.ProtoReflect.Descriptor instead.
-func (*Reboot) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{13}
-}
-
-func (x *Reboot) GetForce() bool {
-	if x != nil {
-		return x.Force
-	}
-	return false
-}
-
-type SetNetboot struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Profile       string                 `protobuf:"bytes,1,opt,name=profile,proto3" json:"profile,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *SetNetboot) Reset() {
-	*x = SetNetboot{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[14]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *SetNetboot) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SetNetboot) ProtoMessage() {}
-
-func (x *SetNetboot) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[14]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SetNetboot.ProtoReflect.Descriptor instead.
-func (*SetNetboot) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{14}
-}
-
-func (x *SetNetboot) GetProfile() string {
-	if x != nil {
-		return x.Profile
-	}
-	return ""
-}
-
-type RepaveImage struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ImageRef      string                 `protobuf:"bytes,1,opt,name=image_ref,json=imageRef,proto3" json:"image_ref,omitempty"`
-	CloudInitRef  string                 `protobuf:"bytes,2,opt,name=cloud_init_ref,json=cloudInitRef,proto3" json:"cloud_init_ref,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *RepaveImage) Reset() {
-	*x = RepaveImage{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[15]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *RepaveImage) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RepaveImage) ProtoMessage() {}
-
-func (x *RepaveImage) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[15]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RepaveImage.ProtoReflect.Descriptor instead.
-func (*RepaveImage) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{15}
-}
-
-func (x *RepaveImage) GetImageRef() string {
-	if x != nil {
-		return x.ImageRef
-	}
-	return ""
-}
-
-func (x *RepaveImage) GetCloudInitRef() string {
-	if x != nil {
-		return x.CloudInitRef
-	}
-	return ""
-}
-
-type RmaAction struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Reason        string                 `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *RmaAction) Reset() {
-	*x = RmaAction{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[16]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *RmaAction) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RmaAction) ProtoMessage() {}
-
-func (x *RmaAction) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[16]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RmaAction.ProtoReflect.Descriptor instead.
-func (*RmaAction) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{16}
-}
-
-func (x *RmaAction) GetReason() string {
-	if x != nil {
-		return x.Reason
-	}
-	return ""
-}
-
-type KubeadmJoin struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TargetCluster *TargetClusterRef      `protobuf:"bytes,1,opt,name=target_cluster,json=targetCluster,proto3" json:"target_cluster,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *KubeadmJoin) Reset() {
-	*x = KubeadmJoin{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[17]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *KubeadmJoin) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*KubeadmJoin) ProtoMessage() {}
-
-func (x *KubeadmJoin) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[17]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use KubeadmJoin.ProtoReflect.Descriptor instead.
-func (*KubeadmJoin) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{17}
-}
-
-func (x *KubeadmJoin) GetTargetCluster() *TargetClusterRef {
-	if x != nil {
-		return x.TargetCluster
-	}
-	return nil
-}
-
-type VerifyInCluster struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TargetCluster *TargetClusterRef      `protobuf:"bytes,1,opt,name=target_cluster,json=targetCluster,proto3" json:"target_cluster,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *VerifyInCluster) Reset() {
-	*x = VerifyInCluster{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[18]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *VerifyInCluster) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*VerifyInCluster) ProtoMessage() {}
-
-func (x *VerifyInCluster) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[18]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use VerifyInCluster.ProtoReflect.Descriptor instead.
-func (*VerifyInCluster) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{18}
-}
-
-func (x *VerifyInCluster) GetTargetCluster() *TargetClusterRef {
-	if x != nil {
-		return x.TargetCluster
-	}
-	return nil
-}
-
-type NetReconfig struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Params        map[string]string      `protobuf:"bytes,1,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *NetReconfig) Reset() {
-	*x = NetReconfig{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[19]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *NetReconfig) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*NetReconfig) ProtoMessage() {}
-
-func (x *NetReconfig) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[19]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use NetReconfig.ProtoReflect.Descriptor instead.
-func (*NetReconfig) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{19}
-}
-
-func (x *NetReconfig) GetParams() map[string]string {
-	if x != nil {
-		return x.Params
-	}
-	return nil
-}
-
 // Machine CRUD
 type RegisterMachineRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1741,7 +953,7 @@ type RegisterMachineRequest struct {
 
 func (x *RegisterMachineRequest) Reset() {
 	*x = RegisterMachineRequest{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[20]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1753,7 +965,7 @@ func (x *RegisterMachineRequest) String() string {
 func (*RegisterMachineRequest) ProtoMessage() {}
 
 func (x *RegisterMachineRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[20]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1766,7 +978,7 @@ func (x *RegisterMachineRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterMachineRequest.ProtoReflect.Descriptor instead.
 func (*RegisterMachineRequest) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{20}
+	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *RegisterMachineRequest) GetMachine() *Machine {
@@ -1785,7 +997,7 @@ type GetMachineRequest struct {
 
 func (x *GetMachineRequest) Reset() {
 	*x = GetMachineRequest{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[21]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1797,7 +1009,7 @@ func (x *GetMachineRequest) String() string {
 func (*GetMachineRequest) ProtoMessage() {}
 
 func (x *GetMachineRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[21]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1810,7 +1022,7 @@ func (x *GetMachineRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetMachineRequest.ProtoReflect.Descriptor instead.
 func (*GetMachineRequest) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{21}
+	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *GetMachineRequest) GetMachineId() string {
@@ -1831,7 +1043,7 @@ type ListMachinesRequest struct {
 
 func (x *ListMachinesRequest) Reset() {
 	*x = ListMachinesRequest{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[22]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1843,7 +1055,7 @@ func (x *ListMachinesRequest) String() string {
 func (*ListMachinesRequest) ProtoMessage() {}
 
 func (x *ListMachinesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[22]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1856,7 +1068,7 @@ func (x *ListMachinesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListMachinesRequest.ProtoReflect.Descriptor instead.
 func (*ListMachinesRequest) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{22}
+	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ListMachinesRequest) GetPageSize() int32 {
@@ -1890,7 +1102,7 @@ type ListMachinesResponse struct {
 
 func (x *ListMachinesResponse) Reset() {
 	*x = ListMachinesResponse{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[23]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1902,7 +1114,7 @@ func (x *ListMachinesResponse) String() string {
 func (*ListMachinesResponse) ProtoMessage() {}
 
 func (x *ListMachinesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[23]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1915,7 +1127,7 @@ func (x *ListMachinesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListMachinesResponse.ProtoReflect.Descriptor instead.
 func (*ListMachinesResponse) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{23}
+	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ListMachinesResponse) GetMachines() []*Machine {
@@ -1941,7 +1153,7 @@ type UpdateMachineRequest struct {
 
 func (x *UpdateMachineRequest) Reset() {
 	*x = UpdateMachineRequest{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[24]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1953,7 +1165,7 @@ func (x *UpdateMachineRequest) String() string {
 func (*UpdateMachineRequest) ProtoMessage() {}
 
 func (x *UpdateMachineRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[24]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1966,7 +1178,7 @@ func (x *UpdateMachineRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateMachineRequest.ProtoReflect.Descriptor instead.
 func (*UpdateMachineRequest) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{24}
+	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *UpdateMachineRequest) GetMachine() *Machine {
@@ -1988,7 +1200,7 @@ type RebootMachineRequest struct {
 
 func (x *RebootMachineRequest) Reset() {
 	*x = RebootMachineRequest{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[25]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2000,7 +1212,7 @@ func (x *RebootMachineRequest) String() string {
 func (*RebootMachineRequest) ProtoMessage() {}
 
 func (x *RebootMachineRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[25]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2013,7 +1225,7 @@ func (x *RebootMachineRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RebootMachineRequest.ProtoReflect.Descriptor instead.
 func (*RebootMachineRequest) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{25}
+	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *RebootMachineRequest) GetMachineId() string {
@@ -2048,7 +1260,7 @@ type ReimageMachineRequest struct {
 
 func (x *ReimageMachineRequest) Reset() {
 	*x = ReimageMachineRequest{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[26]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2060,7 +1272,7 @@ func (x *ReimageMachineRequest) String() string {
 func (*ReimageMachineRequest) ProtoMessage() {}
 
 func (x *ReimageMachineRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[26]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2073,7 +1285,7 @@ func (x *ReimageMachineRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReimageMachineRequest.ProtoReflect.Descriptor instead.
 func (*ReimageMachineRequest) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{26}
+	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ReimageMachineRequest) GetMachineId() string {
@@ -2107,7 +1319,7 @@ type EnterMaintenanceRequest struct {
 
 func (x *EnterMaintenanceRequest) Reset() {
 	*x = EnterMaintenanceRequest{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[27]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2119,7 +1331,7 @@ func (x *EnterMaintenanceRequest) String() string {
 func (*EnterMaintenanceRequest) ProtoMessage() {}
 
 func (x *EnterMaintenanceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[27]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2132,7 +1344,7 @@ func (x *EnterMaintenanceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnterMaintenanceRequest.ProtoReflect.Descriptor instead.
 func (*EnterMaintenanceRequest) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{27}
+	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *EnterMaintenanceRequest) GetMachineId() string {
@@ -2159,7 +1371,7 @@ type ExitMaintenanceRequest struct {
 
 func (x *ExitMaintenanceRequest) Reset() {
 	*x = ExitMaintenanceRequest{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[28]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2171,7 +1383,7 @@ func (x *ExitMaintenanceRequest) String() string {
 func (*ExitMaintenanceRequest) ProtoMessage() {}
 
 func (x *ExitMaintenanceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[28]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2184,7 +1396,7 @@ func (x *ExitMaintenanceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExitMaintenanceRequest.ProtoReflect.Descriptor instead.
 func (*ExitMaintenanceRequest) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{28}
+	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ExitMaintenanceRequest) GetMachineId() string {
@@ -2210,7 +1422,7 @@ type CancelOperationRequest struct {
 
 func (x *CancelOperationRequest) Reset() {
 	*x = CancelOperationRequest{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[29]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2222,7 +1434,7 @@ func (x *CancelOperationRequest) String() string {
 func (*CancelOperationRequest) ProtoMessage() {}
 
 func (x *CancelOperationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[29]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2235,7 +1447,7 @@ func (x *CancelOperationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelOperationRequest.ProtoReflect.Descriptor instead.
 func (*CancelOperationRequest) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{29}
+	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *CancelOperationRequest) GetOperationId() string {
@@ -2255,7 +1467,7 @@ type GetOperationRequest struct {
 
 func (x *GetOperationRequest) Reset() {
 	*x = GetOperationRequest{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[30]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2267,7 +1479,7 @@ func (x *GetOperationRequest) String() string {
 func (*GetOperationRequest) ProtoMessage() {}
 
 func (x *GetOperationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[30]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2280,7 +1492,7 @@ func (x *GetOperationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetOperationRequest.ProtoReflect.Descriptor instead.
 func (*GetOperationRequest) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{30}
+	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *GetOperationRequest) GetOperationId() string {
@@ -2301,7 +1513,7 @@ type ListOperationsRequest struct {
 
 func (x *ListOperationsRequest) Reset() {
 	*x = ListOperationsRequest{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[31]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2313,7 +1525,7 @@ func (x *ListOperationsRequest) String() string {
 func (*ListOperationsRequest) ProtoMessage() {}
 
 func (x *ListOperationsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[31]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2326,7 +1538,7 @@ func (x *ListOperationsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListOperationsRequest.ProtoReflect.Descriptor instead.
 func (*ListOperationsRequest) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{31}
+	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ListOperationsRequest) GetPageSize() int32 {
@@ -2360,7 +1572,7 @@ type ListOperationsResponse struct {
 
 func (x *ListOperationsResponse) Reset() {
 	*x = ListOperationsResponse{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[32]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2372,7 +1584,7 @@ func (x *ListOperationsResponse) String() string {
 func (*ListOperationsResponse) ProtoMessage() {}
 
 func (x *ListOperationsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[32]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2385,7 +1597,7 @@ func (x *ListOperationsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListOperationsResponse.ProtoReflect.Descriptor instead.
 func (*ListOperationsResponse) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{32}
+	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ListOperationsResponse) GetOperations() []*Operation {
@@ -2411,7 +1623,7 @@ type WatchOperationsRequest struct {
 
 func (x *WatchOperationsRequest) Reset() {
 	*x = WatchOperationsRequest{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[33]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2423,7 +1635,7 @@ func (x *WatchOperationsRequest) String() string {
 func (*WatchOperationsRequest) ProtoMessage() {}
 
 func (x *WatchOperationsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[33]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2436,7 +1648,7 @@ func (x *WatchOperationsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchOperationsRequest.ProtoReflect.Descriptor instead.
 func (*WatchOperationsRequest) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{33}
+	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *WatchOperationsRequest) GetFilter() string {
@@ -2455,7 +1667,7 @@ type StreamOperationLogsRequest struct {
 
 func (x *StreamOperationLogsRequest) Reset() {
 	*x = StreamOperationLogsRequest{}
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[34]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2467,7 +1679,7 @@ func (x *StreamOperationLogsRequest) String() string {
 func (*StreamOperationLogsRequest) ProtoMessage() {}
 
 func (x *StreamOperationLogsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_baremetal_v1_baremetal_proto_msgTypes[34]
+	mi := &file_baremetal_v1_baremetal_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2480,7 +1692,7 @@ func (x *StreamOperationLogsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamOperationLogsRequest.ProtoReflect.Descriptor instead.
 func (*StreamOperationLogsRequest) Descriptor() ([]byte, []int) {
-	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{34}
+	return file_baremetal_v1_baremetal_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *StreamOperationLogsRequest) GetOperationId() string {
@@ -2544,7 +1756,7 @@ const file_baremetal_v1_baremetal_proto_rawDesc = "" +
 	"\x06status\x18\x02 \x01(\bR\x06status\x12\x16\n" +
 	"\x06reason\x18\x03 \x01(\tR\x06reason\x12\x18\n" +
 	"\amessage\x18\x04 \x01(\tR\amessage\x12L\n" +
-	"\x14last_transition_time\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\x12lastTransitionTime\"\x80\a\n" +
+	"\x14last_transition_time\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\x12lastTransitionTime\"\xb7\x06\n" +
 	"\tOperation\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\tR\voperationId\x12\x1d\n" +
 	"\n" +
@@ -2554,16 +1766,14 @@ const file_baremetal_v1_baremetal_proto_rawDesc = "" +
 	"\x04type\x18\x04 \x01(\x0e2%.baremetal.v1.Operation.OperationTypeR\x04type\x123\n" +
 	"\x05phase\x18\x05 \x01(\x0e2\x1d.baremetal.v1.Operation.PhaseR\x05phase\x12#\n" +
 	"\rcurrent_stage\x18\x06 \x01(\tR\fcurrentStage\x12;\n" +
-	"\x06params\x18\b \x03(\v2#.baremetal.v1.Operation.ParamsEntryR\x06params\x12\x17\n" +
-	"\aplan_id\x18\a \x01(\tR\x06planId\x129\n" +
+	"\x06params\x18\b \x03(\v2#.baremetal.v1.Operation.ParamsEntryR\x06params\x129\n" +
 	"\n" +
 	"created_at\x18\n" +
 	" \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
 	"started_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x12;\n" +
 	"\vfinished_at\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"finishedAt\x12.\n" +
-	"\x05steps\x18\x14 \x03(\v2\x18.baremetal.v1.StepStatusR\x05steps\x12/\n" +
+	"finishedAt\x12/\n" +
 	"\x05error\x18\x15 \x01(\v2\x19.baremetal.v1.ErrorStatusR\x05error\x1a9\n" +
 	"\vParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
@@ -2582,25 +1792,7 @@ const file_baremetal_v1_baremetal_proto_rawDesc = "" +
 	"\tSUCCEEDED\x10\x03\x12\n" +
 	"\n" +
 	"\x06FAILED\x10\x04\x12\f\n" +
-	"\bCANCELED\x10\x05\"\xde\x02\n" +
-	"\n" +
-	"StepStatus\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x124\n" +
-	"\x05state\x18\x02 \x01(\x0e2\x1e.baremetal.v1.StepStatus.StateR\x05state\x12\x1f\n" +
-	"\vretry_count\x18\x03 \x01(\x05R\n" +
-	"retryCount\x129\n" +
-	"\n" +
-	"started_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x12;\n" +
-	"\vfinished_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"finishedAt\x12\x18\n" +
-	"\amessage\x18\x06 \x01(\tR\amessage\"S\n" +
-	"\x05State\x12\x15\n" +
-	"\x11STATE_UNSPECIFIED\x10\x00\x12\v\n" +
-	"\aWAITING\x10\x01\x12\v\n" +
-	"\aRUNNING\x10\x02\x12\r\n" +
-	"\tSUCCEEDED\x10\x03\x12\n" +
-	"\n" +
-	"\x06FAILED\x10\x04\"\xd7\x01\n" +
+	"\bCANCELED\x10\x05\"\xd7\x01\n" +
 	"\vErrorStatus\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12\x1c\n" +
@@ -2617,53 +1809,7 @@ const file_baremetal_v1_baremetal_proto_rawDesc = "" +
 	"\x02ts\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x02ts\x12!\n" +
 	"\foperation_id\x18\x02 \x01(\tR\voperationId\x12\x16\n" +
 	"\x06stream\x18\x03 \x01(\tR\x06stream\x12\x12\n" +
-	"\x04data\x18\x04 \x01(\fR\x04data\"l\n" +
-	"\x04Plan\x12\x17\n" +
-	"\aplan_id\x18\x01 \x01(\tR\x06planId\x12!\n" +
-	"\fdisplay_name\x18\x02 \x01(\tR\vdisplayName\x12(\n" +
-	"\x05steps\x18\x03 \x03(\v2\x12.baremetal.v1.StepR\x05steps\"\xfb\x03\n" +
-	"\x04Step\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x12,\n" +
-	"\x03ssh\x18\n" +
-	" \x01(\v2\x18.baremetal.v1.SshCommandH\x00R\x03ssh\x12.\n" +
-	"\x06reboot\x18\v \x01(\v2\x14.baremetal.v1.RebootH\x00R\x06reboot\x124\n" +
-	"\anetboot\x18\f \x01(\v2\x18.baremetal.v1.SetNetbootH\x00R\anetboot\x123\n" +
-	"\x06repave\x18\r \x01(\v2\x19.baremetal.v1.RepaveImageH\x00R\x06repave\x12/\n" +
-	"\x04join\x18\x0e \x01(\v2\x19.baremetal.v1.KubeadmJoinH\x00R\x04join\x127\n" +
-	"\x06verify\x18\x0f \x01(\v2\x1d.baremetal.v1.VerifyInClusterH\x00R\x06verify\x12-\n" +
-	"\x03net\x18\x10 \x01(\v2\x19.baremetal.v1.NetReconfigH\x00R\x03net\x12+\n" +
-	"\x03rma\x18\x11 \x01(\v2\x17.baremetal.v1.RmaActionH\x00R\x03rma\x12'\n" +
-	"\x0ftimeout_seconds\x182 \x01(\x05R\x0etimeoutSeconds\x12\x1f\n" +
-	"\vmax_retries\x183 \x01(\x05R\n" +
-	"maxRetriesB\x06\n" +
-	"\x04kind\"\x9c\x01\n" +
-	"\n" +
-	"SshCommand\x12\x1d\n" +
-	"\n" +
-	"script_ref\x18\x01 \x01(\tR\tscriptRef\x126\n" +
-	"\x04args\x18\x02 \x03(\v2\".baremetal.v1.SshCommand.ArgsEntryR\x04args\x1a7\n" +
-	"\tArgsEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x1e\n" +
-	"\x06Reboot\x12\x14\n" +
-	"\x05force\x18\x01 \x01(\bR\x05force\"&\n" +
-	"\n" +
-	"SetNetboot\x12\x18\n" +
-	"\aprofile\x18\x01 \x01(\tR\aprofile\"P\n" +
-	"\vRepaveImage\x12\x1b\n" +
-	"\timage_ref\x18\x01 \x01(\tR\bimageRef\x12$\n" +
-	"\x0ecloud_init_ref\x18\x02 \x01(\tR\fcloudInitRef\"#\n" +
-	"\tRmaAction\x12\x16\n" +
-	"\x06reason\x18\x01 \x01(\tR\x06reason\"T\n" +
-	"\vKubeadmJoin\x12E\n" +
-	"\x0etarget_cluster\x18\x01 \x01(\v2\x1e.baremetal.v1.TargetClusterRefR\rtargetCluster\"X\n" +
-	"\x0fVerifyInCluster\x12E\n" +
-	"\x0etarget_cluster\x18\x01 \x01(\v2\x1e.baremetal.v1.TargetClusterRefR\rtargetCluster\"\x87\x01\n" +
-	"\vNetReconfig\x12=\n" +
-	"\x06params\x18\x01 \x03(\v2%.baremetal.v1.NetReconfig.ParamsEntryR\x06params\x1a9\n" +
-	"\vParamsEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"I\n" +
+	"\x04data\x18\x04 \x01(\fR\x04data\"I\n" +
 	"\x16RegisterMachineRequest\x12/\n" +
 	"\amachine\x18\x01 \x01(\v2\x15.baremetal.v1.MachineR\amachine\"2\n" +
 	"\x11GetMachineRequest\x12\x1d\n" +
@@ -2749,129 +1895,98 @@ func file_baremetal_v1_baremetal_proto_rawDescGZIP() []byte {
 	return file_baremetal_v1_baremetal_proto_rawDescData
 }
 
-var file_baremetal_v1_baremetal_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_baremetal_v1_baremetal_proto_msgTypes = make([]protoimpl.MessageInfo, 40)
+var file_baremetal_v1_baremetal_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_baremetal_v1_baremetal_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
 var file_baremetal_v1_baremetal_proto_goTypes = []any{
 	(MachineStatus_Phase)(0),           // 0: baremetal.v1.MachineStatus.Phase
 	(MachineStatus_EffectiveState)(0),  // 1: baremetal.v1.MachineStatus.EffectiveState
 	(Operation_OperationType)(0),       // 2: baremetal.v1.Operation.OperationType
 	(Operation_Phase)(0),               // 3: baremetal.v1.Operation.Phase
-	(StepStatus_State)(0),              // 4: baremetal.v1.StepStatus.State
-	(*Machine)(nil),                    // 5: baremetal.v1.Machine
-	(*MachineSpec)(nil),                // 6: baremetal.v1.MachineSpec
-	(*TargetClusterRef)(nil),           // 7: baremetal.v1.TargetClusterRef
-	(*MachineStatus)(nil),              // 8: baremetal.v1.MachineStatus
-	(*Condition)(nil),                  // 9: baremetal.v1.Condition
-	(*Operation)(nil),                  // 10: baremetal.v1.Operation
-	(*StepStatus)(nil),                 // 11: baremetal.v1.StepStatus
-	(*ErrorStatus)(nil),                // 12: baremetal.v1.ErrorStatus
-	(*OperationEvent)(nil),             // 13: baremetal.v1.OperationEvent
-	(*LogChunk)(nil),                   // 14: baremetal.v1.LogChunk
-	(*Plan)(nil),                       // 15: baremetal.v1.Plan
-	(*Step)(nil),                       // 16: baremetal.v1.Step
-	(*SshCommand)(nil),                 // 17: baremetal.v1.SshCommand
-	(*Reboot)(nil),                     // 18: baremetal.v1.Reboot
-	(*SetNetboot)(nil),                 // 19: baremetal.v1.SetNetboot
-	(*RepaveImage)(nil),                // 20: baremetal.v1.RepaveImage
-	(*RmaAction)(nil),                  // 21: baremetal.v1.RmaAction
-	(*KubeadmJoin)(nil),                // 22: baremetal.v1.KubeadmJoin
-	(*VerifyInCluster)(nil),            // 23: baremetal.v1.VerifyInCluster
-	(*NetReconfig)(nil),                // 24: baremetal.v1.NetReconfig
-	(*RegisterMachineRequest)(nil),     // 25: baremetal.v1.RegisterMachineRequest
-	(*GetMachineRequest)(nil),          // 26: baremetal.v1.GetMachineRequest
-	(*ListMachinesRequest)(nil),        // 27: baremetal.v1.ListMachinesRequest
-	(*ListMachinesResponse)(nil),       // 28: baremetal.v1.ListMachinesResponse
-	(*UpdateMachineRequest)(nil),       // 29: baremetal.v1.UpdateMachineRequest
-	(*RebootMachineRequest)(nil),       // 30: baremetal.v1.RebootMachineRequest
-	(*ReimageMachineRequest)(nil),      // 31: baremetal.v1.ReimageMachineRequest
-	(*EnterMaintenanceRequest)(nil),    // 32: baremetal.v1.EnterMaintenanceRequest
-	(*ExitMaintenanceRequest)(nil),     // 33: baremetal.v1.ExitMaintenanceRequest
-	(*CancelOperationRequest)(nil),     // 34: baremetal.v1.CancelOperationRequest
-	(*GetOperationRequest)(nil),        // 35: baremetal.v1.GetOperationRequest
-	(*ListOperationsRequest)(nil),      // 36: baremetal.v1.ListOperationsRequest
-	(*ListOperationsResponse)(nil),     // 37: baremetal.v1.ListOperationsResponse
-	(*WatchOperationsRequest)(nil),     // 38: baremetal.v1.WatchOperationsRequest
-	(*StreamOperationLogsRequest)(nil), // 39: baremetal.v1.StreamOperationLogsRequest
-	nil,                                // 40: baremetal.v1.Machine.LabelsEntry
-	nil,                                // 41: baremetal.v1.Operation.ParamsEntry
-	nil,                                // 42: baremetal.v1.ErrorStatus.DetailsEntry
-	nil,                                // 43: baremetal.v1.SshCommand.ArgsEntry
-	nil,                                // 44: baremetal.v1.NetReconfig.ParamsEntry
-	(*timestamppb.Timestamp)(nil),      // 45: google.protobuf.Timestamp
+	(*Machine)(nil),                    // 4: baremetal.v1.Machine
+	(*MachineSpec)(nil),                // 5: baremetal.v1.MachineSpec
+	(*TargetClusterRef)(nil),           // 6: baremetal.v1.TargetClusterRef
+	(*MachineStatus)(nil),              // 7: baremetal.v1.MachineStatus
+	(*Condition)(nil),                  // 8: baremetal.v1.Condition
+	(*Operation)(nil),                  // 9: baremetal.v1.Operation
+	(*ErrorStatus)(nil),                // 10: baremetal.v1.ErrorStatus
+	(*OperationEvent)(nil),             // 11: baremetal.v1.OperationEvent
+	(*LogChunk)(nil),                   // 12: baremetal.v1.LogChunk
+	(*RegisterMachineRequest)(nil),     // 13: baremetal.v1.RegisterMachineRequest
+	(*GetMachineRequest)(nil),          // 14: baremetal.v1.GetMachineRequest
+	(*ListMachinesRequest)(nil),        // 15: baremetal.v1.ListMachinesRequest
+	(*ListMachinesResponse)(nil),       // 16: baremetal.v1.ListMachinesResponse
+	(*UpdateMachineRequest)(nil),       // 17: baremetal.v1.UpdateMachineRequest
+	(*RebootMachineRequest)(nil),       // 18: baremetal.v1.RebootMachineRequest
+	(*ReimageMachineRequest)(nil),      // 19: baremetal.v1.ReimageMachineRequest
+	(*EnterMaintenanceRequest)(nil),    // 20: baremetal.v1.EnterMaintenanceRequest
+	(*ExitMaintenanceRequest)(nil),     // 21: baremetal.v1.ExitMaintenanceRequest
+	(*CancelOperationRequest)(nil),     // 22: baremetal.v1.CancelOperationRequest
+	(*GetOperationRequest)(nil),        // 23: baremetal.v1.GetOperationRequest
+	(*ListOperationsRequest)(nil),      // 24: baremetal.v1.ListOperationsRequest
+	(*ListOperationsResponse)(nil),     // 25: baremetal.v1.ListOperationsResponse
+	(*WatchOperationsRequest)(nil),     // 26: baremetal.v1.WatchOperationsRequest
+	(*StreamOperationLogsRequest)(nil), // 27: baremetal.v1.StreamOperationLogsRequest
+	nil,                                // 28: baremetal.v1.Machine.LabelsEntry
+	nil,                                // 29: baremetal.v1.Operation.ParamsEntry
+	nil,                                // 30: baremetal.v1.ErrorStatus.DetailsEntry
+	(*timestamppb.Timestamp)(nil),      // 31: google.protobuf.Timestamp
 }
 var file_baremetal_v1_baremetal_proto_depIdxs = []int32{
-	6,  // 0: baremetal.v1.Machine.spec:type_name -> baremetal.v1.MachineSpec
-	8,  // 1: baremetal.v1.Machine.status:type_name -> baremetal.v1.MachineStatus
-	40, // 2: baremetal.v1.Machine.labels:type_name -> baremetal.v1.Machine.LabelsEntry
-	7,  // 3: baremetal.v1.MachineSpec.target_cluster:type_name -> baremetal.v1.TargetClusterRef
+	5,  // 0: baremetal.v1.Machine.spec:type_name -> baremetal.v1.MachineSpec
+	7,  // 1: baremetal.v1.Machine.status:type_name -> baremetal.v1.MachineStatus
+	28, // 2: baremetal.v1.Machine.labels:type_name -> baremetal.v1.Machine.LabelsEntry
+	6,  // 3: baremetal.v1.MachineSpec.target_cluster:type_name -> baremetal.v1.TargetClusterRef
 	0,  // 4: baremetal.v1.MachineStatus.phase:type_name -> baremetal.v1.MachineStatus.Phase
 	1,  // 5: baremetal.v1.MachineStatus.effective_state:type_name -> baremetal.v1.MachineStatus.EffectiveState
-	9,  // 6: baremetal.v1.MachineStatus.conditions:type_name -> baremetal.v1.Condition
-	45, // 7: baremetal.v1.MachineStatus.last_seen:type_name -> google.protobuf.Timestamp
-	45, // 8: baremetal.v1.Condition.last_transition_time:type_name -> google.protobuf.Timestamp
+	8,  // 6: baremetal.v1.MachineStatus.conditions:type_name -> baremetal.v1.Condition
+	31, // 7: baremetal.v1.MachineStatus.last_seen:type_name -> google.protobuf.Timestamp
+	31, // 8: baremetal.v1.Condition.last_transition_time:type_name -> google.protobuf.Timestamp
 	2,  // 9: baremetal.v1.Operation.type:type_name -> baremetal.v1.Operation.OperationType
 	3,  // 10: baremetal.v1.Operation.phase:type_name -> baremetal.v1.Operation.Phase
-	41, // 11: baremetal.v1.Operation.params:type_name -> baremetal.v1.Operation.ParamsEntry
-	45, // 12: baremetal.v1.Operation.created_at:type_name -> google.protobuf.Timestamp
-	45, // 13: baremetal.v1.Operation.started_at:type_name -> google.protobuf.Timestamp
-	45, // 14: baremetal.v1.Operation.finished_at:type_name -> google.protobuf.Timestamp
-	11, // 15: baremetal.v1.Operation.steps:type_name -> baremetal.v1.StepStatus
-	12, // 16: baremetal.v1.Operation.error:type_name -> baremetal.v1.ErrorStatus
-	4,  // 17: baremetal.v1.StepStatus.state:type_name -> baremetal.v1.StepStatus.State
-	45, // 18: baremetal.v1.StepStatus.started_at:type_name -> google.protobuf.Timestamp
-	45, // 19: baremetal.v1.StepStatus.finished_at:type_name -> google.protobuf.Timestamp
-	42, // 20: baremetal.v1.ErrorStatus.details:type_name -> baremetal.v1.ErrorStatus.DetailsEntry
-	45, // 21: baremetal.v1.OperationEvent.ts:type_name -> google.protobuf.Timestamp
-	10, // 22: baremetal.v1.OperationEvent.snapshot:type_name -> baremetal.v1.Operation
-	45, // 23: baremetal.v1.LogChunk.ts:type_name -> google.protobuf.Timestamp
-	16, // 24: baremetal.v1.Plan.steps:type_name -> baremetal.v1.Step
-	17, // 25: baremetal.v1.Step.ssh:type_name -> baremetal.v1.SshCommand
-	18, // 26: baremetal.v1.Step.reboot:type_name -> baremetal.v1.Reboot
-	19, // 27: baremetal.v1.Step.netboot:type_name -> baremetal.v1.SetNetboot
-	20, // 28: baremetal.v1.Step.repave:type_name -> baremetal.v1.RepaveImage
-	22, // 29: baremetal.v1.Step.join:type_name -> baremetal.v1.KubeadmJoin
-	23, // 30: baremetal.v1.Step.verify:type_name -> baremetal.v1.VerifyInCluster
-	24, // 31: baremetal.v1.Step.net:type_name -> baremetal.v1.NetReconfig
-	21, // 32: baremetal.v1.Step.rma:type_name -> baremetal.v1.RmaAction
-	43, // 33: baremetal.v1.SshCommand.args:type_name -> baremetal.v1.SshCommand.ArgsEntry
-	7,  // 34: baremetal.v1.KubeadmJoin.target_cluster:type_name -> baremetal.v1.TargetClusterRef
-	7,  // 35: baremetal.v1.VerifyInCluster.target_cluster:type_name -> baremetal.v1.TargetClusterRef
-	44, // 36: baremetal.v1.NetReconfig.params:type_name -> baremetal.v1.NetReconfig.ParamsEntry
-	5,  // 37: baremetal.v1.RegisterMachineRequest.machine:type_name -> baremetal.v1.Machine
-	5,  // 38: baremetal.v1.ListMachinesResponse.machines:type_name -> baremetal.v1.Machine
-	5,  // 39: baremetal.v1.UpdateMachineRequest.machine:type_name -> baremetal.v1.Machine
-	10, // 40: baremetal.v1.ListOperationsResponse.operations:type_name -> baremetal.v1.Operation
-	25, // 41: baremetal.v1.MachineService.RegisterMachine:input_type -> baremetal.v1.RegisterMachineRequest
-	26, // 42: baremetal.v1.MachineService.GetMachine:input_type -> baremetal.v1.GetMachineRequest
-	27, // 43: baremetal.v1.MachineService.ListMachines:input_type -> baremetal.v1.ListMachinesRequest
-	29, // 44: baremetal.v1.MachineService.UpdateMachine:input_type -> baremetal.v1.UpdateMachineRequest
-	30, // 45: baremetal.v1.MachineService.RebootMachine:input_type -> baremetal.v1.RebootMachineRequest
-	31, // 46: baremetal.v1.MachineService.ReimageMachine:input_type -> baremetal.v1.ReimageMachineRequest
-	32, // 47: baremetal.v1.MachineService.EnterMaintenance:input_type -> baremetal.v1.EnterMaintenanceRequest
-	33, // 48: baremetal.v1.MachineService.ExitMaintenance:input_type -> baremetal.v1.ExitMaintenanceRequest
-	34, // 49: baremetal.v1.MachineService.CancelOperation:input_type -> baremetal.v1.CancelOperationRequest
-	35, // 50: baremetal.v1.OperationService.GetOperation:input_type -> baremetal.v1.GetOperationRequest
-	36, // 51: baremetal.v1.OperationService.ListOperations:input_type -> baremetal.v1.ListOperationsRequest
-	38, // 52: baremetal.v1.OperationService.WatchOperations:input_type -> baremetal.v1.WatchOperationsRequest
-	39, // 53: baremetal.v1.OperationService.StreamOperationLogs:input_type -> baremetal.v1.StreamOperationLogsRequest
-	5,  // 54: baremetal.v1.MachineService.RegisterMachine:output_type -> baremetal.v1.Machine
-	5,  // 55: baremetal.v1.MachineService.GetMachine:output_type -> baremetal.v1.Machine
-	28, // 56: baremetal.v1.MachineService.ListMachines:output_type -> baremetal.v1.ListMachinesResponse
-	5,  // 57: baremetal.v1.MachineService.UpdateMachine:output_type -> baremetal.v1.Machine
-	10, // 58: baremetal.v1.MachineService.RebootMachine:output_type -> baremetal.v1.Operation
-	10, // 59: baremetal.v1.MachineService.ReimageMachine:output_type -> baremetal.v1.Operation
-	10, // 60: baremetal.v1.MachineService.EnterMaintenance:output_type -> baremetal.v1.Operation
-	10, // 61: baremetal.v1.MachineService.ExitMaintenance:output_type -> baremetal.v1.Operation
-	10, // 62: baremetal.v1.MachineService.CancelOperation:output_type -> baremetal.v1.Operation
-	10, // 63: baremetal.v1.OperationService.GetOperation:output_type -> baremetal.v1.Operation
-	37, // 64: baremetal.v1.OperationService.ListOperations:output_type -> baremetal.v1.ListOperationsResponse
-	13, // 65: baremetal.v1.OperationService.WatchOperations:output_type -> baremetal.v1.OperationEvent
-	14, // 66: baremetal.v1.OperationService.StreamOperationLogs:output_type -> baremetal.v1.LogChunk
-	54, // [54:67] is the sub-list for method output_type
-	41, // [41:54] is the sub-list for method input_type
-	41, // [41:41] is the sub-list for extension type_name
-	41, // [41:41] is the sub-list for extension extendee
-	0,  // [0:41] is the sub-list for field type_name
+	29, // 11: baremetal.v1.Operation.params:type_name -> baremetal.v1.Operation.ParamsEntry
+	31, // 12: baremetal.v1.Operation.created_at:type_name -> google.protobuf.Timestamp
+	31, // 13: baremetal.v1.Operation.started_at:type_name -> google.protobuf.Timestamp
+	31, // 14: baremetal.v1.Operation.finished_at:type_name -> google.protobuf.Timestamp
+	10, // 15: baremetal.v1.Operation.error:type_name -> baremetal.v1.ErrorStatus
+	30, // 16: baremetal.v1.ErrorStatus.details:type_name -> baremetal.v1.ErrorStatus.DetailsEntry
+	31, // 17: baremetal.v1.OperationEvent.ts:type_name -> google.protobuf.Timestamp
+	9,  // 18: baremetal.v1.OperationEvent.snapshot:type_name -> baremetal.v1.Operation
+	31, // 19: baremetal.v1.LogChunk.ts:type_name -> google.protobuf.Timestamp
+	4,  // 20: baremetal.v1.RegisterMachineRequest.machine:type_name -> baremetal.v1.Machine
+	4,  // 21: baremetal.v1.ListMachinesResponse.machines:type_name -> baremetal.v1.Machine
+	4,  // 22: baremetal.v1.UpdateMachineRequest.machine:type_name -> baremetal.v1.Machine
+	9,  // 23: baremetal.v1.ListOperationsResponse.operations:type_name -> baremetal.v1.Operation
+	13, // 24: baremetal.v1.MachineService.RegisterMachine:input_type -> baremetal.v1.RegisterMachineRequest
+	14, // 25: baremetal.v1.MachineService.GetMachine:input_type -> baremetal.v1.GetMachineRequest
+	15, // 26: baremetal.v1.MachineService.ListMachines:input_type -> baremetal.v1.ListMachinesRequest
+	17, // 27: baremetal.v1.MachineService.UpdateMachine:input_type -> baremetal.v1.UpdateMachineRequest
+	18, // 28: baremetal.v1.MachineService.RebootMachine:input_type -> baremetal.v1.RebootMachineRequest
+	19, // 29: baremetal.v1.MachineService.ReimageMachine:input_type -> baremetal.v1.ReimageMachineRequest
+	20, // 30: baremetal.v1.MachineService.EnterMaintenance:input_type -> baremetal.v1.EnterMaintenanceRequest
+	21, // 31: baremetal.v1.MachineService.ExitMaintenance:input_type -> baremetal.v1.ExitMaintenanceRequest
+	22, // 32: baremetal.v1.MachineService.CancelOperation:input_type -> baremetal.v1.CancelOperationRequest
+	23, // 33: baremetal.v1.OperationService.GetOperation:input_type -> baremetal.v1.GetOperationRequest
+	24, // 34: baremetal.v1.OperationService.ListOperations:input_type -> baremetal.v1.ListOperationsRequest
+	26, // 35: baremetal.v1.OperationService.WatchOperations:input_type -> baremetal.v1.WatchOperationsRequest
+	27, // 36: baremetal.v1.OperationService.StreamOperationLogs:input_type -> baremetal.v1.StreamOperationLogsRequest
+	4,  // 37: baremetal.v1.MachineService.RegisterMachine:output_type -> baremetal.v1.Machine
+	4,  // 38: baremetal.v1.MachineService.GetMachine:output_type -> baremetal.v1.Machine
+	16, // 39: baremetal.v1.MachineService.ListMachines:output_type -> baremetal.v1.ListMachinesResponse
+	4,  // 40: baremetal.v1.MachineService.UpdateMachine:output_type -> baremetal.v1.Machine
+	9,  // 41: baremetal.v1.MachineService.RebootMachine:output_type -> baremetal.v1.Operation
+	9,  // 42: baremetal.v1.MachineService.ReimageMachine:output_type -> baremetal.v1.Operation
+	9,  // 43: baremetal.v1.MachineService.EnterMaintenance:output_type -> baremetal.v1.Operation
+	9,  // 44: baremetal.v1.MachineService.ExitMaintenance:output_type -> baremetal.v1.Operation
+	9,  // 45: baremetal.v1.MachineService.CancelOperation:output_type -> baremetal.v1.Operation
+	9,  // 46: baremetal.v1.OperationService.GetOperation:output_type -> baremetal.v1.Operation
+	25, // 47: baremetal.v1.OperationService.ListOperations:output_type -> baremetal.v1.ListOperationsResponse
+	11, // 48: baremetal.v1.OperationService.WatchOperations:output_type -> baremetal.v1.OperationEvent
+	12, // 49: baremetal.v1.OperationService.StreamOperationLogs:output_type -> baremetal.v1.LogChunk
+	37, // [37:50] is the sub-list for method output_type
+	24, // [24:37] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_baremetal_v1_baremetal_proto_init() }
@@ -2879,23 +1994,13 @@ func file_baremetal_v1_baremetal_proto_init() {
 	if File_baremetal_v1_baremetal_proto != nil {
 		return
 	}
-	file_baremetal_v1_baremetal_proto_msgTypes[11].OneofWrappers = []any{
-		(*Step_Ssh)(nil),
-		(*Step_Reboot)(nil),
-		(*Step_Netboot)(nil),
-		(*Step_Repave)(nil),
-		(*Step_Join)(nil),
-		(*Step_Verify)(nil),
-		(*Step_Net)(nil),
-		(*Step_Rma)(nil),
-	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_baremetal_v1_baremetal_proto_rawDesc), len(file_baremetal_v1_baremetal_proto_rawDesc)),
-			NumEnums:      5,
-			NumMessages:   40,
+			NumEnums:      4,
+			NumMessages:   27,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

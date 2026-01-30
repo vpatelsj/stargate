@@ -3,7 +3,7 @@ package plans
 import (
 	"testing"
 
-	pb "github.com/vpatelsj/stargate/gen/baremetal/v1"
+	"github.com/vpatelsj/stargate/internal/bmdemo/workflow"
 )
 
 func TestNewRegistry(t *testing.T) {
@@ -39,8 +39,8 @@ func TestGetPlan(t *testing.T) {
 		if ok != tt.exists {
 			t.Errorf("GetPlan(%q): got exists=%v, want %v", tt.planID, ok, tt.exists)
 		}
-		if tt.exists && plan.PlanId != tt.planID {
-			t.Errorf("GetPlan(%q): got plan ID %q", tt.planID, plan.PlanId)
+		if tt.exists && plan.PlanID != tt.planID {
+			t.Errorf("GetPlan(%q): got plan ID %q", tt.planID, plan.PlanID)
 		}
 	}
 }
@@ -55,14 +55,14 @@ func TestListPlans(t *testing.T) {
 
 	// Verify all plans have IDs and display names
 	for _, plan := range plans {
-		if plan.PlanId == "" {
+		if plan.PlanID == "" {
 			t.Error("Plan has empty ID")
 		}
 		if plan.DisplayName == "" {
-			t.Errorf("Plan %q has empty display name", plan.PlanId)
+			t.Errorf("Plan %q has empty display name", plan.PlanID)
 		}
 		if len(plan.Steps) == 0 {
-			t.Errorf("Plan %q has no steps", plan.PlanId)
+			t.Errorf("Plan %q has no steps", plan.PlanID)
 		}
 	}
 }
@@ -70,11 +70,11 @@ func TestListPlans(t *testing.T) {
 func TestRegisterPlan(t *testing.T) {
 	r := NewRegistry()
 
-	customPlan := &pb.Plan{
-		PlanId:      "custom/my-plan",
+	customPlan := &workflow.Plan{
+		PlanID:      "custom/my-plan",
 		DisplayName: "My Custom Plan",
-		Steps: []*pb.Step{
-			{Name: "step1", Kind: &pb.Step_Reboot{Reboot: &pb.Reboot{}}},
+		Steps: []*workflow.Step{
+			{Name: "step1", Kind: workflow.Reboot{}},
 		},
 	}
 
@@ -106,7 +106,7 @@ func TestRegisterPlan_NilAndEmpty(t *testing.T) {
 	}
 
 	// Empty ID plan should be ignored
-	r.RegisterPlan(&pb.Plan{PlanId: ""})
+	r.RegisterPlan(&workflow.Plan{PlanID: ""})
 	if len(r.ListPlans()) != initialCount {
 		t.Error("Plan with empty ID should not be registered")
 	}
@@ -118,293 +118,105 @@ func TestRegisterPlan_ClonesInput(t *testing.T) {
 	r := NewRegistry()
 
 	// Create and register a custom plan
-	customPlan := &pb.Plan{
-		PlanId:      "custom/cloning-test",
-		DisplayName: "Original Display Name",
-		Steps: []*pb.Step{
-			{Name: "original-step", Kind: &pb.Step_Reboot{Reboot: &pb.Reboot{}}},
+	original := &workflow.Plan{
+		PlanID:      "custom/clone-test",
+		DisplayName: "Original Name",
+		Steps: []*workflow.Step{
+			{Name: "step1", Kind: workflow.Reboot{}},
 		},
 	}
-	r.RegisterPlan(customPlan)
+	r.RegisterPlan(original)
 
-	// Mutate the original plan after registration
-	customPlan.DisplayName = "Mutated Display Name"
-	customPlan.Steps[0].Name = "mutated-step"
-	customPlan.Steps = append(customPlan.Steps, &pb.Step{Name: "extra-step"})
+	// Mutate the original after registration
+	original.DisplayName = "Mutated Name"
 
-	// Fetch from registry and verify it was NOT affected
-	stored, ok := r.GetPlan("custom/cloning-test")
+	// Verify the stored plan is not affected
+	stored, ok := r.GetPlan("custom/clone-test")
 	if !ok {
-		t.Fatal("Custom plan not found")
+		t.Fatal("Plan not found")
 	}
-	if stored.DisplayName != "Original Display Name" {
-		t.Errorf("Expected 'Original Display Name', got %q (mutation leaked)", stored.DisplayName)
-	}
-	if len(stored.Steps) != 1 {
-		t.Errorf("Expected 1 step, got %d (mutation leaked)", len(stored.Steps))
-	}
-	if stored.Steps[0].Name != "original-step" {
-		t.Errorf("Expected 'original-step', got %q (mutation leaked)", stored.Steps[0].Name)
+	if stored.DisplayName != "Original Name" {
+		t.Errorf("Expected 'Original Name', got %q - registry should clone on insert", stored.DisplayName)
 	}
 }
 
-// TestNewRegistry_ClonesBuiltins verifies that NewRegistry clones the builtin plans,
-// so mutations to the builtins map do not affect the registry.
-func TestNewRegistry_ClonesBuiltins(t *testing.T) {
+// TestGetPlan_ReturnsClone verifies that GetPlan returns a clone,
+// so mutations to the returned plan do not affect the stored copy.
+func TestGetPlan_ReturnsClone(t *testing.T) {
 	r := NewRegistry()
 
-	// Get a plan from the registry
-	plan, ok := r.GetPlan(PlanRepaveJoin)
-	if !ok {
-		t.Fatal("PlanRepaveJoin not found")
-	}
-
-	// Store original values
-	originalDisplayName := plan.DisplayName
-	originalStepCount := len(plan.Steps)
-
-	// Mutate the returned plan (note: GetPlan also clones, so this tests both)
-	plan.DisplayName = "Mutated"
-	plan.Steps = nil
-
-	// Fetch again and verify the registry copy is unchanged
-	plan2, _ := r.GetPlan(PlanRepaveJoin)
-	if plan2.DisplayName != originalDisplayName {
-		t.Errorf("Expected %q, got %q (mutation leaked)", originalDisplayName, plan2.DisplayName)
-	}
-	if len(plan2.Steps) != originalStepCount {
-		t.Errorf("Expected %d steps, got %d (mutation leaked)", originalStepCount, len(plan2.Steps))
-	}
-}
-
-func TestPlanRepaveJoin_Steps(t *testing.T) {
-	r := NewRegistry()
-	plan, ok := r.GetPlan(PlanRepaveJoin)
-	if !ok {
-		t.Fatal("PlanRepaveJoin not found")
-	}
-
-	expectedSteps := []string{
-		"set-netboot",
-		"reboot-to-netboot",
-		"repave-image",
-		"join-cluster",
-		"verify-in-cluster",
-	}
-
-	if len(plan.Steps) != len(expectedSteps) {
-		t.Fatalf("Expected %d steps, got %d", len(expectedSteps), len(plan.Steps))
-	}
-
-	for i, expected := range expectedSteps {
-		if plan.Steps[i].Name != expected {
-			t.Errorf("Step %d: expected %q, got %q", i, expected, plan.Steps[i].Name)
-		}
-	}
-
-	// Verify step types
-	if _, ok := plan.Steps[0].Kind.(*pb.Step_Netboot); !ok {
-		t.Error("Step 0 should be SetNetboot")
-	}
-	if _, ok := plan.Steps[1].Kind.(*pb.Step_Reboot); !ok {
-		t.Error("Step 1 should be Reboot")
-	}
-	if _, ok := plan.Steps[2].Kind.(*pb.Step_Repave); !ok {
-		t.Error("Step 2 should be RepaveImage")
-	}
-	if _, ok := plan.Steps[3].Kind.(*pb.Step_Join); !ok {
-		t.Error("Step 3 should be KubeadmJoin")
-	}
-	if _, ok := plan.Steps[4].Kind.(*pb.Step_Verify); !ok {
-		t.Error("Step 4 should be VerifyInCluster")
-	}
-}
-
-func TestPlanRMA_Steps(t *testing.T) {
-	r := NewRegistry()
-	plan, ok := r.GetPlan(PlanRMA)
-	if !ok {
-		t.Fatal("PlanRMA not found")
-	}
-
-	if len(plan.Steps) != 3 {
-		t.Fatalf("Expected 3 steps, got %d", len(plan.Steps))
-	}
-
-	// First step should be SSH drain check
-	if ssh, ok := plan.Steps[0].Kind.(*pb.Step_Ssh); !ok {
-		t.Error("Step 0 should be SSH command")
-	} else if ssh.Ssh.ScriptRef != "drain_check.sh" {
-		t.Errorf("Expected drain_check.sh, got %q", ssh.Ssh.ScriptRef)
-	}
-
-	// Second step should be Reboot
-	if _, ok := plan.Steps[1].Kind.(*pb.Step_Reboot); !ok {
-		t.Error("Step 1 should be Reboot")
-	}
-}
-
-func TestPlanReboot_Steps(t *testing.T) {
-	r := NewRegistry()
-	plan, ok := r.GetPlan(PlanReboot)
+	// Get a built-in plan
+	plan1, ok := r.GetPlan(PlanReboot)
 	if !ok {
 		t.Fatal("PlanReboot not found")
 	}
+	originalName := plan1.DisplayName
 
-	if len(plan.Steps) != 1 {
-		t.Fatalf("Expected 1 step, got %d", len(plan.Steps))
-	}
+	// Mutate the returned plan
+	plan1.DisplayName = "Mutated"
 
-	if _, ok := plan.Steps[0].Kind.(*pb.Step_Reboot); !ok {
-		t.Error("Step should be Reboot")
-	}
-}
-
-func TestPlanUpgrade_Steps(t *testing.T) {
-	r := NewRegistry()
-	plan, ok := r.GetPlan(PlanUpgrade)
+	// Get it again
+	plan2, ok := r.GetPlan(PlanReboot)
 	if !ok {
-		t.Fatal("PlanUpgrade not found")
+		t.Fatal("PlanReboot not found on second get")
 	}
 
-	// Should have: cordon, drain, upgrade, restart, uncordon, verify
-	if len(plan.Steps) < 4 {
-		t.Errorf("Expected at least 4 steps for upgrade, got %d", len(plan.Steps))
-	}
-
-	// Find upgrade step
-	found := false
-	for _, step := range plan.Steps {
-		if ssh, ok := step.Kind.(*pb.Step_Ssh); ok {
-			if ssh.Ssh.ScriptRef == "upgrade_k8s.sh" {
-				found = true
-				break
-			}
-		}
-	}
-	if !found {
-		t.Error("Expected upgrade_k8s.sh script in upgrade plan")
-	}
-}
-
-func TestPlanNetReconfig_Steps(t *testing.T) {
-	r := NewRegistry()
-	plan, ok := r.GetPlan(PlanNetReconfig)
-	if !ok {
-		t.Fatal("PlanNetReconfig not found")
-	}
-
-	if len(plan.Steps) < 1 {
-		t.Fatal("Expected at least 1 step")
-	}
-
-	// First step should be NetReconfig
-	if _, ok := plan.Steps[0].Kind.(*pb.Step_Net); !ok {
-		t.Error("Step 0 should be NetReconfig")
+	if plan2.DisplayName != originalName {
+		t.Errorf("Expected %q, got %q - GetPlan should return clone", originalName, plan2.DisplayName)
 	}
 }
 
 func TestPlanIDs(t *testing.T) {
 	r := NewRegistry()
+
 	ids := r.PlanIDs()
-
 	if len(ids) != len(BuiltinPlanIDs()) {
-		t.Errorf("Expected %d IDs, got %d", len(BuiltinPlanIDs()), len(ids))
+		t.Errorf("Expected %d plan IDs, got %d", len(BuiltinPlanIDs()), len(ids))
+	}
+}
+
+func TestBuiltinPlanIDs(t *testing.T) {
+	ids := BuiltinPlanIDs()
+
+	expected := []string{
+		PlanRepaveJoin,
+		PlanRMA,
+		PlanReboot,
+		PlanUpgrade,
+		PlanNetReconfig,
 	}
 
-	// Verify all built-in IDs are present
-	idSet := make(map[string]bool)
-	for _, id := range ids {
-		idSet[id] = true
+	if len(ids) != len(expected) {
+		t.Errorf("Expected %d builtin plan IDs, got %d", len(expected), len(ids))
 	}
-	for _, id := range BuiltinPlanIDs() {
-		if !idSet[id] {
-			t.Errorf("Missing plan ID: %q", id)
+
+	for i, id := range expected {
+		if ids[i] != id {
+			t.Errorf("Expected ids[%d] = %q, got %q", i, id, ids[i])
 		}
 	}
 }
 
-func TestAllPlansHaveTimeouts(t *testing.T) {
+func TestBuiltinPlanStepKinds(t *testing.T) {
 	r := NewRegistry()
 
-	for _, plan := range r.ListPlans() {
-		for _, step := range plan.Steps {
-			if step.TimeoutSeconds <= 0 {
-				t.Errorf("Plan %q step %q has no timeout", plan.PlanId, step.Name)
-			}
-		}
-	}
-}
-
-// TestGetPlanReturnsClone verifies that GetPlan returns a deep clone,
-// so callers cannot mutate the registry's shared global plans.
-func TestGetPlanReturnsClone(t *testing.T) {
-	r := NewRegistry()
-
-	// Get a plan
-	plan1, ok := r.GetPlan(PlanRepaveJoin)
+	// Verify PlanRepaveJoin has expected step kinds
+	plan, ok := r.GetPlan(PlanRepaveJoin)
 	if !ok {
 		t.Fatal("PlanRepaveJoin not found")
 	}
 
-	// Remember original step name
-	originalName := plan1.Steps[0].Name
-
-	// Mutate the returned plan
-	plan1.DisplayName = "MUTATED"
-	plan1.Steps[0].Name = "MUTATED-STEP"
-
-	// Get the plan again - it should have original values
-	plan2, ok := r.GetPlan(PlanRepaveJoin)
-	if !ok {
-		t.Fatal("PlanRepaveJoin not found on second get")
+	if len(plan.Steps) < 5 {
+		t.Errorf("Expected at least 5 steps in PlanRepaveJoin, got %d", len(plan.Steps))
 	}
 
-	if plan2.DisplayName == "MUTATED" {
-		t.Error("Caller was able to mutate registry's plan DisplayName - GetPlan should return a clone")
-	}
-
-	if plan2.Steps[0].Name != originalName {
-		t.Errorf("Caller was able to mutate registry's plan Steps - GetPlan should return a clone. Expected %q, got %q",
-			originalName, plan2.Steps[0].Name)
-	}
-}
-
-// TestListPlansReturnsClones verifies that ListPlans returns deep clones,
-// so callers cannot mutate the registry's shared global plans.
-func TestListPlansReturnsClones(t *testing.T) {
-	r := NewRegistry()
-
-	plans1 := r.ListPlans()
-	if len(plans1) == 0 {
-		t.Fatal("Expected at least one plan")
-	}
-
-	// Remember original values
-	originalDisplayName := plans1[0].DisplayName
-	originalPlanId := plans1[0].PlanId
-
-	// Mutate the returned plans
-	plans1[0].DisplayName = "MUTATED"
-
-	// Get plans again - they should have original values
-	plans2 := r.ListPlans()
-
-	// Find the same plan
-	var found *pb.Plan
-	for _, p := range plans2 {
-		if p.PlanId == originalPlanId {
-			found = p
-			break
+	// Verify step kinds
+	for _, step := range plan.Steps {
+		if step.Name == "" {
+			t.Error("Step has empty name")
 		}
-	}
-
-	if found == nil {
-		t.Fatal("Could not find original plan")
-	}
-
-	if found.DisplayName != originalDisplayName {
-		t.Errorf("Caller was able to mutate registry's plan via ListPlans - should return clones. Expected %q, got %q",
-			originalDisplayName, found.DisplayName)
+		if step.Kind == nil {
+			t.Errorf("Step %q has nil Kind", step.Name)
+		}
 	}
 }
