@@ -1,4 +1,4 @@
-// Package store provides an in-memory thread-safe store for baremetal machines and runs.
+// Package store provides an in-memory thread-safe store for baremetal machines and operations.
 package store
 
 import (
@@ -15,9 +15,9 @@ import (
 
 // Sentinel errors for typed error handling
 var (
-	ErrMachineNotFound     = errors.New("machine not found")
-	ErrMachineHasActiveRun = errors.New("machine has active run")
-	ErrRunNotFound         = errors.New("run not found")
+	ErrMachineNotFound           = errors.New("machine not found")
+	ErrMachineHasActiveOperation = errors.New("machine has active operation")
+	ErrOperationNotFound         = errors.New("operation not found")
 )
 
 // cloneMachine returns a deep copy of a machine.
@@ -28,38 +28,38 @@ func cloneMachine(m *pb.Machine) *pb.Machine {
 	return proto.Clone(m).(*pb.Machine)
 }
 
-// cloneRun returns a deep copy of a run.
-func cloneRun(r *pb.Run) *pb.Run {
-	if r == nil {
+// cloneOperation returns a deep copy of an operation.
+func cloneOperation(op *pb.Operation) *pb.Operation {
+	if op == nil {
 		return nil
 	}
-	return proto.Clone(r).(*pb.Run)
+	return proto.Clone(op).(*pb.Operation)
 }
 
-// Store is a thread-safe in-memory store for machines and runs.
+// Store is a thread-safe in-memory store for machines and operations.
 type Store struct {
 	mu sync.RWMutex
 
 	// Primary storage
-	machines map[string]*pb.Machine
-	runs     map[string]*pb.Run
+	machines   map[string]*pb.Machine
+	operations map[string]*pb.Operation
 
 	// Indexes
-	requestIndex map[string]string // request_id -> run_id for idempotent StartRun
+	requestIndex map[string]string // (machine_id:request_id) -> operation_id for idempotent operations
 
-	// Per-machine locks to ensure only one active run per machine
-	machineLocks   map[string]*sync.Mutex
-	machineRunning map[string]bool // machine_id -> has active run
+	// Per-machine locks to ensure only one active operation per machine
+	machineLocks     map[string]*sync.Mutex
+	machineOperating map[string]bool // machine_id -> has active operation
 }
 
 // New creates a new Store.
 func New() *Store {
 	return &Store{
-		machines:       make(map[string]*pb.Machine),
-		runs:           make(map[string]*pb.Run),
-		requestIndex:   make(map[string]string),
-		machineLocks:   make(map[string]*sync.Mutex),
-		machineRunning: make(map[string]bool),
+		machines:         make(map[string]*pb.Machine),
+		operations:       make(map[string]*pb.Operation),
+		requestIndex:     make(map[string]string),
+		machineLocks:     make(map[string]*sync.Mutex),
+		machineOperating: make(map[string]bool),
 	}
 }
 
@@ -140,22 +140,22 @@ func (s *Store) UpdateMachine(m *pb.Machine) (*pb.Machine, error) {
 	return cloneMachine(existing), nil
 }
 
-// CreateRunIfNotExists creates a new run if the request_id hasn't been seen before.
-// Returns the run and whether it was newly created (true) or already existed (false).
-// Enforces that only one run can be active per machine at a time.
+// CreateOperationIfNotExists creates a new operation if the request_id hasn't been seen before.
+// Returns the operation and whether it was newly created (true) or already existed (false).
+// Enforces that only one operation can be active per machine at a time.
 // Idempotency is scoped to (machine_id, request_id) tuple.
 //
 // Errors returned:
 //   - ErrMachineNotFound if machine doesn't exist
-//   - ErrMachineHasActiveRun if machine already has an active run
-func (s *Store) CreateRunIfNotExists(requestID, machineID, runType, planID string) (*pb.Run, bool, error) {
+//   - ErrMachineHasActiveOperation if machine already has an active operation
+func (s *Store) CreateOperationIfNotExists(requestID, machineID, opType, planID string) (*pb.Operation, bool, error) {
 	s.mu.RLock()
 	if requestID != "" {
 		idempotencyKey := machineID + ":" + requestID
-		if existingRunID, ok := s.requestIndex[idempotencyKey]; ok {
-			run := s.runs[existingRunID]
+		if existingOpID, ok := s.requestIndex[idempotencyKey]; ok {
+			op := s.operations[existingOpID]
 			s.mu.RUnlock()
-			return cloneRun(run), false, nil
+			return cloneOperation(op), false, nil
 		}
 	}
 
@@ -179,8 +179,8 @@ func (s *Store) CreateRunIfNotExists(requestID, machineID, runType, planID strin
 
 	if requestID != "" {
 		idempotencyKey := machineID + ":" + requestID
-		if existingRunID, ok := s.requestIndex[idempotencyKey]; ok {
-			return cloneRun(s.runs[existingRunID]), false, nil
+		if existingOpID, ok := s.requestIndex[idempotencyKey]; ok {
+			return cloneOperation(s.operations[existingOpID]), false, nil
 		}
 	}
 
@@ -191,151 +191,151 @@ func (s *Store) CreateRunIfNotExists(requestID, machineID, runType, planID strin
 		return nil, false, fmt.Errorf("%w: %q", ErrMachineNotFound, machineID)
 	}
 
-	if s.machineRunning[machineID] {
-		activeRunID := machine.Status.GetActiveRunId()
-		return nil, false, fmt.Errorf("%w: %q has active run %q", ErrMachineHasActiveRun, machineID, activeRunID)
+	if s.machineOperating[machineID] {
+		activeOpID := machine.Status.GetActiveOperationId()
+		return nil, false, fmt.Errorf("%w: %q has active operation %q", ErrMachineHasActiveOperation, machineID, activeOpID)
 	}
 
-	runID := fmt.Sprintf("run-%d", time.Now().UnixNano())
-	run := &pb.Run{
-		RunId:     runID,
-		MachineId: machineID,
-		Phase:     pb.Run_PENDING,
-		RequestId: requestID,
-		Type:      runType,
-		PlanId:    planID,
-		CreatedAt: timestamppb.Now(),
+	opID := fmt.Sprintf("op-%d", time.Now().UnixNano())
+	op := &pb.Operation{
+		OperationId: opID,
+		MachineId:   machineID,
+		Phase:       pb.Operation_PENDING,
+		RequestId:   requestID,
+		Type:        opType,
+		PlanId:      planID,
+		CreatedAt:   timestamppb.Now(),
 	}
 
-	s.runs[runID] = run
+	s.operations[opID] = op
 
 	if requestID != "" {
 		idempotencyKey := machineID + ":" + requestID
-		s.requestIndex[idempotencyKey] = runID
+		s.requestIndex[idempotencyKey] = opID
 	}
 
-	s.machineRunning[machineID] = true
+	s.machineOperating[machineID] = true
 
 	if machine.Status == nil {
 		machine.Status = &pb.MachineStatus{}
 	}
-	machine.Status.ActiveRunId = runID
+	machine.Status.ActiveOperationId = opID
 	// NOTE: We do NOT set machine.Status.Phase here.
-	// The executor is responsible for setting PROVISIONING when it starts execution.
+	// The executor is responsible for phase transitions.
 	// This keeps lifecycle semantics out of the store.
 
-	return cloneRun(run), true, nil
+	return cloneOperation(op), true, nil
 }
 
-// GetRun retrieves a run by ID.
-func (s *Store) GetRun(runID string) (*pb.Run, bool) {
+// GetOperation retrieves an operation by ID.
+func (s *Store) GetOperation(opID string) (*pb.Operation, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	r, ok := s.runs[runID]
+	op, ok := s.operations[opID]
 	if !ok {
 		return nil, false
 	}
-	return cloneRun(r), true
+	return cloneOperation(op), true
 }
 
-// ListRuns returns all runs.
-func (s *Store) ListRuns() []*pb.Run {
+// ListOperations returns all operations.
+func (s *Store) ListOperations() []*pb.Operation {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	result := make([]*pb.Run, 0, len(s.runs))
-	for _, r := range s.runs {
-		result = append(result, cloneRun(r))
+	result := make([]*pb.Operation, 0, len(s.operations))
+	for _, op := range s.operations {
+		result = append(result, cloneOperation(op))
 	}
 	return result
 }
 
-// UpdateRun updates a run's fields.
-func (s *Store) UpdateRun(run *pb.Run) error {
-	if run == nil {
-		return fmt.Errorf("run is nil")
+// UpdateOperation updates an operation's fields.
+func (s *Store) UpdateOperation(op *pb.Operation) error {
+	if op == nil {
+		return fmt.Errorf("operation is nil")
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.runs[run.RunId]; !ok {
-		return fmt.Errorf("run %q not found", run.RunId)
+	if _, ok := s.operations[op.OperationId]; !ok {
+		return fmt.Errorf("operation %q not found", op.OperationId)
 	}
 
-	s.runs[run.RunId] = cloneRun(run)
+	s.operations[op.OperationId] = cloneOperation(op)
 	return nil
 }
 
-// CancelRun cancels a run if it's still active.
-// Idempotent: canceling an already-canceled run returns success.
-func (s *Store) CancelRun(runID string) (*pb.Run, error) {
+// CancelOperation cancels an operation if it's still active.
+// Idempotent: canceling an already-canceled operation returns success.
+func (s *Store) CancelOperation(opID string) (*pb.Operation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	run, ok := s.runs[runID]
+	op, ok := s.operations[opID]
 	if !ok {
-		return nil, fmt.Errorf("run %q not found", runID)
+		return nil, fmt.Errorf("operation %q not found", opID)
 	}
 
 	// Already canceled - return success (idempotent)
-	if run.Phase == pb.Run_CANCELED {
-		return cloneRun(run), nil
+	if op.Phase == pb.Operation_CANCELED {
+		return cloneOperation(op), nil
 	}
 
 	// Already finished with success or failure - cannot cancel
-	if run.Phase == pb.Run_SUCCEEDED || run.Phase == pb.Run_FAILED {
-		return nil, fmt.Errorf("run %q already finished with phase %s", runID, run.Phase)
+	if op.Phase == pb.Operation_SUCCEEDED || op.Phase == pb.Operation_FAILED {
+		return nil, fmt.Errorf("operation %q already finished with phase %s", opID, op.Phase)
 	}
 
-	run.Phase = pb.Run_CANCELED
-	run.FinishedAt = timestamppb.Now()
+	op.Phase = pb.Operation_CANCELED
+	op.FinishedAt = timestamppb.Now()
 
-	s.clearMachineActiveRun(run.MachineId)
+	s.clearMachineActiveOperation(op.MachineId)
 
-	return cloneRun(run), nil
+	return cloneOperation(op), nil
 }
 
-// CompleteRun marks a run as completed and clears the machine's active run.
+// CompleteOperation marks an operation as completed and clears the machine's active operation.
 // NOTE: This method does NOT change machine.Status.Phase - the executor
 // is responsible for phase transitions based on what steps completed.
-func (s *Store) CompleteRun(runID string, phase pb.Run_Phase) error {
+func (s *Store) CompleteOperation(opID string, phase pb.Operation_Phase) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	run, ok := s.runs[runID]
+	op, ok := s.operations[opID]
 	if !ok {
-		return fmt.Errorf("run %q not found", runID)
+		return fmt.Errorf("operation %q not found", opID)
 	}
 
-	run.Phase = phase
-	run.FinishedAt = timestamppb.Now()
+	op.Phase = phase
+	op.FinishedAt = timestamppb.Now()
 
-	s.clearMachineActiveRun(run.MachineId)
+	s.clearMachineActiveOperation(op.MachineId)
 
 	return nil
 }
 
-func (s *Store) clearMachineActiveRun(machineID string) {
-	s.machineRunning[machineID] = false
+func (s *Store) clearMachineActiveOperation(machineID string) {
+	s.machineOperating[machineID] = false
 	if machine, ok := s.machines[machineID]; ok {
 		if machine.Status != nil {
-			machine.Status.ActiveRunId = ""
+			machine.Status.ActiveOperationId = ""
 		}
 	}
 }
 
 // cloneStepStatus returns a deep copy of a step status.
-func cloneStepStatus(s *pb.StepStatus) *pb.StepStatus {
-	if s == nil {
+func cloneStepStatus(st *pb.StepStatus) *pb.StepStatus {
+	if st == nil {
 		return nil
 	}
-	return proto.Clone(s).(*pb.StepStatus)
+	return proto.Clone(st).(*pb.StepStatus)
 }
 
-// UpdateRunStep adds or updates a step status for a run.
+// UpdateOperationStep adds or updates a step status for an operation.
 // The step is cloned before storing to prevent external mutation.
-func (s *Store) UpdateRunStep(runID string, step *pb.StepStatus) error {
+func (s *Store) UpdateOperationStep(opID string, step *pb.StepStatus) error {
 	if step == nil {
 		return fmt.Errorf("step is nil")
 	}
@@ -343,71 +343,71 @@ func (s *Store) UpdateRunStep(runID string, step *pb.StepStatus) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	run, ok := s.runs[runID]
+	op, ok := s.operations[opID]
 	if !ok {
-		return fmt.Errorf("run %q not found", runID)
+		return fmt.Errorf("operation %q not found", opID)
 	}
 
 	// Clone the step to prevent external mutation from affecting store state
 	stepClone := cloneStepStatus(step)
 
 	found := false
-	for i, existing := range run.Steps {
+	for i, existing := range op.Steps {
 		if existing.Name == stepClone.Name {
-			run.Steps[i] = stepClone
+			op.Steps[i] = stepClone
 			found = true
 			break
 		}
 	}
 	if !found {
-		run.Steps = append(run.Steps, stepClone)
+		op.Steps = append(op.Steps, stepClone)
 	}
 
-	run.CurrentStep = stepClone.Name
+	op.CurrentStage = stepClone.Name
 	return nil
 }
 
-// SetRunPhase updates just the phase of a run.
-func (s *Store) SetRunPhase(runID string, phase pb.Run_Phase) error {
+// SetOperationPhase updates just the phase of an operation.
+func (s *Store) SetOperationPhase(opID string, phase pb.Operation_Phase) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	run, ok := s.runs[runID]
+	op, ok := s.operations[opID]
 	if !ok {
-		return fmt.Errorf("run %q not found", runID)
+		return fmt.Errorf("operation %q not found", opID)
 	}
 
-	run.Phase = phase
-	if phase == pb.Run_RUNNING && run.StartedAt == nil {
-		run.StartedAt = timestamppb.Now()
+	op.Phase = phase
+	if phase == pb.Operation_RUNNING && op.StartedAt == nil {
+		op.StartedAt = timestamppb.Now()
 	}
 	return nil
 }
 
-// TryTransitionRunPhase atomically transitions a run from one phase to another.
+// TryTransitionOperationPhase atomically transitions an operation from one phase to another.
 // Returns (true, nil) if the transition succeeded.
-// Returns (false, nil) if the run is already in a different phase (including terminal phases).
-// Returns (false, error) only if the run doesn't exist.
-func (s *Store) TryTransitionRunPhase(runID string, from, to pb.Run_Phase) (bool, error) {
+// Returns (false, nil) if the operation is already in a different phase (including terminal phases).
+// Returns (false, error) only if the operation doesn't exist.
+func (s *Store) TryTransitionOperationPhase(opID string, from, to pb.Operation_Phase) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	run, ok := s.runs[runID]
+	op, ok := s.operations[opID]
 	if !ok {
-		return false, fmt.Errorf("run %q not found", runID)
+		return false, fmt.Errorf("operation %q not found", opID)
 	}
 
 	// If already in target phase, or different from expected, no transition
-	if run.Phase != from {
+	if op.Phase != from {
 		return false, nil
 	}
 
-	run.Phase = to
-	if to == pb.Run_RUNNING && run.StartedAt == nil {
-		run.StartedAt = timestamppb.Now()
+	op.Phase = to
+	if to == pb.Operation_RUNNING && op.StartedAt == nil {
+		op.StartedAt = timestamppb.Now()
 	}
-	if to == pb.Run_SUCCEEDED || to == pb.Run_FAILED || to == pb.Run_CANCELED {
-		run.FinishedAt = timestamppb.Now()
+	if to == pb.Operation_SUCCEEDED || to == pb.Operation_FAILED || to == pb.Operation_CANCELED {
+		op.FinishedAt = timestamppb.Now()
 	}
 
 	return true, nil

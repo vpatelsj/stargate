@@ -84,60 +84,43 @@ func HasCondition(status *pb.MachineStatus, condType string, wantStatus bool) bo
 	return c != nil && c.Status == wantStatus
 }
 
-// EffectiveState computes the effective machine phase based on precedence rules:
-//  1. Active run pending/running => PROVISIONING
-//  2. Explicit phases RMA/RETIRED/MAINTENANCE take precedence
-//  3. InCustomerCluster condition true => IN_SERVICE
-//  4. FACTORY_READY stays FACTORY_READY, otherwise READY
-func EffectiveState(status *pb.MachineStatus, activeRun *pb.Run) pb.MachineStatus_Phase {
-	if status == nil {
-		return pb.MachineStatus_PHASE_UNSPECIFIED
+// IsBusy returns true if the machine has an active operation.
+// This is determined by checking active_operation_id.
+func IsBusy(machine *pb.Machine) bool {
+	if machine == nil || machine.Status == nil {
+		return false
 	}
-
-	// Rule 1: Active run in progress => PROVISIONING
-	if activeRun != nil {
-		switch activeRun.Phase {
-		case pb.Run_PENDING, pb.Run_RUNNING:
-			return pb.MachineStatus_PROVISIONING
-		}
-	}
-
-	// Rule 2: Explicit operational phases take precedence
-	switch status.Phase {
-	case pb.MachineStatus_RMA:
-		return pb.MachineStatus_RMA
-	case pb.MachineStatus_RETIRED:
-		return pb.MachineStatus_RETIRED
-	case pb.MachineStatus_MAINTENANCE:
-		return pb.MachineStatus_MAINTENANCE
-	}
-
-	// Rule 3: InCustomerCluster condition => IN_SERVICE
-	if HasCondition(status, ConditionInCustomerCluster, true) {
-		return pb.MachineStatus_IN_SERVICE
-	}
-
-	// Rule 4: FACTORY_READY stays, otherwise READY
-	if status.Phase == pb.MachineStatus_FACTORY_READY {
-		return pb.MachineStatus_FACTORY_READY
-	}
-
-	return pb.MachineStatus_READY
+	return machine.Status.ActiveOperationId != ""
 }
 
-// IsTerminalRunPhase returns true if the run phase is terminal (completed/failed/canceled).
-func IsTerminalRunPhase(phase pb.Run_Phase) bool {
+// IsBusyWithOperation returns true if the machine has an active operation
+// and checks the operation's phase if provided.
+func IsBusyWithOperation(machine *pb.Machine, op *pb.Operation) bool {
+	if machine == nil || machine.Status == nil {
+		return false
+	}
+	if machine.Status.ActiveOperationId == "" {
+		return false
+	}
+	if op == nil {
+		return true // has active_operation_id but no operation provided to check
+	}
+	return IsActiveOperationPhase(op.Phase)
+}
+
+// IsTerminalOperationPhase returns true if the operation phase is terminal (completed/failed/canceled).
+func IsTerminalOperationPhase(phase pb.Operation_Phase) bool {
 	switch phase {
-	case pb.Run_SUCCEEDED, pb.Run_FAILED, pb.Run_CANCELED:
+	case pb.Operation_SUCCEEDED, pb.Operation_FAILED, pb.Operation_CANCELED:
 		return true
 	}
 	return false
 }
 
-// IsActiveRunPhase returns true if the run phase is active (pending/running).
-func IsActiveRunPhase(phase pb.Run_Phase) bool {
+// IsActiveOperationPhase returns true if the operation phase is active (pending/running).
+func IsActiveOperationPhase(phase pb.Operation_Phase) bool {
 	switch phase {
-	case pb.Run_PENDING, pb.Run_RUNNING:
+	case pb.Operation_PENDING, pb.Operation_RUNNING:
 		return true
 	}
 	return false

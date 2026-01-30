@@ -1,4 +1,4 @@
-// Package executor provides the run executor that processes provisioning runs.
+// Package executor provides the operation executor that processes provisioning operations.
 package executor
 
 import (
@@ -20,40 +20,40 @@ import (
 	"github.com/vpatelsj/stargate/internal/bmdemo/store"
 )
 
-// EventCallback is called on run state transitions.
-type EventCallback func(event *pb.RunEvent)
+// EventCallback is called on operation state transitions.
+type EventCallback func(event *pb.OperationEvent)
 
 // LogCallback is called to stream logs.
 type LogCallback func(chunk *pb.LogChunk)
 
-// Runner executes runs asynchronously.
+// Runner executes operations asynchronously.
 type Runner struct {
 	store    *store.Store
 	provider provider.Provider
 	plans    *plans.Registry
 
-	mu            sync.RWMutex
-	eventSubID    uint64                            // counter for unique subscriber IDs
-	eventSubs     map[uint64]EventCallback          // subscriberID -> callback
-	logSubID      map[string]uint64                 // runID -> counter for unique log subscriber IDs
-	logSubs       map[string]map[uint64]LogCallback // runID -> subscriberID -> callback
-	activeRuns    map[string]context.CancelFunc
-	baseRetryWait time.Duration
-	maxRetryWait  time.Duration
+	mu               sync.RWMutex
+	eventSubID       uint64                            // counter for unique subscriber IDs
+	eventSubs        map[uint64]EventCallback          // subscriberID -> callback
+	logSubID         map[string]uint64                 // operationID -> counter for unique log subscriber IDs
+	logSubs          map[string]map[uint64]LogCallback // operationID -> subscriberID -> callback
+	activeOperations map[string]context.CancelFunc
+	baseRetryWait    time.Duration
+	maxRetryWait     time.Duration
 }
 
-// NewRunner creates a new run executor.
+// NewRunner creates a new operation executor.
 func NewRunner(s *store.Store, p provider.Provider, pl *plans.Registry) *Runner {
 	return &Runner{
-		store:         s,
-		provider:      p,
-		plans:         pl,
-		eventSubs:     make(map[uint64]EventCallback),
-		logSubID:      make(map[string]uint64),
-		logSubs:       make(map[string]map[uint64]LogCallback),
-		activeRuns:    make(map[string]context.CancelFunc),
-		baseRetryWait: 500 * time.Millisecond,
-		maxRetryWait:  10 * time.Second,
+		store:            s,
+		provider:         p,
+		plans:            pl,
+		eventSubs:        make(map[uint64]EventCallback),
+		logSubID:         make(map[string]uint64),
+		logSubs:          make(map[string]map[uint64]LogCallback),
+		activeOperations: make(map[string]context.CancelFunc),
+		baseRetryWait:    500 * time.Millisecond,
+		maxRetryWait:     10 * time.Second,
 	}
 }
 
@@ -63,8 +63,8 @@ func (r *Runner) SetProvider(p provider.Provider) {
 }
 
 // EmitLog is called by the provider to stream logs. This is the public API.
-func (r *Runner) EmitLog(runID, stream string, data []byte) {
-	r.emitLog(runID, stream, data)
+func (r *Runner) EmitLog(operationID, stream string, data []byte) {
+	r.emitLog(operationID, stream, data)
 }
 
 // SubscribeEvents adds an event subscriber. Returns unsubscribe function.
@@ -82,36 +82,36 @@ func (r *Runner) SubscribeEvents(cb EventCallback) func() {
 	}
 }
 
-// SubscribeLogs adds a log subscriber for a specific run. Returns unsubscribe function.
-func (r *Runner) SubscribeLogs(runID string, cb LogCallback) func() {
+// SubscribeLogs adds a log subscriber for a specific operation. Returns unsubscribe function.
+func (r *Runner) SubscribeLogs(operationID string, cb LogCallback) func() {
 	r.mu.Lock()
-	if r.logSubs[runID] == nil {
-		r.logSubs[runID] = make(map[uint64]LogCallback)
+	if r.logSubs[operationID] == nil {
+		r.logSubs[operationID] = make(map[uint64]LogCallback)
 	}
-	r.logSubID[runID]++
-	id := r.logSubID[runID]
-	r.logSubs[runID][id] = cb
+	r.logSubID[operationID]++
+	id := r.logSubID[operationID]
+	r.logSubs[operationID][id] = cb
 	r.mu.Unlock()
 
 	return func() {
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		if subs, ok := r.logSubs[runID]; ok {
+		if subs, ok := r.logSubs[operationID]; ok {
 			delete(subs, id)
 			// Clean up empty map
 			if len(subs) == 0 {
-				delete(r.logSubs, runID)
-				delete(r.logSubID, runID)
+				delete(r.logSubs, operationID)
+				delete(r.logSubID, operationID)
 			}
 		}
 	}
 }
 
 // emitEvent sends an event to all subscribers with an immutable snapshot.
-func (r *Runner) emitEvent(run *pb.Run, message string) {
-	// Clone the run to ensure immutability
-	snapshot := proto.Clone(run).(*pb.Run)
-	event := &pb.RunEvent{
+func (r *Runner) emitEvent(op *pb.Operation, message string) {
+	// Clone the operation to ensure immutability
+	snapshot := proto.Clone(op).(*pb.Operation)
+	event := &pb.OperationEvent{
 		Ts:       timestamppb.Now(),
 		Snapshot: snapshot,
 		Message:  message,
@@ -129,28 +129,28 @@ func (r *Runner) emitEvent(run *pb.Run, message string) {
 	}
 }
 
-// emitEventFromStore fetches the latest run state from store and emits an event.
+// emitEventFromStore fetches the latest operation state from store and emits an event.
 // This ensures event snapshots reflect actual persisted state (including Steps[]).
-func (r *Runner) emitEventFromStore(runID string, message string) {
-	run, ok := r.store.GetRun(runID)
+func (r *Runner) emitEventFromStore(operationID string, message string) {
+	op, ok := r.store.GetOperation(operationID)
 	if !ok {
 		return
 	}
-	r.emitEvent(run, message)
+	r.emitEvent(op, message)
 }
 
-// emitLog sends a log chunk to run subscribers.
-func (r *Runner) emitLog(runID, stream string, data []byte) {
+// emitLog sends a log chunk to operation subscribers.
+func (r *Runner) emitLog(operationID, stream string, data []byte) {
 	chunk := &pb.LogChunk{
-		Ts:     timestamppb.Now(),
-		RunId:  runID,
-		Stream: stream,
-		Data:   data,
+		Ts:          timestamppb.Now(),
+		OperationId: operationID,
+		Stream:      stream,
+		Data:        data,
 	}
 
 	r.mu.RLock()
 	var subs []LogCallback
-	if m, ok := r.logSubs[runID]; ok {
+	if m, ok := r.logSubs[operationID]; ok {
 		subs = make([]LogCallback, 0, len(m))
 		for _, cb := range m {
 			subs = append(subs, cb)
@@ -163,145 +163,141 @@ func (r *Runner) emitLog(runID, stream string, data []byte) {
 	}
 }
 
-// StartRun begins executing a run asynchronously.
-// Returns immediately; run proceeds in background.
-// Idempotent: calling StartRun on an already-running or finished run returns nil.
-func (r *Runner) StartRun(ctx context.Context, runID string) error {
+// StartOperation begins executing an operation asynchronously.
+// Returns immediately; operation proceeds in background.
+// Idempotent: calling StartOperation on an already-running or finished operation returns nil.
+func (r *Runner) StartOperation(ctx context.Context, operationID string) error {
 	// Atomically try to transition from PENDING to RUNNING
-	ok, err := r.store.TryTransitionRunPhase(runID, pb.Run_PENDING, pb.Run_RUNNING)
+	ok, err := r.store.TryTransitionOperationPhase(operationID, pb.Operation_PENDING, pb.Operation_RUNNING)
 	if err != nil {
-		return err // run not found
+		return err // operation not found
 	}
 	if !ok {
-		// Run is not PENDING - either already running, succeeded, failed, or canceled.
+		// Operation is not PENDING - either already running, succeeded, failed, or canceled.
 		// This is idempotent success - someone else started it or it's already done.
 		return nil
 	}
 
 	// We are the winner - we transitioned PENDING -> RUNNING
-	// Create cancellable context for this run
-	runCtx, cancel := context.WithCancel(context.Background())
+	// Create cancellable context for this operation
+	opCtx, cancel := context.WithCancel(context.Background())
 
 	r.mu.Lock()
-	r.activeRuns[runID] = cancel
+	r.activeOperations[operationID] = cancel
 	r.mu.Unlock()
 
 	// Execute asynchronously
-	go r.executeRun(runCtx, runID)
+	go r.executeOperation(opCtx, operationID)
 
 	return nil
 }
 
-// CancelRun cancels a run immediately.
-// It marks the run as CANCELED in the store, clears machine state, and stops execution.
-// Idempotent: canceling an already-canceled run returns success.
-func (r *Runner) CancelRun(runID string) error {
-	// First, get the run to access machine info
-	run, ok := r.store.GetRun(runID)
+// CancelOperation cancels an operation immediately.
+// It marks the operation as CANCELED in the store, clears machine state, and stops execution.
+// Idempotent: canceling an already-canceled operation returns success.
+func (r *Runner) CancelOperation(operationID string) error {
+	// First, get the operation to access machine info
+	op, ok := r.store.GetOperation(operationID)
 	if !ok {
-		return fmt.Errorf("run %q not found", runID)
+		return fmt.Errorf("operation %q not found", operationID)
 	}
 
 	// Always try to cancel in the store first (idempotent)
-	_, err := r.store.CancelRun(runID)
+	_, err := r.store.CancelOperation(operationID)
 	if err != nil {
 		// If already finished, that's an error
 		return err
 	}
 
-	// Update machine state for canceled runs
-	machine, ok := r.store.GetMachine(run.MachineId)
+	// Update machine state for canceled operations
+	machine, ok := r.store.GetMachine(op.MachineId)
 	if ok {
 		// Set machine to MAINTENANCE with OperationCanceled (not NeedsIntervention)
 		// User-initiated cancels are expected; failures set NeedsIntervention.
 		lifecycle.SetMachinePhase(machine, pb.MachineStatus_MAINTENANCE)
-		lifecycle.SetCondition(machine, lifecycle.ConditionOperationCanceled, true, "UserCanceled", "Run was canceled by user")
-		machine.Status.ActiveRunId = ""
+		lifecycle.SetCondition(machine, lifecycle.ConditionOperationCanceled, true, "UserCanceled", "Operation was canceled by user")
+		machine.Status.ActiveOperationId = ""
 		r.store.UpdateMachine(machine)
 	}
 
-	// Cancel the active context if the run is still executing
+	// Cancel the active context if the operation is still executing
 	r.mu.Lock()
-	cancel, active := r.activeRuns[runID]
+	cancel, active := r.activeOperations[operationID]
 	if active {
 		cancel()
-		delete(r.activeRuns, runID)
+		delete(r.activeOperations, operationID)
 	}
 	r.mu.Unlock()
 
 	// Emit cancel event
-	if updatedRun, ok := r.store.GetRun(runID); ok {
-		r.emitEvent(updatedRun, "Run canceled")
-		r.emitLog(runID, "stdout", []byte("\n=== Run CANCELED ===\n"))
+	if updatedOp, ok := r.store.GetOperation(operationID); ok {
+		r.emitEvent(updatedOp, "Operation canceled")
+		r.emitLog(operationID, "stdout", []byte("\n=== Operation CANCELED ===\n"))
 	}
 
 	return nil
 }
 
-// executeRun is the main run execution loop.
-// Called after StartRun has already transitioned the run to RUNNING.
-func (r *Runner) executeRun(ctx context.Context, runID string) {
+// executeOperation is the main operation execution loop.
+// Called after StartOperation has already transitioned the operation to RUNNING.
+func (r *Runner) executeOperation(ctx context.Context, operationID string) {
 	defer func() {
 		r.mu.Lock()
-		delete(r.activeRuns, runID)
+		delete(r.activeOperations, operationID)
 		r.mu.Unlock()
 	}()
 
 	// Panic safety: recover from any panic in execution and clean up properly
 	defer func() {
 		if rec := recover(); rec != nil {
-			r.handlePanic(runID, rec)
+			r.handlePanic(operationID, rec)
 		}
 	}()
 
-	run, ok := r.store.GetRun(runID)
+	op, ok := r.store.GetOperation(operationID)
 	if !ok {
-		log.Printf("[executor] run %s not found", runID)
+		log.Printf("[executor] operation %s not found", operationID)
 		return
 	}
 
-	machine, ok := r.store.GetMachine(run.MachineId)
+	machine, ok := r.store.GetMachine(op.MachineId)
 	if !ok {
-		log.Printf("[executor] machine %s not found for run %s", run.MachineId, runID)
-		r.failRun(runID, "machine not found")
+		log.Printf("[executor] machine %s not found for operation %s", op.MachineId, operationID)
+		r.failOperation(operationID, "machine not found")
 		return
 	}
 
 	// Get the plan
-	plan := r.getPlanForRun(run)
+	plan := r.getPlanForOperation(op)
 	if plan == nil {
-		log.Printf("[executor] no plan found for run %s", runID)
-		r.failRun(runID, "plan not found")
+		log.Printf("[executor] no plan found for operation %s", operationID)
+		r.failOperation(operationID, "plan not found")
 		return
 	}
 
-	// Run is already RUNNING (set by StartRun via TryTransitionRunPhase)
-	// Emit the start event with the current run state
-	run, _ = r.store.GetRun(runID) // refresh to get StartedAt
-	r.emitEvent(run, "Run started")
-	r.emitLog(runID, "stdout", []byte(fmt.Sprintf("=== Starting run %s (type: %s) ===\n", runID, run.Type)))
+	// Operation is already RUNNING (set by StartOperation via TryTransitionOperationPhase)
+	// Emit the start event with the current operation state
+	op, _ = r.store.GetOperation(operationID) // refresh to get StartedAt
+	r.emitEvent(op, "Operation started")
+	r.emitLog(operationID, "stdout", []byte(fmt.Sprintf("=== Starting operation %s (type: %s) ===\n", operationID, op.Type)))
 
-	// Update machine phase to PROVISIONING (lifecycle moved out of store)
-	lifecycle.SetMachinePhase(machine, pb.MachineStatus_PROVISIONING)
-	machine.Status.ActiveRunId = runID
+	// Update machine: set active operation ID
+	machine.Status.ActiveOperationId = operationID
 	r.store.UpdateMachine(machine)
 
 	// Execute steps
 	var lastErr error
-	completedJoin := false
-	completedRepave := false
-	completedVerify := false
-	isRMA := plan.PlanId == plans.PlanRMA
+	completedReimage := false
 
 	for i, step := range plan.Steps {
 		select {
 		case <-ctx.Done():
-			r.cancelRun(runID)
+			r.cancelOperation(operationID)
 			return
 		default:
 		}
 
-		r.emitLog(runID, "stdout", []byte(fmt.Sprintf("\n--- Step %d/%d: %s ---\n", i+1, len(plan.Steps), step.Name)))
+		r.emitLog(operationID, "stdout", []byte(fmt.Sprintf("\n--- Step %d/%d: %s ---\n", i+1, len(plan.Steps), step.Name)))
 
 		// Set step to WAITING then RUNNING
 		stepStatus := &pb.StepStatus{
@@ -309,12 +305,12 @@ func (r *Runner) executeRun(ctx context.Context, runID string) {
 			State:     pb.StepStatus_WAITING,
 			StartedAt: timestamppb.Now(),
 		}
-		r.store.UpdateRunStep(runID, stepStatus)
+		r.store.UpdateOperationStep(operationID, stepStatus)
 
 		stepStatus.State = pb.StepStatus_RUNNING
-		r.store.UpdateRunStep(runID, stepStatus)
-		// Emit event with fresh run state from store (includes StepStatus[])
-		r.emitEventFromStore(runID, fmt.Sprintf("Step %s started", step.Name))
+		r.store.UpdateOperationStep(operationID, stepStatus)
+		// Emit event with fresh operation state from store (includes StepStatus[])
+		r.emitEventFromStore(operationID, fmt.Sprintf("Step %s started", step.Name))
 
 		// Execute with retries
 		// MaxRetries means retries AFTER the first attempt, so total attempts = 1 + MaxRetries
@@ -328,26 +324,26 @@ func (r *Runner) executeRun(ctx context.Context, runID string) {
 		for attempt := 0; attempt < totalAttempts; attempt++ {
 			if attempt > 0 {
 				backoff := r.calculateBackoff(attempt)
-				r.emitLog(runID, "stdout", []byte(fmt.Sprintf("Retry %d/%d after %v...\n", attempt, maxRetries, backoff)))
+				r.emitLog(operationID, "stdout", []byte(fmt.Sprintf("Retry %d/%d after %v...\n", attempt, maxRetries, backoff)))
 				select {
 				case <-time.After(backoff):
 				case <-ctx.Done():
-					r.cancelRun(runID)
+					r.cancelOperation(operationID)
 					return
 				}
 			}
 
-			stepErr = r.executeStep(ctx, runID, machine, step)
+			stepErr = r.executeStep(ctx, operationID, machine, step)
 			if stepErr == nil {
 				break
 			}
 
 			if ctx.Err() != nil {
-				r.cancelRun(runID)
+				r.cancelOperation(operationID)
 				return
 			}
 
-			r.emitLog(runID, "stderr", []byte(fmt.Sprintf("Step failed: %v\n", stepErr)))
+			r.emitLog(operationID, "stderr", []byte(fmt.Sprintf("Step failed: %v\n", stepErr)))
 			stepStatus.RetryCount = int32(attempt + 1)
 		}
 
@@ -355,68 +351,64 @@ func (r *Runner) executeRun(ctx context.Context, runID string) {
 		if stepErr != nil {
 			stepStatus.State = pb.StepStatus_FAILED
 			stepStatus.Message = stepErr.Error()
-			r.store.UpdateRunStep(runID, stepStatus)
-			r.emitEventFromStore(runID, fmt.Sprintf("Step %s failed: %v", step.Name, stepErr))
+			r.store.UpdateOperationStep(operationID, stepStatus)
+			r.emitEventFromStore(operationID, fmt.Sprintf("Step %s failed: %v", step.Name, stepErr))
 			lastErr = stepErr
 			break
 		}
 
 		stepStatus.State = pb.StepStatus_SUCCEEDED
-		r.store.UpdateRunStep(runID, stepStatus)
-		r.emitEventFromStore(runID, fmt.Sprintf("Step %s succeeded", step.Name))
+		r.store.UpdateOperationStep(operationID, stepStatus)
+		r.emitEventFromStore(operationID, fmt.Sprintf("Step %s succeeded", step.Name))
 
 		// Track specific step completions
 		switch step.Kind.(type) {
 		case *pb.Step_Repave:
-			completedRepave = true
-		case *pb.Step_Join:
-			completedJoin = true
-		case *pb.Step_Verify:
-			completedVerify = true
+			completedReimage = true
 		}
 	}
 
-	// Finalize run
+	// Finalize operation
 	if lastErr != nil {
-		r.failRunWithMachine(runID, machine, lastErr.Error())
+		r.failOperationWithMachine(operationID, machine, lastErr.Error())
 	} else {
-		// Check if the plan contains a verify step
-		planHasVerify := r.planContainsVerifyStep(plan)
-		r.succeedRun(runID, machine, completedRepave, completedJoin, completedVerify, planHasVerify, isRMA)
+		r.succeedOperation(operationID, machine, completedReimage, op.Type)
 	}
 }
 
-// getPlanForRun retrieves the plan for a run.
+// getPlanForOperation retrieves the plan for an operation.
 // Priority: plan_id > type-based lookup > fallback
-func (r *Runner) getPlanForRun(run *pb.Run) *pb.Plan {
+func (r *Runner) getPlanForOperation(op *pb.Operation) *pb.Plan {
 	// First, try explicit plan_id
-	if run.PlanId != "" {
-		if plan, ok := r.plans.GetPlan(run.PlanId); ok {
+	if op.PlanId != "" {
+		if plan, ok := r.plans.GetPlan(op.PlanId); ok {
 			return plan
 		}
 	}
 
 	// Second, map type to default plan
-	switch run.Type {
-	case "REPAVE", "repave":
+	switch op.Type {
+	case "REIMAGE", "reimage":
 		if plan, ok := r.plans.GetPlan(plans.PlanRepaveJoin); ok {
-			return plan
-		}
-	case "RMA", "rma":
-		if plan, ok := r.plans.GetPlan(plans.PlanRMA); ok {
 			return plan
 		}
 	case "REBOOT", "reboot":
 		if plan, ok := r.plans.GetPlan(plans.PlanReboot); ok {
 			return plan
 		}
-	case "UPGRADE", "upgrade":
-		if plan, ok := r.plans.GetPlan(plans.PlanUpgrade); ok {
-			return plan
+	case "ENTER_MAINTENANCE", "enter_maintenance":
+		// Simple no-op plan for entering maintenance
+		return &pb.Plan{
+			PlanId:      "plan/enter-maintenance",
+			DisplayName: "Enter Maintenance",
+			Steps:       []*pb.Step{}, // No steps - just a phase transition
 		}
-	case "NET_RECONFIG", "net-reconfig":
-		if plan, ok := r.plans.GetPlan(plans.PlanNetReconfig); ok {
-			return plan
+	case "EXIT_MAINTENANCE", "exit_maintenance":
+		// Simple no-op plan for exiting maintenance
+		return &pb.Plan{
+			PlanId:      "plan/exit-maintenance",
+			DisplayName: "Exit Maintenance",
+			Steps:       []*pb.Step{}, // No steps - just a phase transition
 		}
 	}
 
@@ -426,7 +418,7 @@ func (r *Runner) getPlanForRun(run *pb.Run) *pb.Plan {
 }
 
 // executeStep executes a single step.
-func (r *Runner) executeStep(ctx context.Context, runID string, machine *pb.Machine, step *pb.Step) error {
+func (r *Runner) executeStep(ctx context.Context, operationID string, machine *pb.Machine, step *pb.Step) error {
 	timeout := time.Duration(step.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
@@ -437,16 +429,16 @@ func (r *Runner) executeStep(ctx context.Context, runID string, machine *pb.Mach
 
 	switch kind := step.Kind.(type) {
 	case *pb.Step_Ssh:
-		return r.provider.ExecuteSSHCommand(stepCtx, runID, machine, kind.Ssh.ScriptRef, kind.Ssh.Args)
+		return r.provider.ExecuteSSHCommand(stepCtx, operationID, machine, kind.Ssh.ScriptRef, kind.Ssh.Args)
 
 	case *pb.Step_Reboot:
-		return r.provider.Reboot(stepCtx, runID, machine, kind.Reboot.Force)
+		return r.provider.Reboot(stepCtx, operationID, machine, kind.Reboot.Force)
 
 	case *pb.Step_Netboot:
-		return r.provider.SetNetboot(stepCtx, runID, machine, kind.Netboot.Profile)
+		return r.provider.SetNetboot(stepCtx, operationID, machine, kind.Netboot.Profile)
 
 	case *pb.Step_Repave:
-		return r.provider.Repave(stepCtx, runID, machine, kind.Repave.ImageRef, kind.Repave.CloudInitRef)
+		return r.provider.Repave(stepCtx, operationID, machine, kind.Repave.ImageRef, kind.Repave.CloudInitRef)
 
 	case *pb.Step_Join:
 		// Mint join material and join
@@ -458,11 +450,11 @@ func (r *Runner) executeStep(ctx context.Context, runID string, machine *pb.Mach
 			targetCluster = &pb.TargetClusterRef{ClusterId: "default-cluster"}
 		}
 
-		material, err := r.provider.MintJoinMaterial(stepCtx, runID, targetCluster)
+		material, err := r.provider.MintJoinMaterial(stepCtx, operationID, targetCluster)
 		if err != nil {
 			return fmt.Errorf("mint join material: %w", err)
 		}
-		return r.provider.JoinNode(stepCtx, runID, machine, material)
+		return r.provider.JoinNode(stepCtx, operationID, machine, material)
 
 	case *pb.Step_Verify:
 		targetCluster := kind.Verify.TargetCluster
@@ -472,13 +464,13 @@ func (r *Runner) executeStep(ctx context.Context, runID string, machine *pb.Mach
 		if targetCluster == nil {
 			targetCluster = &pb.TargetClusterRef{ClusterId: "default-cluster"}
 		}
-		return r.provider.VerifyInCluster(stepCtx, runID, machine, targetCluster)
+		return r.provider.VerifyInCluster(stepCtx, operationID, machine, targetCluster)
 
 	case *pb.Step_Net:
 		// Net reconfig is a stub - just log and succeed
-		r.emitLog(runID, "stdout", []byte(fmt.Sprintf("[net-reconfig] Applying config: %v\n", kind.Net.Params)))
+		r.emitLog(operationID, "stdout", []byte(fmt.Sprintf("[net-reconfig] Applying config: %v\n", kind.Net.Params)))
 		time.Sleep(500 * time.Millisecond)
-		r.emitLog(runID, "stdout", []byte("[net-reconfig] Network reconfiguration complete\n"))
+		r.emitLog(operationID, "stdout", []byte("[net-reconfig] Network reconfiguration complete\n"))
 		return nil
 
 	case *pb.Step_Rma:
@@ -486,7 +478,7 @@ func (r *Runner) executeStep(ctx context.Context, runID string, machine *pb.Mach
 		if reason == "" {
 			reason = "no reason specified"
 		}
-		return r.provider.RMA(stepCtx, runID, machine, reason)
+		return r.provider.RMA(stepCtx, operationID, machine, reason)
 
 	default:
 		return fmt.Errorf("unknown step kind: %T", step.Kind)
@@ -502,191 +494,157 @@ func (r *Runner) calculateBackoff(attempt int) time.Duration {
 	return backoff
 }
 
-// handlePanic handles a panic during run execution, cleaning up state properly.
-func (r *Runner) handlePanic(runID string, recovered interface{}) {
+// handlePanic handles a panic during operation execution, cleaning up state properly.
+func (r *Runner) handlePanic(operationID string, recovered interface{}) {
 	panicMsg := fmt.Sprintf("panic: %v", recovered)
 	stackTrace := string(debug.Stack())
 
-	log.Printf("[executor] PANIC in run %s: %s\n%s", runID, panicMsg, stackTrace)
+	log.Printf("[executor] PANIC in operation %s: %s\n%s", operationID, panicMsg, stackTrace)
 
-	// Mark run as failed with PANIC error code
-	r.store.CompleteRun(runID, pb.Run_FAILED)
-	if run, ok := r.store.GetRun(runID); ok {
-		run.Error = &pb.ErrorStatus{
+	// Mark operation as failed with PANIC error code
+	r.store.CompleteOperation(operationID, pb.Operation_FAILED)
+	if op, ok := r.store.GetOperation(operationID); ok {
+		op.Error = &pb.ErrorStatus{
 			Code:      "PANIC",
 			Message:   panicMsg,
 			Retryable: false,
 		}
-		r.store.UpdateRun(run)
-		r.emitEvent(run, fmt.Sprintf("Run panicked: %s", panicMsg))
-		r.emitLog(runID, "stderr", []byte(fmt.Sprintf("\n=== Run PANICKED ===\n%s\n%s\n", panicMsg, stackTrace)))
+		r.store.UpdateOperation(op)
+		r.emitEvent(op, fmt.Sprintf("Operation panicked: %s", panicMsg))
+		r.emitLog(operationID, "stderr", []byte(fmt.Sprintf("\n=== Operation PANICKED ===\n%s\n%s\n", panicMsg, stackTrace)))
 	}
 
-	// Get the run to find the machine
-	run, ok := r.store.GetRun(runID)
+	// Get the operation to find the machine
+	op, ok := r.store.GetOperation(operationID)
 	if !ok {
 		return
 	}
 
 	// Update machine state: MAINTENANCE + NeedsIntervention
-	machine, ok := r.store.GetMachine(run.MachineId)
+	machine, ok := r.store.GetMachine(op.MachineId)
 	if ok {
 		lifecycle.SetMachinePhase(machine, pb.MachineStatus_MAINTENANCE)
 		lifecycle.SetCondition(machine, lifecycle.ConditionNeedsIntervention, true, "Panic", panicMsg)
-		machine.Status.ActiveRunId = ""
+		machine.Status.ActiveOperationId = ""
 		r.store.UpdateMachine(machine)
 	}
 }
 
-// failRun marks run as failed.
-func (r *Runner) failRun(runID, message string) {
-	r.store.CompleteRun(runID, pb.Run_FAILED)
-	if run, ok := r.store.GetRun(runID); ok {
-		run.Error = &pb.ErrorStatus{
+// failOperation marks operation as failed.
+func (r *Runner) failOperation(operationID, message string) {
+	r.store.CompleteOperation(operationID, pb.Operation_FAILED)
+	if op, ok := r.store.GetOperation(operationID); ok {
+		op.Error = &pb.ErrorStatus{
 			Code:      "EXECUTION_FAILED",
 			Message:   message,
 			Retryable: true,
 		}
-		r.store.UpdateRun(run)
-		r.emitEvent(run, fmt.Sprintf("Run failed: %s", message))
-		r.emitLog(runID, "stderr", []byte(fmt.Sprintf("\n=== Run FAILED: %s ===\n", message)))
+		r.store.UpdateOperation(op)
+		r.emitEvent(op, fmt.Sprintf("Operation failed: %s", message))
+		r.emitLog(operationID, "stderr", []byte(fmt.Sprintf("\n=== Operation FAILED: %s ===\n", message)))
 	}
 }
 
-// failRunWithMachine marks run as failed and updates machine state.
-func (r *Runner) failRunWithMachine(runID string, machine *pb.Machine, message string) {
-	r.failRun(runID, message)
+// failOperationWithMachine marks operation as failed and updates machine state.
+func (r *Runner) failOperationWithMachine(operationID string, machine *pb.Machine, message string) {
+	r.failOperation(operationID, message)
 
 	// Set NeedsIntervention condition - failures require investigation
-	lifecycle.SetCondition(machine, lifecycle.ConditionNeedsIntervention, true, "RunFailed", message)
-	machine.Status.ActiveRunId = ""
+	lifecycle.SetCondition(machine, lifecycle.ConditionNeedsIntervention, true, "OperationFailed", message)
+	machine.Status.ActiveOperationId = ""
 	lifecycle.SetMachinePhase(machine, pb.MachineStatus_MAINTENANCE)
 
 	// Persist the updated machine
 	r.store.UpdateMachine(machine)
 }
 
-// cancelRun is called when a run is canceled via context (internal path).
-// It marks run as canceled and updates machine state.
-func (r *Runner) cancelRun(runID string) {
-	// Get run info before canceling
-	run, ok := r.store.GetRun(runID)
+// cancelOperation is called when an operation is canceled via context (internal path).
+// It marks operation as canceled and updates machine state.
+func (r *Runner) cancelOperation(operationID string) {
+	// Get operation info before canceling
+	op, ok := r.store.GetOperation(operationID)
 	if !ok {
 		return
 	}
 
 	// Cancel in store
-	r.store.CancelRun(runID)
+	r.store.CancelOperation(operationID)
 
 	// Update machine state - use OperationCanceled (not NeedsIntervention)
 	// Cancellation is a normal operation, not a failure requiring intervention.
-	machine, ok := r.store.GetMachine(run.MachineId)
+	machine, ok := r.store.GetMachine(op.MachineId)
 	if ok {
 		lifecycle.SetMachinePhase(machine, pb.MachineStatus_MAINTENANCE)
-		lifecycle.SetCondition(machine, lifecycle.ConditionOperationCanceled, true, "Canceled", "Run was canceled")
-		machine.Status.ActiveRunId = ""
+		lifecycle.SetCondition(machine, lifecycle.ConditionOperationCanceled, true, "Canceled", "Operation was canceled")
+		machine.Status.ActiveOperationId = ""
 		r.store.UpdateMachine(machine)
 	}
 
 	// Emit events
-	if updatedRun, ok := r.store.GetRun(runID); ok {
-		r.emitEvent(updatedRun, "Run canceled")
-		r.emitLog(runID, "stdout", []byte("\n=== Run CANCELED ===\n"))
+	if updatedOp, ok := r.store.GetOperation(operationID); ok {
+		r.emitEvent(updatedOp, "Operation canceled")
+		r.emitLog(operationID, "stdout", []byte("\n=== Operation CANCELED ===\n"))
 	}
 }
 
-// planContainsVerifyStep checks if a plan has a verify step.
-func (r *Runner) planContainsVerifyStep(plan *pb.Plan) bool {
-	if plan == nil {
-		return false
-	}
-	for _, step := range plan.Steps {
-		if _, ok := step.Kind.(*pb.Step_Verify); ok {
-			return true
-		}
-	}
-	return false
-}
+// succeedOperation marks operation as succeeded and updates machine state.
+func (r *Runner) succeedOperation(operationID string, machine *pb.Machine, completedReimage bool, opType string) {
+	r.store.CompleteOperation(operationID, pb.Operation_SUCCEEDED)
 
-// succeedRun marks run as succeeded and updates machine state.
-// completedVerify indicates if a verify step succeeded.
-// planHasVerify indicates if the plan contains a verify step.
-func (r *Runner) succeedRun(runID string, machine *pb.Machine, completedRepave, completedJoin, completedVerify, planHasVerify, isRMA bool) {
-	r.store.CompleteRun(runID, pb.Run_SUCCEEDED)
+	op, _ := r.store.GetOperation(operationID)
+	r.emitEvent(op, "Operation succeeded")
+	r.emitLog(operationID, "stdout", []byte("\n=== Operation SUCCEEDED ===\n"))
 
-	run, _ := r.store.GetRun(runID)
-	r.emitEvent(run, "Run succeeded")
-	r.emitLog(runID, "stdout", []byte("\n=== Run SUCCEEDED ===\n"))
-
-	// Clear active run
-	machine.Status.ActiveRunId = ""
+	// Clear active operation
+	machine.Status.ActiveOperationId = ""
 
 	// Clear any intervention/canceled conditions on success
-	lifecycle.SetCondition(machine, lifecycle.ConditionNeedsIntervention, false, "RunSucceeded", "")
-	lifecycle.SetCondition(machine, lifecycle.ConditionOperationCanceled, false, "RunSucceeded", "")
+	lifecycle.SetCondition(machine, lifecycle.ConditionNeedsIntervention, false, "OperationSucceeded", "")
+	lifecycle.SetCondition(machine, lifecycle.ConditionOperationCanceled, false, "OperationSucceeded", "")
 
-	// Update machine phase based on what completed
-	if isRMA {
-		lifecycle.SetMachinePhase(machine, pb.MachineStatus_RMA)
-		r.store.UpdateMachine(machine)
-		return
-	}
-
-	if completedRepave {
-		lifecycle.SetCondition(machine, lifecycle.ConditionProvisioned, true, "RepaveComplete", "Machine successfully reprovisioned")
+	// Update machine phase based on operation type
+	switch opType {
+	case "ENTER_MAINTENANCE", "enter_maintenance":
+		lifecycle.SetMachinePhase(machine, pb.MachineStatus_MAINTENANCE)
+	case "EXIT_MAINTENANCE", "exit_maintenance":
 		lifecycle.SetMachinePhase(machine, pb.MachineStatus_READY)
-	}
-
-	// Only set InCustomerCluster if:
-	// - Plan has verify step AND verify succeeded, OR
-	// - Plan has no verify step AND join succeeded
-	if completedJoin {
-		shouldSetInCluster := false
-		if planHasVerify {
-			// Plan has verify - require verify success
-			if completedVerify {
-				shouldSetInCluster = true
-			}
-		} else {
-			// Plan has no verify - join success is enough
-			shouldSetInCluster = true
-		}
-
-		if shouldSetInCluster {
+	case "REIMAGE", "reimage":
+		if completedReimage {
+			lifecycle.SetCondition(machine, lifecycle.ConditionProvisioned, true, "ReimageComplete", "Machine successfully reimaged")
 			lifecycle.SetCondition(machine, lifecycle.ConditionInCustomerCluster, true, "JoinVerified", "Node joined and verified in cluster")
-			lifecycle.SetMachinePhase(machine, pb.MachineStatus_IN_SERVICE)
 		}
-	}
-
-	// If neither repave nor join, just set to READY
-	if !completedRepave && !completedJoin && !isRMA {
-		lifecycle.SetMachinePhase(machine, pb.MachineStatus_READY)
+		// Stay in MAINTENANCE after reimage - operator must explicitly exit maintenance
+		lifecycle.SetMachinePhase(machine, pb.MachineStatus_MAINTENANCE)
+	case "REBOOT", "reboot":
+		// Keep current phase - reboot doesn't change phase
+	default:
+		// Default: keep current phase
 	}
 
 	// Persist the updated machine
 	r.store.UpdateMachine(machine)
 }
 
-// IsRunning returns true if the runner has an active run.
-func (r *Runner) IsRunning(runID string) bool {
+// IsRunning returns true if the runner has an active operation.
+func (r *Runner) IsRunning(operationID string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	_, ok := r.activeRuns[runID]
+	_, ok := r.activeOperations[operationID]
 	return ok
 }
 
-// ActiveRunCount returns the number of active runs.
-func (r *Runner) ActiveRunCount() int {
+// ActiveOperationCount returns the number of active operations.
+func (r *Runner) ActiveOperationCount() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return len(r.activeRuns)
+	return len(r.activeOperations)
 }
 
-// Shutdown cancels all active runs.
+// Shutdown cancels all active operations.
 func (r *Runner) Shutdown() {
 	r.mu.Lock()
-	for runID, cancel := range r.activeRuns {
-		log.Printf("[executor] canceling run %s on shutdown", runID)
+	for opID, cancel := range r.activeOperations {
+		log.Printf("[executor] canceling operation %s on shutdown", opID)
 		cancel()
 	}
 	r.mu.Unlock()

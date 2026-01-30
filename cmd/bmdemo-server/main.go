@@ -74,25 +74,26 @@ func main() {
 	// Create gRPC server
 	grpcServer := grpc.NewServer()
 
-	// Register services
-	machineService := &machineServer{store: s, logger: logger.With("service", "machine")}
-	planService := &planServer{plans: pl, logger: logger.With("service", "plan")}
-
-	// Create a context for run execution that's canceled on server shutdown.
+	// Create a context for operation execution that's canceled on server shutdown.
 	// This is separate from RPC request contexts which are short-lived.
-	runCtx, runCancel := context.WithCancel(context.Background())
+	opCtx, opCancel := context.WithCancel(context.Background())
 
-	runService := &runServer{
+	// Register services
+	machineService := &machineServer{
 		store:  s,
 		runner: runner,
 		plans:  pl,
-		logger: logger.With("service", "run"),
-		runCtx: runCtx,
+		logger: logger.With("service", "machine"),
+		opCtx:  opCtx,
+	}
+	operationService := &operationServer{
+		store:  s,
+		runner: runner,
+		logger: logger.With("service", "operation"),
 	}
 
 	pb.RegisterMachineServiceServer(grpcServer, machineService)
-	pb.RegisterPlanServiceServer(grpcServer, planService)
-	pb.RegisterRunServiceServer(grpcServer, runService)
+	pb.RegisterOperationServiceServer(grpcServer, operationService)
 
 	// Enable reflection for grpcurl
 	reflection.Register(grpcServer)
@@ -111,7 +112,7 @@ func main() {
 	go func() {
 		<-ctx.Done()
 		slog.Info("shutting down server")
-		runCancel() // Cancel the run execution context
+		opCancel() // Cancel the operation execution context
 		runner.Shutdown()
 		grpcServer.GracefulStop()
 	}()
@@ -130,7 +131,10 @@ func main() {
 type machineServer struct {
 	pb.UnimplementedMachineServiceServer
 	store  *store.Store
+	runner *executor.Runner
+	plans  *plans.Registry
 	logger *slog.Logger
+	opCtx  context.Context // Long-lived context for operation execution
 }
 
 func (s *machineServer) RegisterMachine(ctx context.Context, req *pb.RegisterMachineRequest) (*pb.Machine, error) {
@@ -194,201 +198,227 @@ func (s *machineServer) UpdateMachine(ctx context.Context, req *pb.UpdateMachine
 	return m, nil
 }
 
-// ============================================================================
-// PlanService
-// ============================================================================
-
-type planServer struct {
-	pb.UnimplementedPlanServiceServer
-	plans  *plans.Registry
-	logger *slog.Logger
-}
-
-func (s *planServer) GetPlan(ctx context.Context, req *pb.GetPlanRequest) (*pb.Plan, error) {
-	plan, ok := s.plans.GetPlan(req.PlanId)
-	if !ok {
-		return nil, status.Errorf(codes.NotFound, "plan %q not found", req.PlanId)
+// RebootMachine starts a reboot operation on a machine.
+// Can be called on machines in READY or MAINTENANCE phase.
+func (s *machineServer) RebootMachine(ctx context.Context, req *pb.RebootMachineRequest) (*pb.Operation, error) {
+	if req.MachineId == "" {
+		return nil, status.Error(codes.InvalidArgument, "machine_id is required")
 	}
-	return plan, nil
-}
-
-func (s *planServer) ListPlans(ctx context.Context, req *pb.ListPlansRequest) (*pb.ListPlansResponse, error) {
-	planList := s.plans.ListPlans()
-	return &pb.ListPlansResponse{Plans: planList}, nil
-}
-
-// ============================================================================
-// RunService
-// ============================================================================
-
-type runServer struct {
-	pb.UnimplementedRunServiceServer
-	store  *store.Store
-	runner *executor.Runner
-	plans  *plans.Registry
-	logger *slog.Logger
-	runCtx context.Context // Long-lived context for run execution (not tied to RPC)
-}
-
-func (s *runServer) StartRun(ctx context.Context, req *pb.StartRunRequest) (*pb.Run, error) {
-	// Validate request_id for idempotency (must be first)
 	if req.RequestId == "" {
 		return nil, status.Error(codes.InvalidArgument, "request_id is required for idempotency")
 	}
 
-	// Determine run type and plan_id
-	runType := req.Type
-	planID := req.PlanId
-
-	// Validate we have something to execute
-	if runType == "" && planID == "" {
-		return nil, status.Error(codes.InvalidArgument, "type or plan_id is required")
+	machine, ok := s.store.GetMachine(req.MachineId)
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "machine %q not found", req.MachineId)
 	}
 
-	// If plan_id not provided, resolve default plan from type
-	if planID == "" && runType != "" {
-		planID = s.defaultPlanForType(runType)
+	// Reboot allowed in READY or MAINTENANCE
+	phase := machine.Status.GetPhase()
+	if phase != pb.MachineStatus_READY && phase != pb.MachineStatus_MAINTENANCE {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"machine %q is in phase %s; reboot requires READY or MAINTENANCE", req.MachineId, phase)
 	}
 
-	// Validate plan exists if plan_id provided
-	if planID != "" {
-		if _, ok := s.plans.GetPlan(planID); !ok {
-			return nil, status.Errorf(codes.NotFound, "plan %q not found", planID)
+	return s.startOperation(req.MachineId, req.RequestId, "REBOOT", plans.PlanReboot)
+}
+
+// ReimageMachine starts a reimage operation on a machine.
+// Requires the machine to be in MAINTENANCE phase (safety gate).
+func (s *machineServer) ReimageMachine(ctx context.Context, req *pb.ReimageMachineRequest) (*pb.Operation, error) {
+	if req.MachineId == "" {
+		return nil, status.Error(codes.InvalidArgument, "machine_id is required")
+	}
+	if req.RequestId == "" {
+		return nil, status.Error(codes.InvalidArgument, "request_id is required for idempotency")
+	}
+
+	machine, ok := s.store.GetMachine(req.MachineId)
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "machine %q not found", req.MachineId)
+	}
+
+	// Reimage REQUIRES MAINTENANCE phase (safety gate per design decision D)
+	if machine.Status.GetPhase() != pb.MachineStatus_MAINTENANCE {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"machine %q is in phase %s; reimage requires MAINTENANCE", req.MachineId, machine.Status.GetPhase())
+	}
+
+	// Use default reimage plan (server-side plan selection per decision E)
+	return s.startOperation(req.MachineId, req.RequestId, "REIMAGE", plans.PlanRepaveJoin)
+}
+
+// EnterMaintenance transitions a machine to MAINTENANCE phase.
+func (s *machineServer) EnterMaintenance(ctx context.Context, req *pb.EnterMaintenanceRequest) (*pb.Operation, error) {
+	if req.MachineId == "" {
+		return nil, status.Error(codes.InvalidArgument, "machine_id is required")
+	}
+	if req.RequestId == "" {
+		return nil, status.Error(codes.InvalidArgument, "request_id is required for idempotency")
+	}
+
+	_, ok := s.store.GetMachine(req.MachineId)
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "machine %q not found", req.MachineId)
+	}
+
+	return s.startOperation(req.MachineId, req.RequestId, "ENTER_MAINTENANCE", "")
+}
+
+// ExitMaintenance transitions a machine out of MAINTENANCE phase to READY.
+func (s *machineServer) ExitMaintenance(ctx context.Context, req *pb.ExitMaintenanceRequest) (*pb.Operation, error) {
+	if req.MachineId == "" {
+		return nil, status.Error(codes.InvalidArgument, "machine_id is required")
+	}
+	if req.RequestId == "" {
+		return nil, status.Error(codes.InvalidArgument, "request_id is required for idempotency")
+	}
+
+	machine, ok := s.store.GetMachine(req.MachineId)
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "machine %q not found", req.MachineId)
+	}
+
+	// ExitMaintenance only makes sense if in MAINTENANCE
+	if machine.Status.GetPhase() != pb.MachineStatus_MAINTENANCE {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"machine %q is in phase %s; exit-maintenance requires MAINTENANCE", req.MachineId, machine.Status.GetPhase())
+	}
+
+	return s.startOperation(req.MachineId, req.RequestId, "EXIT_MAINTENANCE", "")
+}
+
+// CancelOperation cancels an in-progress operation.
+func (s *machineServer) CancelOperation(ctx context.Context, req *pb.CancelOperationRequest) (*pb.Operation, error) {
+	if req.OperationId == "" {
+		return nil, status.Error(codes.InvalidArgument, "operation_id is required")
+	}
+
+	if err := s.runner.CancelOperation(req.OperationId); err != nil {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "not found") {
+			return nil, status.Errorf(codes.NotFound, "operation %q not found", req.OperationId)
 		}
+		if strings.Contains(errMsg, "already finished") {
+			return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+		}
+		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
 
-	// Create run (idempotent) - this handles:
-	// - Returning existing run for same (machine_id, request_id)
-	// - Rejecting if machine has a different active run
-	// - Creating new run if no conflicts
-	run, created, err := s.store.CreateRunIfNotExists(req.RequestId, req.MachineId, runType, planID)
+	op, ok := s.store.GetOperation(req.OperationId)
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "operation %q not found", req.OperationId)
+	}
+
+	s.logger.Info("cancelled operation", "operation_id", req.OperationId, "phase", op.Phase)
+	return op, nil
+}
+
+// startOperation is the shared helper that creates and starts an operation.
+// Enforces idempotency scoped by (machine_id, request_id) and single active operation per machine.
+func (s *machineServer) startOperation(machineID, requestID, opType, planID string) (*pb.Operation, error) {
+	// Create operation (idempotent) - this handles:
+	// - Returning existing operation for same (machine_id, request_id)
+	// - Rejecting if machine has a different active operation
+	// - Creating new operation if no conflicts
+	op, created, err := s.store.CreateOperationIfNotExists(requestID, machineID, opType, planID)
 	if err != nil {
 		// Map sentinel errors to gRPC codes
 		if errors.Is(err, store.ErrMachineNotFound) {
 			return nil, status.Errorf(codes.NotFound, "%v", err)
 		}
-		if errors.Is(err, store.ErrMachineHasActiveRun) {
+		if errors.Is(err, store.ErrMachineHasActiveOperation) {
 			return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
 		}
-		s.logger.Error("failed to create run",
-			"machine_id", req.MachineId,
-			"request_id", req.RequestId,
+		s.logger.Error("failed to create operation",
+			"machine_id", machineID,
+			"request_id", requestID,
 			"error", err)
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
 
 	if created {
-		s.logger.Info("created run",
-			"run_id", run.RunId,
-			"machine_id", req.MachineId,
-			"type", runType,
+		s.logger.Info("created operation",
+			"operation_id", op.OperationId,
+			"machine_id", machineID,
+			"type", opType,
 			"plan_id", planID,
-			"request_id", req.RequestId)
+			"request_id", requestID)
 
-		// Start execution asynchronously using the long-lived runCtx
-		// (not the RPC request ctx which is canceled when StartRun returns)
-		if err := s.runner.StartRun(s.runCtx, run.RunId); err != nil {
-			s.logger.Error("failed to start run execution",
-				"run_id", run.RunId,
+		// Start execution asynchronously using the long-lived opCtx
+		// (not the RPC request ctx which is canceled when the RPC returns)
+		if err := s.runner.StartOperation(s.opCtx, op.OperationId); err != nil {
+			s.logger.Error("failed to start operation execution",
+				"operation_id", op.OperationId,
 				"error", err)
-			// Run is created but failed to start - it will stay PENDING
+			// Operation is created but failed to start - it will stay PENDING
 		}
 	} else {
-		s.logger.Debug("idempotent run request",
-			"run_id", run.RunId,
-			"request_id", req.RequestId)
+		s.logger.Debug("idempotent operation request",
+			"operation_id", op.OperationId,
+			"request_id", requestID)
 
-		// If run is still PENDING, try to start it (retry scenario)
-		if run.Phase == pb.Run_PENDING {
-			s.logger.Info("retrying pending run",
-				"run_id", run.RunId,
-				"request_id", req.RequestId)
-			if err := s.runner.StartRun(s.runCtx, run.RunId); err != nil {
-				s.logger.Error("failed to retry run execution",
-					"run_id", run.RunId,
+		// If operation is still PENDING, try to start it (retry scenario)
+		if op.Phase == pb.Operation_PENDING {
+			s.logger.Info("retrying pending operation",
+				"operation_id", op.OperationId,
+				"request_id", requestID)
+			if err := s.runner.StartOperation(s.opCtx, op.OperationId); err != nil {
+				s.logger.Error("failed to retry operation execution",
+					"operation_id", op.OperationId,
 					"error", err)
 			}
 		}
 	}
 
-	return run, nil
+	return op, nil
 }
 
-func (s *runServer) GetRun(ctx context.Context, req *pb.GetRunRequest) (*pb.Run, error) {
-	run, ok := s.store.GetRun(req.RunId)
+// ============================================================================
+// OperationService
+// ============================================================================
+
+type operationServer struct {
+	pb.UnimplementedOperationServiceServer
+	store  *store.Store
+	runner *executor.Runner
+	logger *slog.Logger
+}
+
+func (s *operationServer) GetOperation(ctx context.Context, req *pb.GetOperationRequest) (*pb.Operation, error) {
+	op, ok := s.store.GetOperation(req.OperationId)
 	if !ok {
-		return nil, status.Errorf(codes.NotFound, "run %q not found", req.RunId)
+		return nil, status.Errorf(codes.NotFound, "operation %q not found", req.OperationId)
 	}
-	return run, nil
+	return op, nil
 }
 
-func (s *runServer) ListRuns(ctx context.Context, req *pb.ListRunsRequest) (*pb.ListRunsResponse, error) {
-	runs := s.store.ListRuns()
+func (s *operationServer) ListOperations(ctx context.Context, req *pb.ListOperationsRequest) (*pb.ListOperationsResponse, error) {
+	ops := s.store.ListOperations()
 
 	// Apply filter if provided (simple machine_id filter)
 	if req.Filter != "" {
-		// Simple filter: "machine_id=xxx"
-		var filtered []*pb.Run
-		for _, r := range runs {
+		var filtered []*pb.Operation
+		for _, op := range ops {
 			// Basic filter matching
-			if req.Filter == fmt.Sprintf("machine_id=%s", r.MachineId) {
-				filtered = append(filtered, r)
+			if req.Filter == fmt.Sprintf("machine_id=%s", op.MachineId) {
+				filtered = append(filtered, op)
 			}
 		}
-		runs = filtered
+		ops = filtered
 	}
 
-	return &pb.ListRunsResponse{Runs: runs}, nil
+	return &pb.ListOperationsResponse{Operations: ops}, nil
 }
 
-func (s *runServer) CancelRun(ctx context.Context, req *pb.CancelRunRequest) (*pb.Run, error) {
-	// Cancel via runner (handles store update, machine state, and active execution)
-	if err := s.runner.CancelRun(req.RunId); err != nil {
-		errMsg := err.Error()
-		if contains(errMsg, "not found") {
-			return nil, status.Errorf(codes.NotFound, "run %q not found", req.RunId)
-		}
-		if contains(errMsg, "already finished") {
-			return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
-		}
-		return nil, status.Errorf(codes.Internal, "%v", err)
-	}
-
-	run, ok := s.store.GetRun(req.RunId)
-	if !ok {
-		return nil, status.Errorf(codes.NotFound, "run %q not found", req.RunId)
-	}
-
-	s.logger.Info("cancelled run", "run_id", req.RunId, "phase", run.Phase)
-	return run, nil
-}
-
-// defaultPlanForType returns the default plan_id for a given run type.
-func (s *runServer) defaultPlanForType(runType string) string {
-	switch runType {
-	case "REPAVE", "repave":
-		return plans.PlanRepaveJoin
-	case "RMA", "rma":
-		return plans.PlanRMA
-	case "REBOOT", "reboot":
-		return plans.PlanReboot
-	case "UPGRADE", "upgrade":
-		return plans.PlanUpgrade
-	case "NET_RECONFIG", "net-reconfig":
-		return plans.PlanNetReconfig
-	default:
-		return plans.PlanReboot // fallback
-	}
-}
-
-func (s *runServer) WatchRuns(req *pb.WatchRunsRequest, stream pb.RunService_WatchRunsServer) error {
-	s.logger.Debug("watch runs started", "filter", req.Filter)
+func (s *operationServer) WatchOperations(req *pb.WatchOperationsRequest, stream pb.OperationService_WatchOperationsServer) error {
+	s.logger.Debug("watch operations started", "filter", req.Filter)
 
 	// Create event channel
-	eventCh := make(chan *pb.RunEvent, 100)
+	eventCh := make(chan *pb.OperationEvent, 100)
 
 	// Subscribe to events
-	unsubscribe := s.runner.SubscribeEvents(func(event *pb.RunEvent) {
+	unsubscribe := s.runner.SubscribeEvents(func(event *pb.OperationEvent) {
 		// Apply filter if provided
 		if req.Filter != "" {
 			// Simple filter: "machine_id=xxx"
@@ -414,29 +444,29 @@ func (s *runServer) WatchRuns(req *pb.WatchRunsRequest, stream pb.RunService_Wat
 		select {
 		case event := <-eventCh:
 			if err := stream.Send(event); err != nil {
-				s.logger.Debug("watch runs stream error", "error", err)
+				s.logger.Debug("watch operations stream error", "error", err)
 				return err
 			}
 		case <-stream.Context().Done():
-			s.logger.Debug("watch runs client disconnected")
+			s.logger.Debug("watch operations client disconnected")
 			return nil
 		}
 	}
 }
 
-func (s *runServer) StreamRunLogs(req *pb.StreamRunLogsRequest, stream pb.RunService_StreamRunLogsServer) error {
-	s.logger.Debug("stream logs started", "run_id", req.RunId)
+func (s *operationServer) StreamOperationLogs(req *pb.StreamOperationLogsRequest, stream pb.OperationService_StreamOperationLogsServer) error {
+	s.logger.Debug("stream logs started", "operation_id", req.OperationId)
 
-	// Verify run exists
-	if _, ok := s.store.GetRun(req.RunId); !ok {
-		return status.Errorf(codes.NotFound, "run %q not found", req.RunId)
+	// Verify operation exists
+	if _, ok := s.store.GetOperation(req.OperationId); !ok {
+		return status.Errorf(codes.NotFound, "operation %q not found", req.OperationId)
 	}
 
 	// Create log channel
 	logCh := make(chan *pb.LogChunk, 100)
 
-	// Subscribe to logs for this run
-	unsubscribe := s.runner.SubscribeLogs(req.RunId, func(chunk *pb.LogChunk) {
+	// Subscribe to logs for this operation
+	unsubscribe := s.runner.SubscribeLogs(req.OperationId, func(chunk *pb.LogChunk) {
 		select {
 		case logCh <- chunk:
 		default:
@@ -450,17 +480,12 @@ func (s *runServer) StreamRunLogs(req *pb.StreamRunLogsRequest, stream pb.RunSer
 		select {
 		case chunk := <-logCh:
 			if err := stream.Send(chunk); err != nil {
-				s.logger.Debug("log stream error", "run_id", req.RunId, "error", err)
+				s.logger.Debug("log stream error", "operation_id", req.OperationId, "error", err)
 				return err
 			}
 		case <-stream.Context().Done():
-			s.logger.Debug("log stream client disconnected", "run_id", req.RunId)
+			s.logger.Debug("log stream client disconnected", "operation_id", req.OperationId)
 			return nil
 		}
 	}
-}
-
-// contains checks if s contains substr (helper for error matching).
-func contains(s, substr string) bool {
-	return strings.Contains(s, substr)
 }

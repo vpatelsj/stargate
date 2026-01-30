@@ -4,29 +4,39 @@ package baremetal.v1;
 option go_package = "github.com/vpatelsj/stargate/gen/baremetal/v1;baremetalv1";
 
 import "google/protobuf/timestamp.proto";
-import "google/protobuf/empty.proto";
 
+// ============================================================================
+// Public Services
+// ============================================================================
+
+// MachineService provides high-level operations on baremetal machines.
+// Customers use this to manage machine lifecycle: reboot, reimage, enter/exit maintenance.
 service MachineService {
   rpc RegisterMachine(RegisterMachineRequest) returns (Machine);
   rpc GetMachine(GetMachineRequest) returns (Machine);
   rpc ListMachines(ListMachinesRequest) returns (ListMachinesResponse);
   rpc UpdateMachine(UpdateMachineRequest) returns (Machine);
+
+  // Lifecycle operations - each returns an Operation for tracking
+  rpc RebootMachine(RebootMachineRequest) returns (Operation);
+  rpc ReimageMachine(ReimageMachineRequest) returns (Operation);
+  rpc EnterMaintenance(EnterMaintenanceRequest) returns (Operation);
+  rpc ExitMaintenance(ExitMaintenanceRequest) returns (Operation);
+  rpc CancelOperation(CancelOperationRequest) returns (Operation);
 }
 
-service PlanService {
-  rpc GetPlan(GetPlanRequest) returns (Plan);
-  rpc ListPlans(ListPlansRequest) returns (ListPlansResponse);
+// OperationService provides read-only access to operations and streaming.
+// Customers track operation progress via Get/List/Watch/StreamLogs.
+service OperationService {
+  rpc GetOperation(GetOperationRequest) returns (Operation);
+  rpc ListOperations(ListOperationsRequest) returns (ListOperationsResponse);
+  rpc WatchOperations(WatchOperationsRequest) returns (stream OperationEvent);
+  rpc StreamOperationLogs(StreamOperationLogsRequest) returns (stream LogChunk);
 }
 
-service RunService {
-  rpc StartRun(StartRunRequest) returns (Run);
-  rpc GetRun(GetRunRequest) returns (Run);
-  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
-  rpc CancelRun(CancelRunRequest) returns (Run);
-
-  rpc WatchRuns(WatchRunsRequest) returns (stream RunEvent);
-  rpc StreamRunLogs(StreamRunLogsRequest) returns (stream LogChunk);
-}
+// ============================================================================
+// Core Messages
+// ============================================================================
 
 message Machine {
   string machine_id = 1;
@@ -46,7 +56,7 @@ message MachineSpec {
   string bmc_address = 11;            // optional
   string rack = 12;                   // optional
 
-  // Optional: where this machine should join after repave
+  // Optional: where this machine should join after reimage
   TargetClusterRef target_cluster = 20;
 }
 
@@ -56,30 +66,102 @@ message TargetClusterRef {
 }
 
 message MachineStatus {
+  // Phase represents the machine's current lifecycle phase.
+  // Customers use this to understand permission intent.
   enum Phase {
     PHASE_UNSPECIFIED = 0;
-    FACTORY_READY = 1;
-    READY = 2;
-    PROVISIONING = 3;
-    IN_SERVICE = 4;
-    MAINTENANCE = 5;
-    RMA = 6;
-    RETIRED = 7;
+    FACTORY_READY = 1;    // Machine received, not yet provisioned
+    READY = 2;            // Machine provisioned and healthy
+    MAINTENANCE = 3;      // Machine in maintenance mode (required for reimage)
   }
   Phase phase = 1;
 
   repeated Condition conditions = 2;
-  string active_run_id = 3;
+  string active_operation_id = 3;     // Currently running operation (empty if idle)
   google.protobuf.Timestamp last_seen = 4;
 }
 
 message Condition {
-  string type = 1; // Reachable, InCustomerCluster, NeedsIntervention, ...
+  string type = 1; // Reachable, InCustomerCluster, NeedsIntervention, Provisioned, OperationCanceled, etc.
   bool status = 2;
   string reason = 3;
   string message = 4;
   google.protobuf.Timestamp last_transition_time = 5;
 }
+
+// Operation represents an async lifecycle operation on a machine.
+// Customers track progress via phase, current_stage, and optionally steps (informational).
+message Operation {
+  string operation_id = 1;
+  string machine_id = 2;
+  string request_id = 3;     // Idempotency key
+
+  // Type of operation: REBOOT, REIMAGE, ENTER_MAINTENANCE, EXIT_MAINTENANCE
+  string type = 4;
+
+  enum Phase {
+    PHASE_UNSPECIFIED = 0;
+    PENDING = 1;
+    RUNNING = 2;
+    SUCCEEDED = 3;
+    FAILED = 4;
+    CANCELED = 5;
+  }
+  Phase phase = 5;
+
+  string current_stage = 6;  // Current step name for progress display
+
+  // Internal plan_id - not exposed to customers in requests
+  string plan_id = 7;
+
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp started_at = 11;
+  google.protobuf.Timestamp finished_at = 12;
+
+  // Step statuses - informational, customers don't need to reason about these
+  repeated StepStatus steps = 20;
+  ErrorStatus error = 21;
+}
+
+message StepStatus {
+  string name = 1;
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    WAITING = 1;
+    RUNNING = 2;
+    SUCCEEDED = 3;
+    FAILED = 4;
+  }
+  State state = 2;
+  int32 retry_count = 3;
+  google.protobuf.Timestamp started_at = 4;
+  google.protobuf.Timestamp finished_at = 5;
+  string message = 6;
+}
+
+message ErrorStatus {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+  map<string,string> details = 4;
+}
+
+message OperationEvent {
+  google.protobuf.Timestamp ts = 1;
+  Operation snapshot = 2;
+  string message = 3;
+}
+
+message LogChunk {
+  google.protobuf.Timestamp ts = 1;
+  string operation_id = 2;
+  string stream = 3; // stdout|stderr
+  bytes data = 4;
+}
+
+// ============================================================================
+// Internal Plan/Step Types (kept for workflow engine, not exposed to customers)
+// ============================================================================
 
 message Plan {
   string plan_id = 1;
@@ -114,79 +196,47 @@ message KubeadmJoin { TargetClusterRef target_cluster = 1; }
 message VerifyInCluster { TargetClusterRef target_cluster = 1; }
 message NetReconfig { map<string,string> params = 1; }
 
-message Run {
-  string run_id = 1;
-  string machine_id = 2;
+// ============================================================================
+// Request/Response Messages
+// ============================================================================
 
-  enum Phase { RUN_PHASE_UNSPECIFIED=0; PENDING=1; RUNNING=2; SUCCEEDED=3; FAILED=4; CANCELED=5; }
-  Phase phase = 3;
-
-  string request_id = 4;     // idempotency key
-  string type = 5;           // "REPAVE", "UPGRADE", "RMA", ...
-  string plan_id = 6;        // which plan is being executed (e.g., "plan/repave-join")
-
-  google.protobuf.Timestamp created_at = 10;
-  google.protobuf.Timestamp started_at = 11;
-  google.protobuf.Timestamp finished_at = 12;
-
-  string current_step = 20;
-  repeated StepStatus steps = 21;
-  ErrorStatus error = 22;
-}
-
-message StepStatus {
-  string name = 1;
-  enum State { STATE_UNSPECIFIED=0; WAITING=1; RUNNING=2; SUCCEEDED=3; FAILED=4; }
-  State state = 2;
-  int32 retry_count = 3;
-  google.protobuf.Timestamp started_at = 4;
-  google.protobuf.Timestamp finished_at = 5;
-  string message = 6;
-}
-
-message ErrorStatus {
-  string code = 1;
-  string message = 2;
-  bool retryable = 3;
-  map<string,string> details = 4;
-}
-
-message RunEvent {
-  google.protobuf.Timestamp ts = 1;
-  Run snapshot = 2;
-  string message = 3;
-}
-
-message LogChunk {
-  google.protobuf.Timestamp ts = 1;
-  string run_id = 2;
-  string stream = 3; // stdout|stderr
-  bytes data = 4;
-}
-
-/*** Requests ***/
+// Machine CRUD
 message RegisterMachineRequest { Machine machine = 1; }
 message GetMachineRequest { string machine_id = 1; }
 message ListMachinesRequest { int32 page_size = 1; string page_token = 2; string filter = 3; }
 message ListMachinesResponse { repeated Machine machines = 1; string next_page_token = 2; }
 message UpdateMachineRequest { Machine machine = 1; }
 
-message GetPlanRequest { string plan_id = 1; }
-message ListPlansRequest { int32 page_size = 1; string page_token = 2; }
-message ListPlansResponse { repeated Plan plans = 1; string next_page_token = 2; }
-
-message StartRunRequest {
+// Machine lifecycle operations
+message RebootMachineRequest {
   string machine_id = 1;
-  string request_id = 2;  // required for idempotency
-
-  string type = 3;        // REPAVE/UPGRADE/NET_RECONFIG/RMA/REBOOT
-  string plan_id = 10;    // which plan to execute (e.g., "plan/repave-join")
-  map<string,string> params = 12;
+  string request_id = 2;  // Required for idempotency
+  bool force = 3;         // Force reboot (no graceful shutdown)
 }
-message GetRunRequest { string run_id = 1; }
-message ListRunsRequest { int32 page_size=1; string page_token=2; string filter=3; }
-message ListRunsResponse { repeated Run runs=1; string next_page_token=2; }
-message CancelRunRequest { string run_id=1; }
 
-message WatchRunsRequest { string filter = 1; }
-message StreamRunLogsRequest { string run_id = 1; }
+message ReimageMachineRequest {
+  string machine_id = 1;
+  string request_id = 2;  // Required for idempotency
+  string image_ref = 3;   // Optional: image to use (e.g., "ubuntu-2204"). Server picks default if empty.
+}
+
+message EnterMaintenanceRequest {
+  string machine_id = 1;
+  string request_id = 2;  // Required for idempotency
+}
+
+message ExitMaintenanceRequest {
+  string machine_id = 1;
+  string request_id = 2;  // Required for idempotency
+}
+
+message CancelOperationRequest {
+  string operation_id = 1;
+}
+
+// Operation service requests
+message GetOperationRequest { string operation_id = 1; }
+message ListOperationsRequest { int32 page_size = 1; string page_token = 2; string filter = 3; }
+message ListOperationsResponse { repeated Operation operations = 1; string next_page_token = 2; }
+message WatchOperationsRequest { string filter = 1; }
+message StreamOperationLogsRequest { string operation_id = 1; }

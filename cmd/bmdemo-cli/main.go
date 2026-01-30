@@ -49,20 +49,20 @@ func main() {
 		importMachines(conn, args)
 	case "list":
 		listMachines(conn)
-	case "repave":
-		runAndWatch(conn, args, "REPAVE", "plan/repave-join")
-	case "rma":
-		runAndWatch(conn, args, "RMA", "plan/rma")
 	case "reboot":
-		runAndWatch(conn, args, "REBOOT", "plan/reboot")
-	case "runs":
-		listRuns(conn)
+		rebootMachine(conn, args)
+	case "reimage":
+		reimageMachine(conn, args)
+	case "enter-maintenance":
+		enterMaintenance(conn, args)
+	case "exit-maintenance":
+		exitMaintenance(conn, args)
 	case "cancel":
-		cancelRun(conn, args)
-	case "plans":
-		listPlans(conn)
+		cancelOperation(conn, args)
+	case "ops":
+		listOperations(conn)
 	case "watch":
-		watchRuns(conn, args)
+		watchOperations(conn, args)
 	case "logs":
 		streamLogs(conn, args)
 	case "demo":
@@ -80,17 +80,17 @@ func printUsage() {
 Usage: bmdemo-cli [flags] <command> [args]
 
 Commands:
-  import <N>              Import N fake machines (factory-ready, provider=fake)
-  list                    List machines with phase, effective state, conditions
-  repave <machine-id>     Start repave run (plan/repave-join) and watch
-  rma <machine-id>        Start RMA run (plan/rma) and watch
-  reboot <machine-id>     Start reboot run (plan/reboot) and watch
-  cancel <run-id>         Cancel a run in progress
-  runs                    List all runs
-  plans                   List available plans
-  watch [machine-id]      Watch run events (streaming)
-  logs <run-id>           Stream run logs
-  demo                    Run scripted demo for design docs
+  import <N>                  Import N fake machines (factory-ready, provider=fake)
+  list                        List machines with phase and conditions
+  reboot <machine-id>         Reboot a machine (requires READY or MAINTENANCE)
+  reimage <machine-id>        Reimage a machine (requires MAINTENANCE)
+  enter-maintenance <machine-id>  Enter maintenance mode
+  exit-maintenance <machine-id>   Exit maintenance mode
+  cancel <operation-id>       Cancel an operation in progress
+  ops                         List all operations
+  watch [machine-id]          Watch operation events (streaming)
+  logs <operation-id>         Stream operation logs
+  demo                        Run scripted demo for design docs
 
 Flags:`)
 	flag.PrintDefaults()
@@ -152,7 +152,7 @@ func importMachines(conn *grpc.ClientConn, args []string) {
 }
 
 // ============================================================================
-// list - List machines with effective state
+// list - List machines with phase and conditions
 // ============================================================================
 
 func listMachines(conn *grpc.ClientConn) {
@@ -160,7 +160,6 @@ func listMachines(conn *grpc.ClientConn) {
 	defer cancel()
 
 	machineClient := pb.NewMachineServiceClient(conn)
-	runClient := pb.NewRunServiceClient(conn)
 
 	resp, err := machineClient.ListMachines(ctx, &pb.ListMachinesRequest{})
 	if err != nil {
@@ -172,33 +171,18 @@ func listMachines(conn *grpc.ClientConn) {
 		return
 	}
 
-	// Get all runs to compute effective state
-	runsResp, _ := runClient.ListRuns(ctx, &pb.ListRunsRequest{})
-	activeRuns := make(map[string]*pb.Run)
-	for _, r := range runsResp.GetRuns() {
-		if lifecycle.IsActiveRunPhase(r.Phase) {
-			activeRuns[r.MachineId] = r
-		}
-	}
-
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "MACHINE_ID\tPHASE\tEFFECTIVE\tREACHABLE\tIN_CLUSTER\tNEEDS_HELP\tACTIVE_RUN")
+	fmt.Fprintln(w, "MACHINE_ID\tPHASE\tREACHABLE\tPROVISIONED\tNEEDS_HELP\tACTIVE_OP")
 
 	for _, m := range resp.Machines {
 		phase := "UNKNOWN"
-		effective := "UNKNOWN"
 		reachable := "-"
-		inCluster := "-"
+		provisioned := "-"
 		needsHelp := "-"
-		activeRun := "-"
+		activeOp := "-"
 
 		if m.Status != nil {
-			phase = strings.TrimPrefix(m.Status.Phase.String(), "")
-
-			// Compute effective state
-			ar := activeRuns[m.MachineId]
-			effectivePhase := lifecycle.EffectiveState(m.Status, ar)
-			effective = effectivePhase.String()
+			phase = m.Status.Phase.String()
 
 			// Conditions
 			if c := lifecycle.GetCondition(m.Status, lifecycle.ConditionReachable); c != nil {
@@ -208,11 +192,11 @@ func listMachines(conn *grpc.ClientConn) {
 					reachable = "✗"
 				}
 			}
-			if c := lifecycle.GetCondition(m.Status, lifecycle.ConditionInCustomerCluster); c != nil {
+			if c := lifecycle.GetCondition(m.Status, lifecycle.ConditionProvisioned); c != nil {
 				if c.Status {
-					inCluster = "✓"
+					provisioned = "✓"
 				} else {
-					inCluster = "✗"
+					provisioned = "✗"
 				}
 			}
 			if c := lifecycle.GetCondition(m.Status, lifecycle.ConditionNeedsIntervention); c != nil {
@@ -223,94 +207,202 @@ func listMachines(conn *grpc.ClientConn) {
 				}
 			}
 
-			if m.Status.ActiveRunId != "" {
-				activeRun = m.Status.ActiveRunId[:8] // Short ID
+			if m.Status.ActiveOperationId != "" {
+				activeOp = m.Status.ActiveOperationId[:8] // Short ID
 			}
 		}
 
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			m.MachineId, phase, effective, reachable, inCluster, needsHelp, activeRun)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			m.MachineId, phase, reachable, provisioned, needsHelp, activeOp)
 	}
 	w.Flush()
 }
 
 // ============================================================================
-// repave/rma/reboot - Start run and watch until completion
+// reboot - Reboot a machine
 // ============================================================================
 
-func runAndWatch(conn *grpc.ClientConn, args []string, runType, planID string) {
+func rebootMachine(conn *grpc.ClientConn, args []string) {
 	if len(args) < 1 {
-		log.Fatalf("usage: %s <machine-id> [--request-id=<id>]", strings.ToLower(runType))
+		log.Fatal("usage: reboot <machine-id> [--request-id=<id>]")
 	}
 	machineID := args[0]
+	requestID := getRequestID(args[1:])
 
-	// Check for --request-id flag in remaining args
-	requestID := ""
-	for _, arg := range args[1:] {
-		if strings.HasPrefix(arg, "--request-id=") {
-			requestID = strings.TrimPrefix(arg, "--request-id=")
-		}
-	}
-	if requestID == "" {
-		requestID = uuid.New().String()
-	}
-
-	// Create a cancellable context for the entire operation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	setupSignalHandler(cancel)
 
-	// Handle signals
+	client := pb.NewMachineServiceClient(conn)
+	opClient := pb.NewOperationServiceClient(conn)
+
+	op, err := client.RebootMachine(ctx, &pb.RebootMachineRequest{
+		MachineId: machineID,
+		RequestId: requestID,
+	})
+	if err != nil {
+		log.Fatalf("RebootMachine failed: %v", err)
+	}
+
+	printOperationHeader(op, "REBOOT")
+	watchAndStreamOperation(ctx, opClient, op)
+}
+
+// ============================================================================
+// reimage - Reimage a machine (requires MAINTENANCE)
+// ============================================================================
+
+func reimageMachine(conn *grpc.ClientConn, args []string) {
+	if len(args) < 1 {
+		log.Fatal("usage: reimage <machine-id> [--request-id=<id>] [--image=<ref>]")
+	}
+	machineID := args[0]
+	requestID := getRequestID(args[1:])
+	imageRef := getFlag(args[1:], "--image")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	setupSignalHandler(cancel)
+
+	client := pb.NewMachineServiceClient(conn)
+	opClient := pb.NewOperationServiceClient(conn)
+
+	op, err := client.ReimageMachine(ctx, &pb.ReimageMachineRequest{
+		MachineId: machineID,
+		RequestId: requestID,
+		ImageRef:  imageRef,
+	})
+	if err != nil {
+		log.Fatalf("ReimageMachine failed: %v", err)
+	}
+
+	printOperationHeader(op, "REIMAGE")
+	watchAndStreamOperation(ctx, opClient, op)
+}
+
+// ============================================================================
+// enter-maintenance - Enter maintenance mode
+// ============================================================================
+
+func enterMaintenance(conn *grpc.ClientConn, args []string) {
+	if len(args) < 1 {
+		log.Fatal("usage: enter-maintenance <machine-id> [--request-id=<id>]")
+	}
+	machineID := args[0]
+	requestID := getRequestID(args[1:])
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	setupSignalHandler(cancel)
+
+	client := pb.NewMachineServiceClient(conn)
+	opClient := pb.NewOperationServiceClient(conn)
+
+	op, err := client.EnterMaintenance(ctx, &pb.EnterMaintenanceRequest{
+		MachineId: machineID,
+		RequestId: requestID,
+	})
+	if err != nil {
+		log.Fatalf("EnterMaintenance failed: %v", err)
+	}
+
+	printOperationHeader(op, "ENTER_MAINTENANCE")
+	watchAndStreamOperation(ctx, opClient, op)
+}
+
+// ============================================================================
+// exit-maintenance - Exit maintenance mode
+// ============================================================================
+
+func exitMaintenance(conn *grpc.ClientConn, args []string) {
+	if len(args) < 1 {
+		log.Fatal("usage: exit-maintenance <machine-id> [--request-id=<id>]")
+	}
+	machineID := args[0]
+	requestID := getRequestID(args[1:])
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	setupSignalHandler(cancel)
+
+	client := pb.NewMachineServiceClient(conn)
+	opClient := pb.NewOperationServiceClient(conn)
+
+	op, err := client.ExitMaintenance(ctx, &pb.ExitMaintenanceRequest{
+		MachineId: machineID,
+		RequestId: requestID,
+	})
+	if err != nil {
+		log.Fatalf("ExitMaintenance failed: %v", err)
+	}
+
+	printOperationHeader(op, "EXIT_MAINTENANCE")
+	watchAndStreamOperation(ctx, opClient, op)
+}
+
+// ============================================================================
+// Helper functions for operation watching
+// ============================================================================
+
+func getRequestID(args []string) string {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--request-id=") {
+			return strings.TrimPrefix(arg, "--request-id=")
+		}
+	}
+	return uuid.New().String()
+}
+
+func getFlag(args []string, prefix string) string {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, prefix+"=") {
+			return strings.TrimPrefix(arg, prefix+"=")
+		}
+	}
+	return ""
+}
+
+func setupSignalHandler(cancel context.CancelFunc) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		fmt.Println("\n⚠ Interrupted. Run continues in background.")
+		fmt.Println("\n⚠ Interrupted. Operation continues in background.")
 		cancel()
 	}()
+}
 
-	runClient := pb.NewRunServiceClient(conn)
-
-	// Start the run
-	run, err := runClient.StartRun(ctx, &pb.StartRunRequest{
-		MachineId: machineID,
-		RequestId: requestID,
-		Type:      runType,
-		PlanId:    planID,
-	})
-	if err != nil {
-		log.Fatalf("StartRun failed: %v", err)
-	}
-
+func printOperationHeader(op *pb.Operation, opType string) {
 	fmt.Printf("┌─────────────────────────────────────────────────────────────\n")
-	fmt.Printf("│ Run: %s\n", run.RunId)
-	fmt.Printf("│ Machine: %s\n", machineID)
-	fmt.Printf("│ Type: %s | Plan: %s\n", runType, planID)
-	fmt.Printf("│ Request ID: %s\n", requestID)
+	fmt.Printf("│ Operation: %s\n", op.OperationId)
+	fmt.Printf("│ Machine: %s\n", op.MachineId)
+	fmt.Printf("│ Type: %s\n", opType)
+	fmt.Printf("│ Request ID: %s\n", op.RequestId)
 	fmt.Printf("└─────────────────────────────────────────────────────────────\n")
 	fmt.Println()
+}
 
-	// Watch for events and logs concurrently
+func watchAndStreamOperation(ctx context.Context, client pb.OperationServiceClient, op *pb.Operation) {
 	var wg sync.WaitGroup
 
 	// Event watcher
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		watchRunEvents(ctx, runClient, run.RunId, machineID)
+		watchOperationEvents(ctx, client, op.OperationId, op.MachineId)
 	}()
 
 	// Log streamer
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		streamRunLogs(ctx, runClient, run.RunId)
+		streamOperationLogs(ctx, client, op.OperationId)
 	}()
 
 	// Poll for completion
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	lastPhase := run.Phase
 	lastStep := ""
 
 	for {
@@ -319,43 +411,35 @@ func runAndWatch(conn *grpc.ClientConn, args []string, runType, planID string) {
 			wg.Wait()
 			return
 		case <-ticker.C:
-			r, err := runClient.GetRun(ctx, &pb.GetRunRequest{RunId: run.RunId})
+			o, err := client.GetOperation(ctx, &pb.GetOperationRequest{OperationId: op.OperationId})
 			if err != nil {
 				continue
 			}
 
 			// Print step transitions
-			if r.CurrentStep != lastStep {
+			if o.CurrentStage != lastStep {
 				if lastStep != "" {
 					fmt.Printf("  ✓ %s\n", lastStep)
 				}
-				if r.CurrentStep != "" {
-					fmt.Printf("→ %s...\n", r.CurrentStep)
+				if o.CurrentStage != "" {
+					fmt.Printf("→ %s...\n", o.CurrentStage)
 				}
-				lastStep = r.CurrentStep
-			}
-
-			// Print phase transitions
-			if r.Phase != lastPhase {
-				lastPhase = r.Phase
+				lastStep = o.CurrentStage
 			}
 
 			// Check for terminal state
-			if lifecycle.IsTerminalRunPhase(r.Phase) {
-				// Cancel context to stop the streaming goroutines
-				cancel()
-				wg.Wait()
-
+			if lifecycle.IsTerminalOperationPhase(o.Phase) {
 				fmt.Println()
-				printRunResult(r)
+				printOperationResult(o)
+				wg.Wait()
 				return
 			}
 		}
 	}
 }
 
-func watchRunEvents(ctx context.Context, client pb.RunServiceClient, runID, machineID string) {
-	stream, err := client.WatchRuns(ctx, &pb.WatchRunsRequest{
+func watchOperationEvents(ctx context.Context, client pb.OperationServiceClient, opID, machineID string) {
+	stream, err := client.WatchOperations(ctx, &pb.WatchOperationsRequest{
 		Filter: fmt.Sprintf("machine_id=%s", machineID),
 	})
 	if err != nil {
@@ -367,7 +451,7 @@ func watchRunEvents(ctx context.Context, client pb.RunServiceClient, runID, mach
 		if err != nil {
 			return // Context cancelled or stream ended
 		}
-		if event.Snapshot != nil && event.Snapshot.RunId == runID {
+		if event.Snapshot != nil && event.Snapshot.OperationId == opID {
 			if event.Message != "" {
 				ts := event.Ts.AsTime().Format("15:04:05")
 				fmt.Printf("  [%s] %s\n", ts, event.Message)
@@ -376,8 +460,8 @@ func watchRunEvents(ctx context.Context, client pb.RunServiceClient, runID, mach
 	}
 }
 
-func streamRunLogs(ctx context.Context, client pb.RunServiceClient, runID string) {
-	stream, err := client.StreamRunLogs(ctx, &pb.StreamRunLogsRequest{RunId: runID})
+func streamOperationLogs(ctx context.Context, client pb.OperationServiceClient, opID string) {
+	stream, err := client.StreamOperationLogs(ctx, &pb.StreamOperationLogsRequest{OperationId: opID})
 	if err != nil {
 		return
 	}
@@ -400,34 +484,34 @@ func streamRunLogs(ctx context.Context, client pb.RunServiceClient, runID string
 	}
 }
 
-func printRunResult(r *pb.Run) {
+func printOperationResult(op *pb.Operation) {
 	fmt.Printf("┌─────────────────────────────────────────────────────────────\n")
 
 	var icon string
-	switch r.Phase {
-	case pb.Run_SUCCEEDED:
+	switch op.Phase {
+	case pb.Operation_SUCCEEDED:
 		icon = "✓"
 		fmt.Printf("│ %s SUCCEEDED\n", icon)
-	case pb.Run_FAILED:
+	case pb.Operation_FAILED:
 		icon = "✗"
 		fmt.Printf("│ %s FAILED\n", icon)
-	case pb.Run_CANCELED:
+	case pb.Operation_CANCELED:
 		icon = "○"
 		fmt.Printf("│ %s CANCELED\n", icon)
 	default:
-		fmt.Printf("│ Phase: %s\n", r.Phase)
+		fmt.Printf("│ Phase: %s\n", op.Phase)
 	}
 
 	// Duration
-	if r.StartedAt != nil && r.FinishedAt != nil {
-		duration := r.FinishedAt.AsTime().Sub(r.StartedAt.AsTime())
+	if op.StartedAt != nil && op.FinishedAt != nil {
+		duration := op.FinishedAt.AsTime().Sub(op.StartedAt.AsTime())
 		fmt.Printf("│ Duration: %s\n", duration.Round(time.Millisecond))
 	}
 
 	// Steps summary
 	succeeded := 0
 	failed := 0
-	for _, s := range r.Steps {
+	for _, s := range op.Steps {
 		switch s.State {
 		case pb.StepStatus_SUCCEEDED:
 			succeeded++
@@ -435,16 +519,18 @@ func printRunResult(r *pb.Run) {
 			failed++
 		}
 	}
-	fmt.Printf("│ Steps: %d/%d completed\n", succeeded, len(r.Steps))
+	if len(op.Steps) > 0 {
+		fmt.Printf("│ Steps: %d/%d completed\n", succeeded, len(op.Steps))
+	}
 
 	// Error details
-	if r.Error != nil {
+	if op.Error != nil {
 		fmt.Printf("│\n")
-		fmt.Printf("│ Error: %s\n", r.Error.Message)
-		if r.Error.Code != "" {
-			fmt.Printf("│ Code: %s\n", r.Error.Code)
+		fmt.Printf("│ Error: %s\n", op.Error.Message)
+		if op.Error.Code != "" {
+			fmt.Printf("│ Code: %s\n", op.Error.Code)
 		}
-		if r.Error.Retryable {
+		if op.Error.Retryable {
 			fmt.Printf("│ (retryable)\n")
 		}
 	}
@@ -453,41 +539,41 @@ func printRunResult(r *pb.Run) {
 }
 
 // ============================================================================
-// runs - List all runs
+// ops - List all operations
 // ============================================================================
 
-func listRuns(conn *grpc.ClientConn) {
+func listOperations(conn *grpc.ClientConn) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	client := pb.NewRunServiceClient(conn)
+	client := pb.NewOperationServiceClient(conn)
 
-	resp, err := client.ListRuns(ctx, &pb.ListRunsRequest{})
+	resp, err := client.ListOperations(ctx, &pb.ListOperationsRequest{})
 	if err != nil {
-		log.Fatalf("ListRuns failed: %v", err)
+		log.Fatalf("ListOperations failed: %v", err)
 	}
 
-	if len(resp.Runs) == 0 {
-		fmt.Println("No runs.")
+	if len(resp.Operations) == 0 {
+		fmt.Println("No operations.")
 		return
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "RUN_ID\tMACHINE\tTYPE\tPHASE\tSTEP\tERROR")
+	fmt.Fprintln(w, "OPERATION_ID\tMACHINE\tTYPE\tPHASE\tSTAGE\tERROR")
 
-	for _, r := range resp.Runs {
-		step := r.CurrentStep
-		if step == "" {
-			step = "-"
+	for _, op := range resp.Operations {
+		stage := op.CurrentStage
+		if stage == "" {
+			stage = "-"
 		}
 
 		errMsg := "-"
-		if r.Error != nil && r.Error.Message != "" {
-			errMsg = truncate(r.Error.Message, 30)
+		if op.Error != nil && op.Error.Message != "" {
+			errMsg = truncate(op.Error.Message, 30)
 		}
 
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			r.RunId, r.MachineId, r.Type, r.Phase, step, errMsg)
+			op.OperationId, op.MachineId, op.Type, op.Phase, stage, errMsg)
 	}
 	w.Flush()
 }
@@ -500,84 +586,51 @@ func truncate(s string, maxLen int) string {
 }
 
 // ============================================================================
-// cancel - Cancel a run in progress
+// cancel - Cancel an operation in progress
 // ============================================================================
 
-func cancelRun(conn *grpc.ClientConn, args []string) {
+func cancelOperation(conn *grpc.ClientConn, args []string) {
 	if len(args) < 1 {
-		fmt.Println("Usage: bmdemo-cli cancel <run-id>")
+		fmt.Println("Usage: bmdemo-cli cancel <operation-id>")
 		os.Exit(1)
 	}
 
-	runID := args[0]
+	opID := args[0]
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	client := pb.NewRunServiceClient(conn)
+	client := pb.NewMachineServiceClient(conn)
 
-	run, err := client.CancelRun(ctx, &pb.CancelRunRequest{RunId: runID})
+	op, err := client.CancelOperation(ctx, &pb.CancelOperationRequest{OperationId: opID})
 	if err != nil {
-		log.Fatalf("CancelRun failed: %v", err)
+		log.Fatalf("CancelOperation failed: %v", err)
 	}
 
-	fmt.Printf("✓ Canceled run %s (phase: %s)\n", run.RunId, run.Phase)
+	fmt.Printf("✓ Canceled operation %s (phase: %s)\n", op.OperationId, op.Phase)
 }
 
 // ============================================================================
-// plans - List available plans
+// watch - Watch operation events
 // ============================================================================
 
-func listPlans(conn *grpc.ClientConn) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	client := pb.NewPlanServiceClient(conn)
-
-	resp, err := client.ListPlans(ctx, &pb.ListPlansRequest{})
-	if err != nil {
-		log.Fatalf("ListPlans failed: %v", err)
-	}
-
-	if len(resp.Plans) == 0 {
-		fmt.Println("No plans available.")
-		return
-	}
-
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "PLAN_ID\tNAME\tSTEPS")
-
-	for _, p := range resp.Plans {
-		stepNames := make([]string, 0, len(p.Steps))
-		for _, s := range p.Steps {
-			stepNames = append(stepNames, s.Name)
-		}
-		fmt.Fprintf(w, "%s\t%s\t%s\n", p.PlanId, p.DisplayName, strings.Join(stepNames, " → "))
-	}
-	w.Flush()
-}
-
-// ============================================================================
-// watch - Watch run events
-// ============================================================================
-
-func watchRuns(conn *grpc.ClientConn, args []string) {
+func watchOperations(conn *grpc.ClientConn, args []string) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	client := pb.NewRunServiceClient(conn)
+	client := pb.NewOperationServiceClient(conn)
 
 	filter := ""
 	if len(args) > 0 {
 		filter = fmt.Sprintf("machine_id=%s", args[0])
 	}
 
-	stream, err := client.WatchRuns(ctx, &pb.WatchRunsRequest{Filter: filter})
+	stream, err := client.WatchOperations(ctx, &pb.WatchOperationsRequest{Filter: filter})
 	if err != nil {
-		log.Fatalf("WatchRuns failed: %v", err)
+		log.Fatalf("WatchOperations failed: %v", err)
 	}
 
-	fmt.Println("Watching run events (Ctrl+C to stop)...")
+	fmt.Println("Watching operation events (Ctrl+C to stop)...")
 	fmt.Println()
 
 	for {
@@ -590,47 +643,47 @@ func watchRuns(conn *grpc.ClientConn, args []string) {
 				fmt.Println("\nStopped watching.")
 				return
 			}
-			log.Fatalf("WatchRuns stream error: %v", err)
+			log.Fatalf("WatchOperations stream error: %v", err)
 		}
 
 		ts := event.Ts.AsTime().Format("15:04:05")
 		snap := event.Snapshot
 
-		runID := snap.RunId
-		if len(runID) > 8 {
-			runID = runID[:8]
+		opID := snap.OperationId
+		if len(opID) > 8 {
+			opID = opID[:8]
 		}
 
-		step := snap.CurrentStep
-		if step == "" {
-			step = "-"
+		stage := snap.CurrentStage
+		if stage == "" {
+			stage = "-"
 		}
 
-		fmt.Printf("[%s] %s | %s | %s | step=%s | %s\n",
-			ts, runID, snap.MachineId, snap.Phase, step, event.Message)
+		fmt.Printf("[%s] %s | %s | %s | stage=%s | %s\n",
+			ts, opID, snap.MachineId, snap.Phase, stage, event.Message)
 	}
 }
 
 // ============================================================================
-// logs - Stream run logs
+// logs - Stream operation logs
 // ============================================================================
 
 func streamLogs(conn *grpc.ClientConn, args []string) {
 	if len(args) < 1 {
-		log.Fatal("usage: logs <run-id>")
+		log.Fatal("usage: logs <operation-id>")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	client := pb.NewRunServiceClient(conn)
+	client := pb.NewOperationServiceClient(conn)
 
-	stream, err := client.StreamRunLogs(ctx, &pb.StreamRunLogsRequest{RunId: args[0]})
+	stream, err := client.StreamOperationLogs(ctx, &pb.StreamOperationLogsRequest{OperationId: args[0]})
 	if err != nil {
-		log.Fatalf("StreamRunLogs failed: %v", err)
+		log.Fatalf("StreamOperationLogs failed: %v", err)
 	}
 
-	fmt.Printf("Streaming logs for run %s (Ctrl+C to stop)...\n\n", args[0])
+	fmt.Printf("Streaming logs for operation %s (Ctrl+C to stop)...\n\n", args[0])
 
 	for {
 		chunk, err := stream.Recv()
@@ -642,7 +695,7 @@ func streamLogs(conn *grpc.ClientConn, args []string) {
 				fmt.Println("\nStopped streaming.")
 				return
 			}
-			log.Fatalf("StreamRunLogs stream error: %v", err)
+			log.Fatalf("StreamOperationLogs stream error: %v", err)
 		}
 
 		ts := chunk.Ts.AsTime().Format("15:04:05")
@@ -663,9 +716,9 @@ func runDemo(conn *grpc.ClientConn) {
 	ctx := context.Background()
 
 	machineClient := pb.NewMachineServiceClient(conn)
-	runClient := pb.NewRunServiceClient(conn)
+	opClient := pb.NewOperationServiceClient(conn)
 
-	fmt.Println("# Baremetal Lifecycle Demo")
+	fmt.Println("# Baremetal Lifecycle Demo (New API)")
 	fmt.Println()
 	fmt.Println("## 1. Import Factory-Ready Machines")
 	fmt.Println("```")
@@ -698,163 +751,121 @@ func runDemo(conn *grpc.ClientConn) {
 	fmt.Println()
 
 	// Print initial state
-	demoListMachines(ctx, machineClient, runClient)
+	demoListMachines(ctx, machineClient)
 
-	// Step 2: Repave machine-1
-	fmt.Println("## 2. Repave machine-1 (plan/repave-join)")
+	// Step 2: Enter maintenance for machine-1
+	fmt.Println("## 2. Enter Maintenance for machine-1")
 	fmt.Println("```")
 
-	run, err := runClient.StartRun(ctx, &pb.StartRunRequest{
+	maintenanceOp, err := machineClient.EnterMaintenance(ctx, &pb.EnterMaintenanceRequest{
 		MachineId: "machine-1",
 		RequestId: uuid.New().String(),
-		Type:      "REPAVE",
-		PlanId:    "plan/repave-join",
 	})
 	if err != nil {
-		log.Fatalf("StartRun failed: %v", err)
+		log.Fatalf("EnterMaintenance failed: %v", err)
 	}
-	fmt.Printf("run_id=%s  machine=%s  type=%s  phase=%s\n", run.RunId[:8], run.MachineId, run.Type, run.Phase)
+	fmt.Printf("operation_id=%s  machine=%s  type=%s  phase=%s\n",
+		maintenanceOp.OperationId[:8], maintenanceOp.MachineId, maintenanceOp.Type, maintenanceOp.Phase)
 
 	// Wait for completion
-	for {
-		time.Sleep(200 * time.Millisecond)
-		r, _ := runClient.GetRun(ctx, &pb.GetRunRequest{RunId: run.RunId})
-		if r.CurrentStep != "" {
-			fmt.Printf("  step: %s\n", r.CurrentStep)
-		}
-		if lifecycle.IsTerminalRunPhase(r.Phase) {
-			fmt.Printf("result: %s\n", r.Phase)
-			break
-		}
-	}
+	waitForOperation(ctx, opClient, maintenanceOp.OperationId)
 	fmt.Println("```")
 	fmt.Println()
 
-	// Show state after repave
-	demoListMachines(ctx, machineClient, runClient)
+	demoListMachines(ctx, machineClient)
 
-	// Step 3: Mark machine-1 degraded
-	fmt.Println("## 3. Set Degraded Condition on machine-1")
+	// Step 3: Reimage machine-1 (now in MAINTENANCE)
+	fmt.Println("## 3. Reimage machine-1 (requires MAINTENANCE)")
 	fmt.Println("```")
 
-	m1, _ := machineClient.GetMachine(ctx, &pb.GetMachineRequest{MachineId: "machine-1"})
-	lifecycle.SetCondition(m1, "Degraded", true, "HighTemp", "GPU temp exceeds threshold")
-	m1, _ = machineClient.UpdateMachine(ctx, &pb.UpdateMachineRequest{Machine: m1})
-
-	fmt.Printf("machine-1 conditions:\n")
-	for _, c := range m1.Status.Conditions {
-		status := "false"
-		if c.Status {
-			status = "true"
-		}
-		fmt.Printf("  %s=%s (%s)\n", c.Type, status, c.Reason)
-	}
-	fmt.Println("```")
-	fmt.Println()
-
-	// Show state with degraded condition
-	demoListMachines(ctx, machineClient, runClient)
-
-	// Step 4: Move to MAINTENANCE and start upgrade
-	fmt.Println("## 4. Move machine-1 to MAINTENANCE, Start Upgrade")
-	fmt.Println("```")
-
-	m1, _ = machineClient.GetMachine(ctx, &pb.GetMachineRequest{MachineId: "machine-1"})
-	lifecycle.SetMachinePhase(m1, pb.MachineStatus_MAINTENANCE)
-	m1, _ = machineClient.UpdateMachine(ctx, &pb.UpdateMachineRequest{Machine: m1})
-	fmt.Printf("machine-1 phase: %s\n", m1.Status.Phase)
-
-	// Start upgrade run (will use plan/upgrade if exists, otherwise stub)
-	upgradeRun, err := runClient.StartRun(ctx, &pb.StartRunRequest{
+	reimageOp, err := machineClient.ReimageMachine(ctx, &pb.ReimageMachineRequest{
 		MachineId: "machine-1",
 		RequestId: uuid.New().String(),
-		Type:      "UPGRADE",
-		PlanId:    "plan/upgrade",
 	})
 	if err != nil {
-		fmt.Printf("upgrade run: (plan not found - expected for stub)\n")
-	} else {
-		fmt.Printf("upgrade run_id=%s  phase=%s\n", upgradeRun.RunId[:8], upgradeRun.Phase)
-		// Wait for completion
-		for {
-			time.Sleep(200 * time.Millisecond)
-			r, _ := runClient.GetRun(ctx, &pb.GetRunRequest{RunId: upgradeRun.RunId})
-			if lifecycle.IsTerminalRunPhase(r.Phase) {
-				fmt.Printf("upgrade result: %s\n", r.Phase)
-				break
-			}
-		}
+		log.Fatalf("ReimageMachine failed: %v", err)
 	}
-	fmt.Println("```")
-	fmt.Println()
-
-	// Show state after maintenance/upgrade
-	demoListMachines(ctx, machineClient, runClient)
-
-	// Step 5: RMA machine-1
-	fmt.Println("## 5. RMA machine-1")
-	fmt.Println("```")
-
-	// First clear MAINTENANCE phase to allow RMA
-	m1, _ = machineClient.GetMachine(ctx, &pb.GetMachineRequest{MachineId: "machine-1"})
-	lifecycle.SetMachinePhase(m1, pb.MachineStatus_READY)
-	m1, _ = machineClient.UpdateMachine(ctx, &pb.UpdateMachineRequest{Machine: m1})
-
-	rmaRun, err := runClient.StartRun(ctx, &pb.StartRunRequest{
-		MachineId: "machine-1",
-		RequestId: uuid.New().String(),
-		Type:      "RMA",
-		PlanId:    "plan/rma",
-	})
-	if err != nil {
-		log.Fatalf("RMA run failed: %v", err)
-	}
-	fmt.Printf("rma run_id=%s  phase=%s\n", rmaRun.RunId[:8], rmaRun.Phase)
+	fmt.Printf("operation_id=%s  machine=%s  type=%s  phase=%s\n",
+		reimageOp.OperationId[:8], reimageOp.MachineId, reimageOp.Type, reimageOp.Phase)
 
 	// Wait for completion
-	for {
-		time.Sleep(200 * time.Millisecond)
-		r, _ := runClient.GetRun(ctx, &pb.GetRunRequest{RunId: rmaRun.RunId})
-		if r.CurrentStep != "" {
-			fmt.Printf("  step: %s\n", r.CurrentStep)
-		}
-		if lifecycle.IsTerminalRunPhase(r.Phase) {
-			fmt.Printf("result: %s\n", r.Phase)
-			break
-		}
+	waitForOperation(ctx, opClient, reimageOp.OperationId)
+	fmt.Println("```")
+	fmt.Println()
+
+	// Show state after reimage
+	demoListMachines(ctx, machineClient)
+
+	// Step 4: Exit maintenance for machine-1
+	fmt.Println("## 4. Exit Maintenance for machine-1")
+	fmt.Println("```")
+
+	exitOp, err := machineClient.ExitMaintenance(ctx, &pb.ExitMaintenanceRequest{
+		MachineId: "machine-1",
+		RequestId: uuid.New().String(),
+	})
+	if err != nil {
+		log.Fatalf("ExitMaintenance failed: %v", err)
+	}
+	fmt.Printf("operation_id=%s  machine=%s  type=%s  phase=%s\n",
+		exitOp.OperationId[:8], exitOp.MachineId, exitOp.Type, exitOp.Phase)
+
+	waitForOperation(ctx, opClient, exitOp.OperationId)
+	fmt.Println("```")
+	fmt.Println()
+
+	demoListMachines(ctx, machineClient)
+
+	// Step 5: Try to Reimage machine-2 without MAINTENANCE (should fail)
+	fmt.Println("## 5. Try to Reimage machine-2 without MAINTENANCE (should fail)")
+	fmt.Println("```")
+
+	_, err = machineClient.ReimageMachine(ctx, &pb.ReimageMachineRequest{
+		MachineId: "machine-2",
+		RequestId: uuid.New().String(),
+	})
+	if err != nil {
+		fmt.Printf("Expected error: %v\n", err)
 	}
 	fmt.Println("```")
 	fmt.Println()
 
 	// Final state
 	fmt.Println("## Final State")
-	demoListMachines(ctx, machineClient, runClient)
+	demoListMachines(ctx, machineClient)
 
 	fmt.Println("---")
-	fmt.Println("*Demo complete. Machine-1 transitioned: FACTORY_READY → IN_SERVICE → MAINTENANCE → RMA*")
+	fmt.Println("*Demo complete. Shows: MAINTENANCE required for reimage, proper phase transitions.*")
 }
 
-func demoListMachines(ctx context.Context, machineClient pb.MachineServiceClient, runClient pb.RunServiceClient) {
+func waitForOperation(ctx context.Context, client pb.OperationServiceClient, opID string) {
+	for {
+		time.Sleep(200 * time.Millisecond)
+		op, err := client.GetOperation(ctx, &pb.GetOperationRequest{OperationId: opID})
+		if err != nil {
+			continue
+		}
+		if op.CurrentStage != "" {
+			fmt.Printf("  step: %s\n", op.CurrentStage)
+		}
+		if lifecycle.IsTerminalOperationPhase(op.Phase) {
+			fmt.Printf("result: %s\n", op.Phase)
+			break
+		}
+	}
+}
+
+func demoListMachines(ctx context.Context, machineClient pb.MachineServiceClient) {
 	fmt.Println("### Machine State")
 	fmt.Println("```")
 
 	resp, _ := machineClient.ListMachines(ctx, &pb.ListMachinesRequest{})
-	runsResp, _ := runClient.ListRuns(ctx, &pb.ListRunsRequest{})
 
-	activeRuns := make(map[string]*pb.Run)
-	for _, r := range runsResp.GetRuns() {
-		if lifecycle.IsActiveRunPhase(r.Phase) {
-			activeRuns[r.MachineId] = r
-		}
-	}
-
-	fmt.Printf("%-12s  %-14s  %-14s  %s\n", "MACHINE", "PHASE", "EFFECTIVE", "CONDITIONS")
+	fmt.Printf("%-12s  %-14s  %s\n", "MACHINE", "PHASE", "CONDITIONS")
 	for _, m := range resp.Machines {
 		if m.Status == nil {
 			continue
 		}
-		ar := activeRuns[m.MachineId]
-		effective := lifecycle.EffectiveState(m.Status, ar)
 
 		var conds []string
 		for _, c := range m.Status.Conditions {
@@ -867,8 +878,8 @@ func demoListMachines(ctx context.Context, machineClient pb.MachineServiceClient
 			condStr = strings.Join(conds, ", ")
 		}
 
-		fmt.Printf("%-12s  %-14s  %-14s  %s\n",
-			m.MachineId, m.Status.Phase, effective, condStr)
+		fmt.Printf("%-12s  %-14s  %s\n",
+			m.MachineId, m.Status.Phase, condStr)
 	}
 	fmt.Println("```")
 	fmt.Println()

@@ -16,20 +16,20 @@ func TestSetMachinePhase(t *testing.T) {
 		{
 			name:    "nil machine",
 			machine: nil,
-			phase:   pb.MachineStatus_IN_SERVICE,
+			phase:   pb.MachineStatus_READY,
 			want:    pb.MachineStatus_PHASE_UNSPECIFIED,
 		},
 		{
 			name:    "nil status",
 			machine: &pb.Machine{},
-			phase:   pb.MachineStatus_IN_SERVICE,
-			want:    pb.MachineStatus_IN_SERVICE,
+			phase:   pb.MachineStatus_READY,
+			want:    pb.MachineStatus_READY,
 		},
 		{
 			name:    "existing status",
 			machine: &pb.Machine{Status: &pb.MachineStatus{Phase: pb.MachineStatus_FACTORY_READY}},
-			phase:   pb.MachineStatus_PROVISIONING,
-			want:    pb.MachineStatus_PROVISIONING,
+			phase:   pb.MachineStatus_MAINTENANCE,
+			want:    pb.MachineStatus_MAINTENANCE,
 		},
 	}
 
@@ -81,226 +81,100 @@ func TestSetCondition(t *testing.T) {
 	}
 }
 
-func TestEffectiveState_ActiveRunTakesPrecedence(t *testing.T) {
+func TestIsBusy(t *testing.T) {
 	tests := []struct {
-		name      string
-		status    *pb.MachineStatus
-		activeRun *pb.Run
-		want      pb.MachineStatus_Phase
+		name    string
+		machine *pb.Machine
+		want    bool
 	}{
 		{
-			name:      "pending run",
-			status:    &pb.MachineStatus{Phase: pb.MachineStatus_IN_SERVICE},
-			activeRun: &pb.Run{Phase: pb.Run_PENDING},
-			want:      pb.MachineStatus_PROVISIONING,
+			name:    "nil machine",
+			machine: nil,
+			want:    false,
 		},
 		{
-			name:      "running run",
-			status:    &pb.MachineStatus{Phase: pb.MachineStatus_IN_SERVICE},
-			activeRun: &pb.Run{Phase: pb.Run_RUNNING},
-			want:      pb.MachineStatus_PROVISIONING,
+			name:    "nil status",
+			machine: &pb.Machine{},
+			want:    false,
 		},
 		{
-			name:      "succeeded run - not active",
-			status:    &pb.MachineStatus{Phase: pb.MachineStatus_READY},
-			activeRun: &pb.Run{Phase: pb.Run_SUCCEEDED},
-			want:      pb.MachineStatus_READY,
+			name: "no active operation",
+			machine: &pb.Machine{
+				Status: &pb.MachineStatus{},
+			},
+			want: false,
 		},
 		{
-			name:      "failed run - not active",
-			status:    &pb.MachineStatus{Phase: pb.MachineStatus_READY},
-			activeRun: &pb.Run{Phase: pb.Run_FAILED},
-			want:      pb.MachineStatus_READY,
-		},
-		{
-			name:      "no active run",
-			status:    &pb.MachineStatus{Phase: pb.MachineStatus_READY},
-			activeRun: nil,
-			want:      pb.MachineStatus_READY,
+			name: "has active operation",
+			machine: &pb.Machine{
+				Status: &pb.MachineStatus{ActiveOperationId: "op-123"},
+			},
+			want: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := EffectiveState(tt.status, tt.activeRun)
+			got := IsBusy(tt.machine)
 			if got != tt.want {
-				t.Errorf("EffectiveState() = %v, want %v", got, tt.want)
+				t.Errorf("IsBusy() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestEffectiveState_ExplicitPhasesWin(t *testing.T) {
-	// Even with InCustomerCluster=true, RMA/RETIRED/MAINTENANCE should win
-	statusWithCondition := func(phase pb.MachineStatus_Phase) *pb.MachineStatus {
-		return &pb.MachineStatus{
-			Phase: phase,
-			Conditions: []*pb.Condition{
-				{Type: ConditionInCustomerCluster, Status: true},
-			},
-		}
-	}
-
+func TestIsBusyWithOperation(t *testing.T) {
 	tests := []struct {
-		name   string
-		status *pb.MachineStatus
-		want   pb.MachineStatus_Phase
+		name    string
+		machine *pb.Machine
+		op      *pb.Operation
+		want    bool
 	}{
 		{
-			name:   "RMA wins over InCustomerCluster",
-			status: statusWithCondition(pb.MachineStatus_RMA),
-			want:   pb.MachineStatus_RMA,
+			name:    "nil machine",
+			machine: nil,
+			op:      nil,
+			want:    false,
 		},
 		{
-			name:   "RETIRED wins over InCustomerCluster",
-			status: statusWithCondition(pb.MachineStatus_RETIRED),
-			want:   pb.MachineStatus_RETIRED,
+			name:    "no active operation id",
+			machine: &pb.Machine{Status: &pb.MachineStatus{}},
+			op:      nil,
+			want:    false,
 		},
 		{
-			name:   "MAINTENANCE wins over InCustomerCluster",
-			status: statusWithCondition(pb.MachineStatus_MAINTENANCE),
-			want:   pb.MachineStatus_MAINTENANCE,
+			name:    "has active operation id, no op provided",
+			machine: &pb.Machine{Status: &pb.MachineStatus{ActiveOperationId: "op-123"}},
+			op:      nil,
+			want:    true,
+		},
+		{
+			name:    "has active operation id, pending op",
+			machine: &pb.Machine{Status: &pb.MachineStatus{ActiveOperationId: "op-123"}},
+			op:      &pb.Operation{Phase: pb.Operation_PENDING},
+			want:    true,
+		},
+		{
+			name:    "has active operation id, running op",
+			machine: &pb.Machine{Status: &pb.MachineStatus{ActiveOperationId: "op-123"}},
+			op:      &pb.Operation{Phase: pb.Operation_RUNNING},
+			want:    true,
+		},
+		{
+			name:    "has active operation id, succeeded op",
+			machine: &pb.Machine{Status: &pb.MachineStatus{ActiveOperationId: "op-123"}},
+			op:      &pb.Operation{Phase: pb.Operation_SUCCEEDED},
+			want:    false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := EffectiveState(tt.status, nil)
+			got := IsBusyWithOperation(tt.machine, tt.op)
 			if got != tt.want {
-				t.Errorf("EffectiveState() = %v, want %v", got, tt.want)
+				t.Errorf("IsBusyWithOperation() = %v, want %v", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestEffectiveState_InCustomerClusterCondition(t *testing.T) {
-	tests := []struct {
-		name   string
-		status *pb.MachineStatus
-		want   pb.MachineStatus_Phase
-	}{
-		{
-			name: "InCustomerCluster=true => IN_SERVICE",
-			status: &pb.MachineStatus{
-				Phase: pb.MachineStatus_READY,
-				Conditions: []*pb.Condition{
-					{Type: ConditionInCustomerCluster, Status: true},
-				},
-			},
-			want: pb.MachineStatus_IN_SERVICE,
-		},
-		{
-			name: "InCustomerCluster=false => READY",
-			status: &pb.MachineStatus{
-				Phase: pb.MachineStatus_READY,
-				Conditions: []*pb.Condition{
-					{Type: ConditionInCustomerCluster, Status: false},
-				},
-			},
-			want: pb.MachineStatus_READY,
-		},
-		{
-			name: "Multiple conditions, InCustomerCluster=true",
-			status: &pb.MachineStatus{
-				Phase: pb.MachineStatus_READY,
-				Conditions: []*pb.Condition{
-					{Type: ConditionReachable, Status: true},
-					{Type: ConditionInCustomerCluster, Status: true},
-					{Type: ConditionHealthy, Status: true},
-				},
-			},
-			want: pb.MachineStatus_IN_SERVICE,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := EffectiveState(tt.status, nil)
-			if got != tt.want {
-				t.Errorf("EffectiveState() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestEffectiveState_FactoryReadyStays(t *testing.T) {
-	tests := []struct {
-		name   string
-		status *pb.MachineStatus
-		want   pb.MachineStatus_Phase
-	}{
-		{
-			name:   "FACTORY_READY stays FACTORY_READY",
-			status: &pb.MachineStatus{Phase: pb.MachineStatus_FACTORY_READY},
-			want:   pb.MachineStatus_FACTORY_READY,
-		},
-		{
-			name:   "IN_SERVICE without condition becomes READY",
-			status: &pb.MachineStatus{Phase: pb.MachineStatus_IN_SERVICE},
-			want:   pb.MachineStatus_READY,
-		},
-		{
-			name:   "PROVISIONING without active run becomes READY",
-			status: &pb.MachineStatus{Phase: pb.MachineStatus_PROVISIONING},
-			want:   pb.MachineStatus_READY,
-		},
-		{
-			name:   "PHASE_UNSPECIFIED becomes READY",
-			status: &pb.MachineStatus{Phase: pb.MachineStatus_PHASE_UNSPECIFIED},
-			want:   pb.MachineStatus_READY,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := EffectiveState(tt.status, nil)
-			if got != tt.want {
-				t.Errorf("EffectiveState() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestEffectiveState_PrecedenceOrder(t *testing.T) {
-	// Test full precedence: active run > RMA > InCustomerCluster > FACTORY_READY
-
-	// Active run beats everything
-	status := &pb.MachineStatus{
-		Phase: pb.MachineStatus_RMA,
-		Conditions: []*pb.Condition{
-			{Type: ConditionInCustomerCluster, Status: true},
-		},
-	}
-	activeRun := &pb.Run{Phase: pb.Run_RUNNING}
-
-	got := EffectiveState(status, activeRun)
-	if got != pb.MachineStatus_PROVISIONING {
-		t.Errorf("active run should beat RMA+InCustomerCluster: got %v", got)
-	}
-
-	// RMA beats InCustomerCluster (no active run)
-	got = EffectiveState(status, nil)
-	if got != pb.MachineStatus_RMA {
-		t.Errorf("RMA should beat InCustomerCluster: got %v", got)
-	}
-
-	// InCustomerCluster beats FACTORY_READY
-	status2 := &pb.MachineStatus{
-		Phase: pb.MachineStatus_FACTORY_READY,
-		Conditions: []*pb.Condition{
-			{Type: ConditionInCustomerCluster, Status: true},
-		},
-	}
-	got = EffectiveState(status2, nil)
-	if got != pb.MachineStatus_IN_SERVICE {
-		t.Errorf("InCustomerCluster should beat FACTORY_READY: got %v", got)
-	}
-}
-
-func TestEffectiveState_NilStatus(t *testing.T) {
-	got := EffectiveState(nil, nil)
-	if got != pb.MachineStatus_PHASE_UNSPECIFIED {
-		t.Errorf("nil status should return PHASE_UNSPECIFIED, got %v", got)
 	}
 }
 
@@ -329,42 +203,42 @@ func TestHasCondition(t *testing.T) {
 	}
 }
 
-func TestIsTerminalRunPhase(t *testing.T) {
+func TestIsTerminalOperationPhase(t *testing.T) {
 	tests := []struct {
-		phase pb.Run_Phase
+		phase pb.Operation_Phase
 		want  bool
 	}{
-		{pb.Run_RUN_PHASE_UNSPECIFIED, false},
-		{pb.Run_PENDING, false},
-		{pb.Run_RUNNING, false},
-		{pb.Run_SUCCEEDED, true},
-		{pb.Run_FAILED, true},
-		{pb.Run_CANCELED, true},
+		{pb.Operation_PHASE_UNSPECIFIED, false},
+		{pb.Operation_PENDING, false},
+		{pb.Operation_RUNNING, false},
+		{pb.Operation_SUCCEEDED, true},
+		{pb.Operation_FAILED, true},
+		{pb.Operation_CANCELED, true},
 	}
 
 	for _, tt := range tests {
-		if got := IsTerminalRunPhase(tt.phase); got != tt.want {
-			t.Errorf("IsTerminalRunPhase(%v) = %v, want %v", tt.phase, got, tt.want)
+		if got := IsTerminalOperationPhase(tt.phase); got != tt.want {
+			t.Errorf("IsTerminalOperationPhase(%v) = %v, want %v", tt.phase, got, tt.want)
 		}
 	}
 }
 
-func TestIsActiveRunPhase(t *testing.T) {
+func TestIsActiveOperationPhase(t *testing.T) {
 	tests := []struct {
-		phase pb.Run_Phase
+		phase pb.Operation_Phase
 		want  bool
 	}{
-		{pb.Run_RUN_PHASE_UNSPECIFIED, false},
-		{pb.Run_PENDING, true},
-		{pb.Run_RUNNING, true},
-		{pb.Run_SUCCEEDED, false},
-		{pb.Run_FAILED, false},
-		{pb.Run_CANCELED, false},
+		{pb.Operation_PHASE_UNSPECIFIED, false},
+		{pb.Operation_PENDING, true},
+		{pb.Operation_RUNNING, true},
+		{pb.Operation_SUCCEEDED, false},
+		{pb.Operation_FAILED, false},
+		{pb.Operation_CANCELED, false},
 	}
 
 	for _, tt := range tests {
-		if got := IsActiveRunPhase(tt.phase); got != tt.want {
-			t.Errorf("IsActiveRunPhase(%v) = %v, want %v", tt.phase, got, tt.want)
+		if got := IsActiveOperationPhase(tt.phase); got != tt.want {
+			t.Errorf("IsActiveOperationPhase(%v) = %v, want %v", tt.phase, got, tt.want)
 		}
 	}
 }

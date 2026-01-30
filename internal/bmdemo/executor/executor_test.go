@@ -46,43 +46,43 @@ func createTestMachine(t *testing.T, s *store.Store) *pb.Machine {
 	return m
 }
 
-func TestRunner_StartRun_Success(t *testing.T) {
+func TestRunner_StartOperation_Success(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	machine := createTestMachine(t, s)
-	run, _, err := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, err := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
 	if err != nil {
 		t.Fatalf("failed to create run: %v", err)
 	}
 
 	// Track events
-	var events []*pb.RunEvent
+	var events []*pb.OperationEvent
 	var mu sync.Mutex
-	runner.SubscribeEvents(func(e *pb.RunEvent) {
+	runner.SubscribeEvents(func(e *pb.OperationEvent) {
 		mu.Lock()
 		events = append(events, e)
 		mu.Unlock()
 	})
 
 	// Start run
-	err = runner.StartRun(context.Background(), run.RunId)
+	err = runner.StartOperation(context.Background(), run.OperationId)
 	if err != nil {
-		t.Fatalf("StartRun failed: %v", err)
+		t.Fatalf("StartOperation failed: %v", err)
 	}
 
 	// Wait for completion
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		r, ok := s.GetRun(run.RunId)
-		if ok && (r.Phase == pb.Run_SUCCEEDED || r.Phase == pb.Run_FAILED) {
+		r, ok := s.GetOperation(run.OperationId)
+		if ok && (r.Phase == pb.Operation_SUCCEEDED || r.Phase == pb.Operation_FAILED) {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
 	// Verify run succeeded
-	finalRun, _ := s.GetRun(run.RunId)
-	if finalRun.Phase != pb.Run_SUCCEEDED {
+	finalRun, _ := s.GetOperation(run.OperationId)
+	if finalRun.Phase != pb.Operation_SUCCEEDED {
 		t.Errorf("Expected SUCCEEDED, got %v", finalRun.Phase)
 	}
 
@@ -95,92 +95,111 @@ func TestRunner_StartRun_Success(t *testing.T) {
 	}
 }
 
-func TestRunner_StartRun_RepaveJoin(t *testing.T) {
+func TestRunner_StartOperation_Reimage(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	machine := createTestMachine(t, s)
-	run, _, err := s.CreateRunIfNotExists("req-1", machine.MachineId, "REPAVE", "")
+	// First enter maintenance (required for reimage)
+	enterMaintenanceOp, _, err := s.CreateOperationIfNotExists("req-0", machine.MachineId, "ENTER_MAINTENANCE", "")
 	if err != nil {
-		t.Fatalf("failed to create run: %v", err)
+		t.Fatalf("failed to create enter-maintenance op: %v", err)
+	}
+	if err := runner.StartOperation(context.Background(), enterMaintenanceOp.OperationId); err != nil {
+		t.Fatalf("StartOperation for enter-maintenance failed: %v", err)
+	}
+	// Wait for maintenance
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		op, ok := s.GetOperation(enterMaintenanceOp.OperationId)
+		if ok && lifecycle.IsTerminalOperationPhase(op.Phase) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 
-	err = runner.StartRun(context.Background(), run.RunId)
+	// Now start reimage
+	run, _, err := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REIMAGE", "")
 	if err != nil {
-		t.Fatalf("StartRun failed: %v", err)
+		t.Fatalf("failed to create reimage op: %v", err)
+	}
+
+	err = runner.StartOperation(context.Background(), run.OperationId)
+	if err != nil {
+		t.Fatalf("StartOperation failed: %v", err)
 	}
 
 	// Wait for completion
-	deadline := time.Now().Add(10 * time.Second)
+	deadline = time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		r, ok := s.GetRun(run.RunId)
-		if ok && (r.Phase == pb.Run_SUCCEEDED || r.Phase == pb.Run_FAILED) {
+		r, ok := s.GetOperation(run.OperationId)
+		if ok && (r.Phase == pb.Operation_SUCCEEDED || r.Phase == pb.Operation_FAILED) {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
 	// Verify run succeeded
-	finalRun, _ := s.GetRun(run.RunId)
-	if finalRun.Phase != pb.Run_SUCCEEDED {
+	finalRun, _ := s.GetOperation(run.OperationId)
+	if finalRun.Phase != pb.Operation_SUCCEEDED {
 		t.Errorf("Expected SUCCEEDED, got %v", finalRun.Phase)
 	}
 
-	// Verify machine phase is IN_SERVICE (join completed)
+	// Verify machine is still in MAINTENANCE after reimage
 	finalMachine, _ := s.GetMachine(machine.MachineId)
-	if finalMachine.Status.Phase != pb.MachineStatus_IN_SERVICE {
-		t.Errorf("Expected machine phase IN_SERVICE, got %v", finalMachine.Status.Phase)
+	if finalMachine.Status.Phase != pb.MachineStatus_MAINTENANCE {
+		t.Errorf("Expected machine phase MAINTENANCE, got %v", finalMachine.Status.Phase)
 	}
 
-	// Verify InCustomerCluster condition
+	// Verify Provisioned condition
 	hasCondition := false
 	for _, c := range finalMachine.Status.Conditions {
-		if c.Type == lifecycle.ConditionInCustomerCluster && c.Status {
+		if c.Type == lifecycle.ConditionProvisioned && c.Status {
 			hasCondition = true
 			break
 		}
 	}
 	if !hasCondition {
-		t.Error("Expected InCustomerCluster condition to be true")
+		t.Error("Expected Provisioned condition to be true")
 	}
 }
 
-func TestRunner_StartRun_RMA(t *testing.T) {
+func TestRunner_StartOperation_EnterMaintenance(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	machine := createTestMachine(t, s)
-	run, _, err := s.CreateRunIfNotExists("req-1", machine.MachineId, "RMA", "")
+	run, _, err := s.CreateOperationIfNotExists("req-1", machine.MachineId, "ENTER_MAINTENANCE", "")
 	if err != nil {
 		t.Fatalf("failed to create run: %v", err)
 	}
 
-	err = runner.StartRun(context.Background(), run.RunId)
+	err = runner.StartOperation(context.Background(), run.OperationId)
 	if err != nil {
-		t.Fatalf("StartRun failed: %v", err)
+		t.Fatalf("StartOperation failed: %v", err)
 	}
 
 	// Wait for completion
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		r, ok := s.GetRun(run.RunId)
-		if ok && (r.Phase == pb.Run_SUCCEEDED || r.Phase == pb.Run_FAILED) {
+		r, ok := s.GetOperation(run.OperationId)
+		if ok && (r.Phase == pb.Operation_SUCCEEDED || r.Phase == pb.Operation_FAILED) {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	finalRun, _ := s.GetRun(run.RunId)
-	if finalRun.Phase != pb.Run_SUCCEEDED {
+	finalRun, _ := s.GetOperation(run.OperationId)
+	if finalRun.Phase != pb.Operation_SUCCEEDED {
 		t.Errorf("Expected SUCCEEDED, got %v", finalRun.Phase)
 	}
 
-	// Verify machine phase is RMA
+	// Verify machine phase is MAINTENANCE
 	finalMachine, _ := s.GetMachine(machine.MachineId)
-	if finalMachine.Status.Phase != pb.MachineStatus_RMA {
-		t.Errorf("Expected machine phase RMA, got %v", finalMachine.Status.Phase)
+	if finalMachine.Status.Phase != pb.MachineStatus_MAINTENANCE {
+		t.Errorf("Expected machine phase MAINTENANCE, got %v", finalMachine.Status.Phase)
 	}
 }
 
-func TestRunner_CancelRun(t *testing.T) {
+func TestRunner_CancelOperation(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	// Use slower config for cancel test
@@ -190,22 +209,22 @@ func TestRunner_CancelRun(t *testing.T) {
 	runner.provider = p
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
 
-	runner.StartRun(context.Background(), run.RunId)
+	runner.StartOperation(context.Background(), run.OperationId)
 
 	// Wait a bit then cancel
 	time.Sleep(100 * time.Millisecond)
-	err := runner.CancelRun(run.RunId)
+	err := runner.CancelOperation(run.OperationId)
 	if err != nil {
-		t.Fatalf("CancelRun failed: %v", err)
+		t.Fatalf("CancelOperation failed: %v", err)
 	}
 
 	// Wait for cancellation
 	time.Sleep(200 * time.Millisecond)
 
-	finalRun, _ := s.GetRun(run.RunId)
-	if finalRun.Phase != pb.Run_CANCELED {
+	finalRun, _ := s.GetOperation(run.OperationId)
+	if finalRun.Phase != pb.Operation_CANCELED {
 		t.Errorf("Expected CANCELED, got %v", finalRun.Phase)
 	}
 }
@@ -223,22 +242,22 @@ func TestRunner_StepRetries(t *testing.T) {
 	runner.baseRetryWait = 10 * time.Millisecond
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
 
-	runner.StartRun(context.Background(), run.RunId)
+	runner.StartOperation(context.Background(), run.OperationId)
 
 	// Wait for failure
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		r, ok := s.GetRun(run.RunId)
-		if ok && r.Phase == pb.Run_FAILED {
+		r, ok := s.GetOperation(run.OperationId)
+		if ok && r.Phase == pb.Operation_FAILED {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	finalRun, _ := s.GetRun(run.RunId)
-	if finalRun.Phase != pb.Run_FAILED {
+	finalRun, _ := s.GetOperation(run.OperationId)
+	if finalRun.Phase != pb.Operation_FAILED {
 		t.Errorf("Expected FAILED, got %v", finalRun.Phase)
 	}
 
@@ -260,20 +279,20 @@ func TestRunner_LogStreaming(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
 
 	var logCount int32
-	runner.SubscribeLogs(run.RunId, func(chunk *pb.LogChunk) {
+	runner.SubscribeLogs(run.OperationId, func(chunk *pb.LogChunk) {
 		atomic.AddInt32(&logCount, 1)
 	})
 
-	runner.StartRun(context.Background(), run.RunId)
+	runner.StartOperation(context.Background(), run.OperationId)
 
 	// Wait for completion
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		r, ok := s.GetRun(run.RunId)
-		if ok && r.Phase == pb.Run_SUCCEEDED {
+		r, ok := s.GetOperation(run.OperationId)
+		if ok && r.Phase == pb.Operation_SUCCEEDED {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -288,23 +307,23 @@ func TestRunner_EventStreaming(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
 
-	var events []*pb.RunEvent
+	var events []*pb.OperationEvent
 	var mu sync.Mutex
-	unsubscribe := runner.SubscribeEvents(func(e *pb.RunEvent) {
+	unsubscribe := runner.SubscribeEvents(func(e *pb.OperationEvent) {
 		mu.Lock()
 		events = append(events, e)
 		mu.Unlock()
 	})
 
-	runner.StartRun(context.Background(), run.RunId)
+	runner.StartOperation(context.Background(), run.OperationId)
 
 	// Wait for completion
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		r, ok := s.GetRun(run.RunId)
-		if ok && r.Phase == pb.Run_SUCCEEDED {
+		r, ok := s.GetOperation(run.OperationId)
+		if ok && r.Phase == pb.Operation_SUCCEEDED {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -322,8 +341,8 @@ func TestRunner_EventStreaming(t *testing.T) {
 	unsubscribe()
 
 	// Create another run and verify no more events
-	run2, _, _ := s.CreateRunIfNotExists("req-2", machine.MachineId, "REBOOT", "")
-	runner.StartRun(context.Background(), run2.RunId)
+	run2, _, _ := s.CreateOperationIfNotExists("req-2", machine.MachineId, "REBOOT", "")
+	runner.StartOperation(context.Background(), run2.OperationId)
 
 	time.Sleep(200 * time.Millisecond)
 
@@ -364,31 +383,31 @@ func TestRunner_ConcurrentRuns(t *testing.T) {
 	}
 
 	// Start runs on all machines concurrently
-	var runs []*pb.Run
+	var runs []*pb.Operation
 	for i, m := range machines {
-		run, _, _ := s.CreateRunIfNotExists("req-"+string(rune('0'+i)), m.MachineId, "REBOOT", "")
+		run, _, _ := s.CreateOperationIfNotExists("req-"+string(rune('0'+i)), m.MachineId, "REBOOT", "")
 		runs = append(runs, run)
 	}
 
 	var wg sync.WaitGroup
 	for _, run := range runs {
 		wg.Add(1)
-		go func(r *pb.Run) {
+		go func(r *pb.Operation) {
 			defer wg.Done()
-			runner.StartRun(context.Background(), r.RunId)
+			runner.StartOperation(context.Background(), r.OperationId)
 		}(run)
 	}
 
 	// Wait for all to start - use polling instead of fixed sleep
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if runner.ActiveRunCount() >= 3 {
+		if runner.ActiveOperationCount() >= 3 {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	activeCount := runner.ActiveRunCount()
+	activeCount := runner.ActiveOperationCount()
 	if activeCount < 1 {
 		t.Errorf("Expected at least 1 active run, got %d", activeCount)
 	}
@@ -398,8 +417,8 @@ func TestRunner_ConcurrentRuns(t *testing.T) {
 	for time.Now().Before(deadline) {
 		allDone := true
 		for _, run := range runs {
-			r, _ := s.GetRun(run.RunId)
-			if r.Phase != pb.Run_SUCCEEDED && r.Phase != pb.Run_FAILED {
+			r, _ := s.GetOperation(run.OperationId)
+			if r.Phase != pb.Operation_SUCCEEDED && r.Phase != pb.Operation_FAILED {
 				allDone = false
 				break
 			}
@@ -412,9 +431,9 @@ func TestRunner_ConcurrentRuns(t *testing.T) {
 
 	// Verify all succeeded
 	for _, run := range runs {
-		r, _ := s.GetRun(run.RunId)
-		if r.Phase != pb.Run_SUCCEEDED {
-			t.Errorf("Run %s: expected SUCCEEDED, got %v", run.RunId, r.Phase)
+		r, _ := s.GetOperation(run.OperationId)
+		if r.Phase != pb.Operation_SUCCEEDED {
+			t.Errorf("Run %s: expected SUCCEEDED, got %v", run.OperationId, r.Phase)
 		}
 	}
 }
@@ -422,7 +441,7 @@ func TestRunner_ConcurrentRuns(t *testing.T) {
 func TestRunner_RunNotFound(t *testing.T) {
 	runner, _ := setupRunner(t)
 
-	err := runner.StartRun(context.Background(), "nonexistent")
+	err := runner.StartOperation(context.Background(), "nonexistent")
 	if err == nil {
 		t.Error("Expected error for nonexistent run")
 	}
@@ -432,13 +451,13 @@ func TestRunner_RunNotPending(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
 
 	// Complete the run first
-	s.CompleteRun(run.RunId, pb.Run_SUCCEEDED)
+	s.CompleteOperation(run.OperationId, pb.Operation_SUCCEEDED)
 
-	// StartRun on a non-pending run should be idempotent success (no error)
-	err := runner.StartRun(context.Background(), run.RunId)
+	// StartOperation on a non-pending run should be idempotent success (no error)
+	err := runner.StartOperation(context.Background(), run.OperationId)
 	if err != nil {
 		t.Errorf("Expected idempotent success for completed run, got error: %v", err)
 	}
@@ -454,9 +473,9 @@ func TestRunner_Shutdown(t *testing.T) {
 	runner.provider = p
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
 
-	runner.StartRun(context.Background(), run.RunId)
+	runner.StartOperation(context.Background(), run.OperationId)
 
 	// Wait for it to start
 	time.Sleep(100 * time.Millisecond)
@@ -467,13 +486,13 @@ func TestRunner_Shutdown(t *testing.T) {
 	// Wait for cancellation
 	time.Sleep(200 * time.Millisecond)
 
-	finalRun, _ := s.GetRun(run.RunId)
-	if finalRun.Phase != pb.Run_CANCELED {
+	finalRun, _ := s.GetOperation(run.OperationId)
+	if finalRun.Phase != pb.Operation_CANCELED {
 		t.Errorf("Expected CANCELED after shutdown, got %v", finalRun.Phase)
 	}
 }
 
-func TestRunner_IsRunning(t *testing.T) {
+func TestRunner_IsOperationRunning(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	// Use slower config
@@ -483,28 +502,28 @@ func TestRunner_IsRunning(t *testing.T) {
 	runner.provider = p
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
 
-	if runner.IsRunning(run.RunId) {
+	if runner.IsRunning(run.OperationId) {
 		t.Error("Run should not be running before start")
 	}
 
-	runner.StartRun(context.Background(), run.RunId)
+	runner.StartOperation(context.Background(), run.OperationId)
 	time.Sleep(100 * time.Millisecond)
 
-	if !runner.IsRunning(run.RunId) {
+	if !runner.IsRunning(run.OperationId) {
 		t.Error("Run should be running after start")
 	}
 
 	// Wait for completion
 	time.Sleep(2 * time.Second)
 
-	if runner.IsRunning(run.RunId) {
+	if runner.IsRunning(run.OperationId) {
 		t.Error("Run should not be running after completion")
 	}
 }
 
-func TestRunner_CancelRun_SetsMachineState(t *testing.T) {
+func TestRunner_CancelOperation_SetsMachineState(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	// Use slower config so we have time to cancel
@@ -514,24 +533,24 @@ func TestRunner_CancelRun_SetsMachineState(t *testing.T) {
 	runner.provider = p
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
 
 	// Start run
-	runner.StartRun(context.Background(), run.RunId)
+	runner.StartOperation(context.Background(), run.OperationId)
 	time.Sleep(100 * time.Millisecond)
 
 	// Cancel the run
-	err := runner.CancelRun(run.RunId)
+	err := runner.CancelOperation(run.OperationId)
 	if err != nil {
-		t.Fatalf("CancelRun failed: %v", err)
+		t.Fatalf("CancelOperation failed: %v", err)
 	}
 
 	// Wait for cancellation to complete
 	time.Sleep(200 * time.Millisecond)
 
 	// Verify run is canceled
-	finalRun, _ := s.GetRun(run.RunId)
-	if finalRun.Phase != pb.Run_CANCELED {
+	finalRun, _ := s.GetOperation(run.OperationId)
+	if finalRun.Phase != pb.Operation_CANCELED {
 		t.Errorf("Expected CANCELED, got %v", finalRun.Phase)
 	}
 
@@ -543,9 +562,9 @@ func TestRunner_CancelRun_SetsMachineState(t *testing.T) {
 		t.Errorf("Expected machine phase MAINTENANCE, got %v", finalMachine.Status.Phase)
 	}
 
-	// ActiveRunId should be cleared
-	if finalMachine.Status.ActiveRunId != "" {
-		t.Errorf("Expected empty ActiveRunId, got %v", finalMachine.Status.ActiveRunId)
+	// ActiveOperationId should be cleared
+	if finalMachine.Status.ActiveOperationId != "" {
+		t.Errorf("Expected empty ActiveOperationId, got %v", finalMachine.Status.ActiveOperationId)
 	}
 
 	// OperationCanceled condition should be set (not NeedsIntervention - cancels are user-initiated)
@@ -561,7 +580,7 @@ func TestRunner_CancelRun_SetsMachineState(t *testing.T) {
 	}
 }
 
-func TestRunner_CancelRun_Idempotent(t *testing.T) {
+func TestRunner_CancelOperation_Idempotent(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	// Use slower config to ensure run is still in progress when we cancel
@@ -571,87 +590,105 @@ func TestRunner_CancelRun_Idempotent(t *testing.T) {
 	runner.provider = p
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
 
 	// Start run
-	runner.StartRun(context.Background(), run.RunId)
+	runner.StartOperation(context.Background(), run.OperationId)
 	time.Sleep(100 * time.Millisecond)
 
 	// First cancel
-	err := runner.CancelRun(run.RunId)
+	err := runner.CancelOperation(run.OperationId)
 	if err != nil {
-		t.Fatalf("First CancelRun failed: %v", err)
+		t.Fatalf("First CancelOperation failed: %v", err)
 	}
 
 	// Wait for cancellation
 	time.Sleep(100 * time.Millisecond)
 
 	// Second cancel should also succeed (idempotent)
-	err = runner.CancelRun(run.RunId)
+	err = runner.CancelOperation(run.OperationId)
 	if err != nil {
-		t.Fatalf("Second CancelRun failed: %v", err)
+		t.Fatalf("Second CancelOperation failed: %v", err)
 	}
 
 	// Verify still canceled
-	finalRun, _ := s.GetRun(run.RunId)
-	if finalRun.Phase != pb.Run_CANCELED {
+	finalRun, _ := s.GetOperation(run.OperationId)
+	if finalRun.Phase != pb.Operation_CANCELED {
 		t.Errorf("Expected CANCELED, got %v", finalRun.Phase)
 	}
 }
 
-func TestRunner_VerifyRequiredForInCustomerCluster(t *testing.T) {
+func TestRunner_VerifyRequiredForProvisioned(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	machine := createTestMachine(t, s)
 
-	// Start a repave-join run (which has a verify step)
-	run, _, err := s.CreateRunIfNotExists("req-1", machine.MachineId, "REPAVE", "plan/repave-join")
+	// First enter maintenance (required for reimage)
+	enterOp, _, err := s.CreateOperationIfNotExists("req-0", machine.MachineId, "ENTER_MAINTENANCE", "")
 	if err != nil {
-		t.Fatalf("failed to create run: %v", err)
+		t.Fatalf("failed to create enter-maintenance op: %v", err)
+	}
+	if err := runner.StartOperation(context.Background(), enterOp.OperationId); err != nil {
+		t.Fatalf("StartOperation for enter-maintenance failed: %v", err)
+	}
+	// Wait for maintenance
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		op, ok := s.GetOperation(enterOp.OperationId)
+		if ok && lifecycle.IsTerminalOperationPhase(op.Phase) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Start a reimage operation (which has a verify step via repave-join plan)
+	run, _, err := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REIMAGE", "")
+	if err != nil {
+		t.Fatalf("failed to create reimage op: %v", err)
 	}
 
 	// Start run
-	err = runner.StartRun(context.Background(), run.RunId)
+	err = runner.StartOperation(context.Background(), run.OperationId)
 	if err != nil {
-		t.Fatalf("StartRun failed: %v", err)
+		t.Fatalf("StartOperation failed: %v", err)
 	}
 
 	// Wait for completion
-	deadline := time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		r, ok := s.GetRun(run.RunId)
-		if ok && (r.Phase == pb.Run_SUCCEEDED || r.Phase == pb.Run_FAILED) {
+		r, ok := s.GetOperation(run.OperationId)
+		if ok && (r.Phase == pb.Operation_SUCCEEDED || r.Phase == pb.Operation_FAILED) {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
 	// Verify run succeeded
-	finalRun, _ := s.GetRun(run.RunId)
-	if finalRun.Phase != pb.Run_SUCCEEDED {
+	finalRun, _ := s.GetOperation(run.OperationId)
+	if finalRun.Phase != pb.Operation_SUCCEEDED {
 		t.Fatalf("Expected SUCCEEDED, got %v", finalRun.Phase)
 	}
 
-	// Verify machine has InCustomerCluster condition
+	// Verify machine has Provisioned condition
 	finalMachine, _ := s.GetMachine(machine.MachineId)
-	var hasInCluster bool
+	var hasProvisioned bool
 	for _, c := range finalMachine.Status.Conditions {
-		if c.Type == lifecycle.ConditionInCustomerCluster && c.Status {
-			hasInCluster = true
+		if c.Type == lifecycle.ConditionProvisioned && c.Status {
+			hasProvisioned = true
 			break
 		}
 	}
-	if !hasInCluster {
-		t.Error("Expected InCustomerCluster condition to be set after repave-join with verify")
+	if !hasProvisioned {
+		t.Error("Expected Provisioned condition to be set after reimage")
 	}
 
-	// Verify machine is IN_SERVICE
-	if finalMachine.Status.Phase != pb.MachineStatus_IN_SERVICE {
-		t.Errorf("Expected IN_SERVICE, got %v", finalMachine.Status.Phase)
+	// Verify machine stays in MAINTENANCE after reimage
+	if finalMachine.Status.Phase != pb.MachineStatus_MAINTENANCE {
+		t.Errorf("Expected MAINTENANCE, got %v", finalMachine.Status.Phase)
 	}
 }
 
-func TestRunner_StartRun_DuplicatePrevention(t *testing.T) {
+func TestRunner_StartOperation_DuplicatePrevention(t *testing.T) {
 	runner, s := setupRunner(t)
 
 	// Use slower config so run takes time to complete
@@ -661,33 +698,33 @@ func TestRunner_StartRun_DuplicatePrevention(t *testing.T) {
 	runner.provider = p
 
 	machine := createTestMachine(t, s)
-	run, _, _ := s.CreateRunIfNotExists("req-1", machine.MachineId, "REBOOT", "")
+	run, _, _ := s.CreateOperationIfNotExists("req-1", machine.MachineId, "REBOOT", "")
 
-	// Call StartRun twice quickly - only one should actually execute
-	err1 := runner.StartRun(context.Background(), run.RunId)
-	err2 := runner.StartRun(context.Background(), run.RunId)
+	// Call StartOperation twice quickly - only one should actually execute
+	err1 := runner.StartOperation(context.Background(), run.OperationId)
+	err2 := runner.StartOperation(context.Background(), run.OperationId)
 
 	// Both should succeed (idempotent)
 	if err1 != nil {
-		t.Errorf("First StartRun failed: %v", err1)
+		t.Errorf("First StartOperation failed: %v", err1)
 	}
 	if err2 != nil {
-		t.Errorf("Second StartRun failed: %v", err2)
+		t.Errorf("Second StartOperation failed: %v", err2)
 	}
 
 	// Wait for run to complete
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		r, ok := s.GetRun(run.RunId)
-		if ok && (r.Phase == pb.Run_SUCCEEDED || r.Phase == pb.Run_FAILED) {
+		r, ok := s.GetOperation(run.OperationId)
+		if ok && (r.Phase == pb.Operation_SUCCEEDED || r.Phase == pb.Operation_FAILED) {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
 	// Verify run succeeded (only executed once)
-	finalRun, _ := s.GetRun(run.RunId)
-	if finalRun.Phase != pb.Run_SUCCEEDED {
+	finalRun, _ := s.GetOperation(run.OperationId)
+	if finalRun.Phase != pb.Operation_SUCCEEDED {
 		t.Errorf("Expected SUCCEEDED, got %v", finalRun.Phase)
 	}
 
