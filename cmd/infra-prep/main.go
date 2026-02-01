@@ -466,7 +466,16 @@ func runConnectivitySuite(nodes []providers.NodeInfo, adminUser string, expected
 			continue
 		}
 
-		target := firstNonEmpty(n.TailnetFQDN, n.PublicIP, n.PrivateIP)
+		// Try to get Tailscale IP from API first (hostname may not resolve)
+		var tailscaleIP string
+		if token, err := getTailscaleOAuthToken(); err == nil {
+			if ip, err := findTailscaleDeviceIP(token, n.Name); err == nil {
+				tailscaleIP = ip
+				fmt.Printf("[connectivity] found DC router %s Tailscale IP from API: %s\n", n.Name, tailscaleIP)
+			}
+		}
+
+		target := firstNonEmpty(tailscaleIP, n.TailscaleIP, n.TailnetFQDN, n.PublicIP, n.PrivateIP)
 		if target == "" {
 			return nil, fmt.Errorf("no reachable target for router %s", n.Name)
 		}
@@ -481,19 +490,22 @@ func runConnectivitySuite(nodes []providers.NodeInfo, adminUser string, expected
 			return nil, fmt.Errorf("ssh router %s@%s: %w", adminUser, target, err)
 		}
 
-		tailscaleIP, err := fetchTailscaleIP(target, adminUser)
+		routerTailscaleIP, err := fetchTailscaleIP(target, adminUser)
 		if err != nil {
 			return nil, fmt.Errorf("fetch tailscale ip from router %s: %w", n.Name, err)
 		}
-		fmt.Printf("[connectivity] router %s tailscale IP: %s\n", n.Name, tailscaleIP)
-		updatedNodes[i].TailscaleIP = tailscaleIP
+		fmt.Printf("[connectivity] router %s tailscale IP: %s\n", n.Name, routerTailscaleIP)
+		updatedNodes[i].TailscaleIP = routerTailscaleIP
 
 		if expectedSubnet != "" {
-			if err := verifyRouterRoute(target, adminUser, expectedSubnet); err != nil {
+			if err := verifyRouterRoute(target, adminUser, expectedSubnet, n.Name); err != nil {
 				return nil, fmt.Errorf("router %s route check: %w", n.Name, err)
 			}
 		}
 	}
+
+	// Recalculate routerProxy now that TailscaleIP has been set on routers
+	routerProxy = findRouterTarget(updatedNodes)
 
 	// Then validate workers over reachable addresses (no per-node tailscale expected)
 	for i, n := range updatedNodes {
@@ -534,7 +546,16 @@ func runAKSRouterConnectivityCheck(nodes []providers.NodeInfo, adminUser string,
 			continue
 		}
 
-		target := firstNonEmpty(n.TailnetFQDN, n.PublicIP, n.PrivateIP)
+		// Try to get Tailscale IP from API first (hostname may not resolve)
+		var tailscaleIP string
+		if token, err := getTailscaleOAuthToken(); err == nil {
+			if ip, err := findTailscaleDeviceIP(token, n.Name); err == nil {
+				tailscaleIP = ip
+				fmt.Printf("[connectivity] found AKS router %s Tailscale IP from API: %s\n", n.Name, tailscaleIP)
+			}
+		}
+
+		target := firstNonEmpty(tailscaleIP, n.TailscaleIP, n.TailnetFQDN, n.PublicIP, n.PrivateIP)
 		if target == "" {
 			return nil, fmt.Errorf("no reachable target for AKS router %s", n.Name)
 		}
@@ -558,7 +579,7 @@ func runAKSRouterConnectivityCheck(nodes []providers.NodeInfo, adminUser string,
 
 		// Verify all route CIDRs are advertised
 		for _, cidr := range routeCIDRs {
-			if err := verifyRouterRoute(target, adminUser, cidr); err != nil {
+			if err := verifyRouterRoute(target, adminUser, cidr, n.Name); err != nil {
 				return nil, fmt.Errorf("AKS router %s route check for %s: %w", n.Name, cidr, err)
 			}
 		}
@@ -622,7 +643,8 @@ func tailscalePing(target string) error {
 }
 
 // verifyRouterRoute ensures the router advertises and has a primary route for the expected subnet.
-func verifyRouterRoute(host, user, subnet string) error {
+// hostname is used for Tailscale API lookups (must be the device name), host is the SSH target (can be IP).
+func verifyRouterRoute(host, user, subnet, hostname string) error {
 	if strings.TrimSpace(subnet) == "" {
 		return nil
 	}
@@ -709,10 +731,8 @@ func verifyRouterRoute(host, user, subnet string) error {
 			"-o", "UserKnownHostsFile=/dev/null",
 			"-o", "ConnectTimeout=10",
 			fmt.Sprintf("%s@%s", user, host),
-			"sudo", "tailscale", "up",
-			"--accept-routes",
+			"sudo", "tailscale", "set",
 			fmt.Sprintf("--advertise-routes=%s", subnet),
-			fmt.Sprintf("--hostname=%s", host),
 			"--snat-subnet-routes=true",
 		)
 		out, runErr := cmd.CombinedOutput()
@@ -742,9 +762,8 @@ func verifyRouterRoute(host, user, subnet string) error {
 			"-o", "ConnectTimeout=10",
 			fmt.Sprintf("%s@%s", user, host),
 			"sudo", "tailscale", "up", "--reset",
-			"--accept-routes",
 			fmt.Sprintf("--advertise-routes=%s", subnet),
-			fmt.Sprintf("--hostname=%s", host),
+			fmt.Sprintf("--hostname=%s", hostname),
 			"--snat-subnet-routes=true",
 		)
 		out, runErr := cmd.CombinedOutput()
@@ -768,8 +787,8 @@ func verifyRouterRoute(host, user, subnet string) error {
 		// Local tailscale status may not show advertised routes until they're approved
 		// Try API-based approval which waits for the device to register with the coordination server
 		if tsClientID != "" && tsClientSecret != "" {
-			fmt.Printf("[connectivity] route %s not visible locally yet - attempting API-based approval for %s\n", subnet, host)
-			if err := approveRouteViaAPI(host, subnet); err != nil {
+			fmt.Printf("[connectivity] route %s not visible locally yet - attempting API-based approval for %s\n", subnet, hostname)
+			if err := approveRouteViaAPI(hostname, subnet); err != nil {
 				fmt.Printf("[connectivity] API route approval failed: %v\n", err)
 				return fmt.Errorf("subnet %s not advertised; API approval failed: %v; status: %s", subnet, err, snapshot)
 			}
@@ -789,8 +808,8 @@ func verifyRouterRoute(host, user, subnet string) error {
 	if !primary {
 		// Attempt to approve the route via Tailscale API
 		if tsClientID != "" && tsClientSecret != "" {
-			fmt.Printf("[connectivity] route %s advertised but not approved - attempting API approval for %s\n", subnet, host)
-			if err := approveRouteViaAPI(host, subnet); err != nil {
+			fmt.Printf("[connectivity] route %s advertised but not approved - attempting API approval for %s\n", subnet, hostname)
+			if err := approveRouteViaAPI(hostname, subnet); err != nil {
 				fmt.Printf("[connectivity] API route approval failed: %v\n", err)
 				return fmt.Errorf("subnet %s advertised but not approved; API approval failed: %v; status: %s", subnet, err, snapshot)
 			}
@@ -1181,6 +1200,51 @@ func findTailscaleDeviceID(token, hostname string) (string, error) {
 		// Also check name (which includes domain)
 		if strings.HasPrefix(strings.ToLower(d.Name), hostnameLower+".") {
 			return d.ID, nil
+		}
+	}
+	return "", fmt.Errorf("device with hostname %q not found", hostname)
+}
+
+// findTailscaleDeviceIP finds a device's Tailscale IP by hostname using the Tailscale API
+func findTailscaleDeviceIP(token, hostname string) (string, error) {
+	req, err := http.NewRequest("GET", "https://api.tailscale.com/api/v2/tailnet/-/devices", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("list devices failed: %s: %s", resp.Status, string(body))
+	}
+
+	var devicesResp struct {
+		Devices []struct {
+			Hostname  string   `json:"hostname"`
+			Name      string   `json:"name"`
+			Addresses []string `json:"addresses"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(body, &devicesResp); err != nil {
+		return "", fmt.Errorf("parse devices response: %w", err)
+	}
+
+	hostnameLower := strings.ToLower(hostname)
+	for _, d := range devicesResp.Devices {
+		if strings.ToLower(d.Hostname) == hostnameLower || strings.HasPrefix(strings.ToLower(d.Name), hostnameLower+".") {
+			for _, addr := range d.Addresses {
+				// Return first IPv4 (100.x.x.x)
+				if strings.HasPrefix(addr, "100.") {
+					return addr, nil
+				}
+			}
+			return "", fmt.Errorf("device %q found but has no IPv4 address", hostname)
 		}
 	}
 	return "", fmt.Errorf("device with hostname %q not found", hostname)

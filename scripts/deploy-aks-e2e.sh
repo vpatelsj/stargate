@@ -98,20 +98,24 @@ az group create --name "$RESOURCE_GROUP" --location "$LOCATION" --output table
 
 # Step 2: Create AKS cluster
 log_step "Step 2: Creating AKS cluster $CLUSTER_NAME (this may take several minutes)..."
-az aks create \
-  --resource-group "$RESOURCE_GROUP" \
-  --name "$CLUSTER_NAME" \
-  --kubernetes-version 1.33.5 \
-  --node-count 2 \
-  --node-vm-size Standard_D2ads_v5 \
-  --network-plugin azure \
-  --network-plugin-mode overlay \
-  --network-policy cilium \
-  --network-dataplane cilium \
-  --pod-cidr 10.244.0.0/16 \
-  --service-cidr 10.0.0.0/16 \
-  --generate-ssh-keys \
-  --output table
+if az aks show --resource-group "$RESOURCE_GROUP" --name "$CLUSTER_NAME" &>/dev/null; then
+  log_info "AKS cluster $CLUSTER_NAME already exists, skipping creation"
+else
+  az aks create \
+    --resource-group "$RESOURCE_GROUP" \
+    --name "$CLUSTER_NAME" \
+    --kubernetes-version 1.33.5 \
+    --node-count 2 \
+    --node-vm-size Standard_D2ads_v5 \
+    --network-plugin azure \
+    --network-plugin-mode overlay \
+    --network-policy cilium \
+    --network-dataplane cilium \
+    --pod-cidr 10.244.0.0/16 \
+    --service-cidr 10.0.0.0/16 \
+    --generate-ssh-keys \
+    --output table
+fi
 
 # Step 3: Get AKS credentials
 log_step "Step 3: Getting AKS credentials..."
@@ -343,7 +347,7 @@ while [[ $ELAPSED -lt $MAX_WAIT ]]; do
     PHASES=$(kubectl get operations -n azure-dc -o jsonpath='{.items[*].status.phase}' 2>/dev/null || echo "")
     SUCCEEDED=0
     if [[ -n "$PHASES" ]]; then
-        SUCCEEDED=$(echo "$PHASES" | tr ' ' '\n' | grep -c "Succeeded" 2>/dev/null || echo "0")
+      SUCCEEDED=$(echo "$PHASES" | tr ' ' '\n' | grep -c "Succeeded" 2>/dev/null || true)
     fi
     
     if [[ "$SUCCEEDED" -ge 2 ]]; then

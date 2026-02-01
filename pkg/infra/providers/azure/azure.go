@@ -139,6 +139,11 @@ func NewProvider(ctx context.Context, cfg Config) (*Provider, error) {
 		if err != nil {
 			logger.Warn("failed to create Tailscale client, route approval will be manual", "error", err)
 		}
+	} else if os.Getenv("TAILSCALE_CLIENT_ID") != "" && os.Getenv("TAILSCALE_CLIENT_SECRET") != "" {
+		tsClient, err = tailscale.NewClientWithOAuth("", "", "", logger)
+		if err != nil {
+			logger.Warn("failed to create Tailscale OAuth client, route approval will be manual", "error", err)
+		}
 	}
 
 	return &Provider{
