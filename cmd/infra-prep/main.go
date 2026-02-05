@@ -1532,13 +1532,12 @@ func ensureAKSRouteToWorkers(ctx context.Context, subscriptionID string, aksInfo
 			return fmt.Errorf("list NICs: %w", err)
 		}
 		for _, nic := range page.Value {
-			// Look for the AKS router NIC (Tailscale router in AKS VNet)
+			// Look for stargate or aks-router NICs (the Tailscale router in AKS VNet)
 			nicName := ""
 			if nic.Name != nil {
 				nicName = *nic.Name
 			}
-			// NIC naming convention is "<vm-name>-nic", router VMs are named "*-router"
-			isRouterNIC := strings.HasSuffix(nicName, "-router-nic")
+			isRouterNIC := strings.HasPrefix(nicName, "stargate-") || strings.HasPrefix(nicName, "aks-router")
 			if isRouterNIC {
 				if nic.Properties != nil && len(nic.Properties.IPConfigurations) > 0 {
 					for _, ipCfg := range nic.Properties.IPConfigurations {

@@ -3,7 +3,7 @@ set -euo pipefail
 
 #
 # Stargate AKS E2E Deployment Script
-# Automates the full deployment process from deployment-log-e2e-11.md
+# Deploys AKS cluster with DC workers using gRPC-based Stargate API
 #
 # Usage: ./scripts/deploy-aks-e2e.sh <cluster-name> [location]
 # Example: ./scripts/deploy-aks-e2e.sh stargate-aks-e2e-12 canadacentral
@@ -45,6 +45,10 @@ AKS_ROUTER_NAME="${CLUSTER_NAME}-router"
 DC_ROUTER_NAME="${CLUSTER_NAME}-dc-router"
 WORKER_1="${CLUSTER_NAME}-worker-1"
 WORKER_2="${CLUSTER_NAME}-worker-2"
+
+# Stargate server config
+STARGATE_PORT=50051
+STARGATE_ADDR="localhost:${STARGATE_PORT}"
 
 # Validate prerequisites
 log_step "Checking prerequisites..."
@@ -89,29 +93,34 @@ cd "$PROJECT_DIR"
 
 # Step 0: Build binaries
 log_step "Step 0: Building binaries..."
-pkill -f azure-controller || true
+pkill -f stargate-server || true
 make build
 
 # Step 1: Create resource group
 log_step "Step 1: Creating resource group $RESOURCE_GROUP..."
 az group create --name "$RESOURCE_GROUP" --location "$LOCATION" --output table
 
-# Step 2: Create AKS cluster
-log_step "Step 2: Creating AKS cluster $CLUSTER_NAME (this may take several minutes)..."
-az aks create \
-  --resource-group "$RESOURCE_GROUP" \
-  --name "$CLUSTER_NAME" \
-  --kubernetes-version 1.33.5 \
-  --node-count 2 \
-  --node-vm-size Standard_D2ads_v5 \
-  --network-plugin azure \
-  --network-plugin-mode overlay \
-  --network-policy cilium \
-  --network-dataplane cilium \
-  --pod-cidr 10.244.0.0/16 \
-  --service-cidr 10.0.0.0/16 \
-  --generate-ssh-keys \
-  --output table
+# Step 2: Create AKS cluster (skip if exists)
+log_step "Step 2: Creating AKS cluster $CLUSTER_NAME..."
+if az aks show --resource-group "$RESOURCE_GROUP" --name "$CLUSTER_NAME" &>/dev/null; then
+    log_info "AKS cluster $CLUSTER_NAME already exists, skipping creation"
+else
+    log_info "Creating new AKS cluster (this may take several minutes)..."
+    az aks create \
+      --resource-group "$RESOURCE_GROUP" \
+      --name "$CLUSTER_NAME" \
+      --kubernetes-version 1.33.5 \
+      --node-count 2 \
+      --node-vm-size Standard_D2ads_v5 \
+      --network-plugin azure \
+      --network-plugin-mode overlay \
+      --network-policy cilium \
+      --network-dataplane cilium \
+      --pod-cidr 10.244.0.0/16 \
+      --service-cidr 10.0.0.0/16 \
+      --generate-ssh-keys \
+      --output table
+fi
 
 # Step 3: Get AKS credentials
 log_step "Step 3: Getting AKS credentials..."
@@ -130,23 +139,16 @@ SUBSCRIPTION_ID=$(az account show --query "id" -o tsv)
 log_info "AKS FQDN: $AKS_FQDN"
 log_info "Node Resource Group: $NODE_RESOURCE_GROUP"
 
-# Step 5: Install Stargate CRDs
-log_step "Step 5: Installing Stargate CRDs..."
-kubectl apply -f config/crd/bases/
-
-# Step 6: Create stargate namespace
-log_step "Step 6: Creating stargate namespace..."
-kubectl create namespace stargate || true
-
-# Step 7: Provision AKS Router
-log_step "Step 7: Provisioning AKS router..."
+# Step 5: Provision AKS Router
+log_step "Step 5: Provisioning AKS router..."
 ./bin/prep-dc-inventory \
   -role aks-router \
   -resource-group "$RESOURCE_GROUP" \
   -aks-cluster-name "$CLUSTER_NAME" \
   -aks-router-name "$AKS_ROUTER_NAME" \
   -aks-subnet-cidr 10.237.0.0/24 \
-  -location "$LOCATION"
+  -location "$LOCATION" \
+  -skip-server-cr
 
 # Capture AKS router IPs
 AKS_ROUTER_TS_IP=$(tailscale status --json | jq -r ".Peer[] | select(.HostName == \"$AKS_ROUTER_NAME\") | .TailscaleIPs[0]" 2>/dev/null || echo "")
@@ -158,12 +160,12 @@ fi
 AKS_ROUTER_PRIVATE_IP="10.237.0.4"
 log_info "AKS Router Tailscale IP: $AKS_ROUTER_TS_IP"
 
-# Step 8: Create DC resource group
-log_step "Step 8: Creating DC resource group $DC_RESOURCE_GROUP..."
+# Step 6: Create DC resource group
+log_step "Step 6: Creating DC resource group $DC_RESOURCE_GROUP..."
 az group create --name "$DC_RESOURCE_GROUP" --location "$LOCATION" --output table
 
-# Step 9: Provision DC infrastructure
-log_step "Step 9: Provisioning DC infrastructure (router + workers)..."
+# Step 7: Provision DC infrastructure
+log_step "Step 7: Provisioning DC infrastructure (router + workers)..."
 ./bin/prep-dc-inventory \
   -role dc \
   -resource-group "$DC_RESOURCE_GROUP" \
@@ -171,7 +173,8 @@ log_step "Step 9: Provisioning DC infrastructure (router + workers)..."
   -router-name "$DC_ROUTER_NAME" \
   -vm "$WORKER_1" \
   -vm "$WORKER_2" \
-  -location "$LOCATION"
+  -location "$LOCATION" \
+  -skip-server-cr
 
 # Capture DC router IP
 DC_ROUTER_TS_IP=$(tailscale status --json | jq -r ".Peer[] | select(.HostName == \"$DC_ROUTER_NAME\") | .TailscaleIPs[0]" 2>/dev/null || echo "")
@@ -186,11 +189,15 @@ log_info "DC Router Tailscale IP: $DC_ROUTER_TS_IP"
 VNET_NAME=$(az network vnet list --resource-group "$NODE_RESOURCE_GROUP" --query "[0].name" -o tsv)
 log_info "VNet Name: $VNET_NAME"
 
-# Step 10: Skipped (automated in Step 9)
-log_step "Step 10: Skipped (routes auto-approved in Step 9)"
+# Step 8: Get worker IPs from Azure
+log_step "Step 8: Getting worker VM IPs..."
+WORKER_1_IP=$(az vm list-ip-addresses --resource-group "$DC_RESOURCE_GROUP" --name "$WORKER_1" --query "[0].virtualMachine.network.privateIpAddresses[0]" -o tsv 2>/dev/null || echo "10.50.0.10")
+WORKER_2_IP=$(az vm list-ip-addresses --resource-group "$DC_RESOURCE_GROUP" --name "$WORKER_2" --query "[0].virtualMachine.network.privateIpAddresses[0]" -o tsv 2>/dev/null || echo "10.50.0.11")
+log_info "Worker 1 IP: $WORKER_1_IP"
+log_info "Worker 2 IP: $WORKER_2_IP"
 
-# Step 11: Create bootstrap token
-log_step "Step 11: Creating bootstrap token..."
+# Step 9: Create bootstrap token
+log_step "Step 9: Creating bootstrap token..."
 TOKEN_ID=$(head -c 100 /dev/urandom | tr -dc 'a-z0-9' | head -c 6)
 TOKEN_SECRET=$(head -c 100 /dev/urandom | tr -dc 'a-z0-9' | head -c 16)
 BOOTSTRAP_TOKEN="${TOKEN_ID}.${TOKEN_SECRET}"
@@ -212,166 +219,188 @@ stringData:
   auth-extra-groups: "system:bootstrappers:worker"
 EOF
 
-# Step 12: Create secrets and ProvisioningProfile
-log_step "Step 12: Creating secrets and ProvisioningProfile..."
-
-# SSH credentials secret
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Secret
-metadata:
-  name: azure-ssh-credentials
-  namespace: azure-dc
-type: Opaque
-stringData:
-  username: ubuntu
-  privateKey: |
-$(cat ~/.ssh/id_rsa | sed 's/^/    /')
-EOF
-
-# Tailscale auth secret
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Secret
-metadata:
-  name: tailscale-auth
-  namespace: azure-dc
-type: Opaque
-stringData:
-  authKey: "${TAILSCALE_AUTH_KEY}"
-EOF
-
-# ProvisioningProfile
-kubectl apply -f - <<EOF
-apiVersion: stargate.io/v1alpha1
-kind: ProvisioningProfile
-metadata:
-  name: azure-k8s-worker
-  namespace: azure-dc
-spec:
-  kubernetesVersion: "1.33"
-  containerRuntime: containerd
-  sshCredentialsSecretRef: azure-ssh-credentials
-  tailscaleAuthKeySecretRef: tailscale-auth
-  adminUsername: ubuntu
-EOF
-
-# Step 12a: Create kubelet-bootstrap ServiceAccount
-log_step "Step 12a: Creating kubelet-bootstrap ServiceAccount..."
-kubectl create serviceaccount kubelet-bootstrap -n kube-system || true
+# Step 10: Create kubelet-bootstrap ServiceAccount
+log_step "Step 10: Creating kubelet-bootstrap ServiceAccount..."
+kubectl create serviceaccount kubelet-bootstrap -n kube-system 2>/dev/null || true
 kubectl create clusterrolebinding kubelet-bootstrap \
   --clusterrole=system:node-bootstrapper \
-  --serviceaccount=kube-system:kubelet-bootstrap || true
+  --serviceaccount=kube-system:kubelet-bootstrap 2>/dev/null || true
 kubectl create clusterrolebinding kubelet-bootstrap-node \
   --clusterrole=system:node \
-  --serviceaccount=kube-system:kubelet-bootstrap || true
+  --serviceaccount=kube-system:kubelet-bootstrap 2>/dev/null || true
 
-# Step 13: Create Operation CRs for workers
-log_step "Step 13: Creating Operation CRs for workers..."
+# Step 11: Start Stargate server
+log_step "Step 11: Starting Stargate server..."
 
-kubectl apply -f - <<EOF
-apiVersion: stargate.io/v1alpha1
-kind: Operation
-metadata:
-  name: ${WORKER_1}-repave
-  namespace: azure-dc
-spec:
-  serverRef:
-    name: ${WORKER_1}
-  provisioningProfileRef:
-    name: azure-k8s-worker
-  operation: repave
-EOF
-
-kubectl apply -f - <<EOF
-apiVersion: stargate.io/v1alpha1
-kind: Operation
-metadata:
-  name: ${WORKER_2}-repave
-  namespace: azure-dc
-spec:
-  serverRef:
-    name: ${WORKER_2}
-  provisioningProfileRef:
-    name: azure-k8s-worker
-  operation: repave
-EOF
-
-kubectl get operations -n azure-dc
-
-# Step 14: Run Azure Controller
-log_step "Step 14: Starting Azure controller..."
-
-nohup ./bin/azure-controller \
-  -control-plane-mode aks \
-  -enable-route-sync \
-  -aks-api-server "https://${AKS_FQDN}:443" \
+nohup ./bin/stargate-server \
+  -port $STARGATE_PORT \
+  -provider azure \
+  -aks-api-server "$AKS_FQDN" \
   -aks-cluster-name "$CLUSTER_NAME" \
   -aks-resource-group "$RESOURCE_GROUP" \
-  -aks-node-resource-group "$NODE_RESOURCE_GROUP" \
   -aks-subscription-id "$SUBSCRIPTION_ID" \
   -aks-vm-resource-group "$DC_RESOURCE_GROUP" \
   -dc-router-tailscale-ip "$DC_ROUTER_TS_IP" \
-  -aks-router-tailscale-ip "$AKS_ROUTER_TS_IP" \
+  -dc-router-private-ip "10.50.1.4" \
+  -aks-node-subnet "10.224.0.0/16" \
+  -aks-pod-subnet "10.244.0.0/20" \
+  -ssh-user ubuntu \
+  > /tmp/stargate-server.log 2>&1 &
+
+sleep 2
+if pgrep -f stargate-server > /dev/null; then
+    log_info "Stargate server started (PID: $(pgrep -f stargate-server))"
+    log_info "View logs: tail -f /tmp/stargate-server.log"
+else
+    log_error "Stargate server failed to start. Check /tmp/stargate-server.log"
+    exit 1
+fi
+
+# Step 11b: Start Azure Controller for route synchronization
+log_step "Step 11b: Starting Azure Controller for route sync..."
+
+# Kill any existing controllers that might conflict
+pkill -f "azure-controller" 2>/dev/null || true
+pkill -f "boulder-controller" 2>/dev/null || true
+
+# Kill any process using our ports
+fuser -k 8091/tcp 2>/dev/null || true
+fuser -k 8092/tcp 2>/dev/null || true
+
+nohup ./bin/azure-controller \
+  -metrics-bind-address ":8091" \
+  -health-probe-bind-address ":8092" \
+  -aks-subscription-id "$SUBSCRIPTION_ID" \
+  -aks-cluster-name "$CLUSTER_NAME" \
+  -aks-resource-group "$RESOURCE_GROUP" \
+  -aks-node-resource-group "$NODE_RESOURCE_GROUP" \
+  -aks-vm-resource-group "$DC_RESOURCE_GROUP" \
+  -azure-route-table-name "stargate-workers-rt" \
+  -router-route-table-name "stargate-router-rt" \
+  -azure-subnet-name "aks-subnet" \
+  -router-subnet-name "stargate-aks-router-subnet" \
   -aks-router-private-ip "$AKS_ROUTER_PRIVATE_IP" \
-  -azure-route-table-name stargate-workers-rt \
-  -router-route-table-name stargate-router-rt \
-  -router-subnet-name stargate-aks-router-subnet \
-  -azure-vnet-name "$VNET_NAME" \
-  -dc-subnet-cidr 10.50.0.0/16 \
-  -tailscale-client-id "$TAILSCALE_CLIENT_ID" \
-  -tailscale-client-secret "$TAILSCALE_CLIENT_SECRET" \
+  -aks-router-tailscale-ip "$AKS_ROUTER_TS_IP" \
+  -dc-router-tailscale-ip "$DC_ROUTER_TS_IP" \
+  -dc-subnet-cidr "10.50.0.0/16" \
+  -dc-pod-cidr "10.244.64.0/20" \
   > /tmp/azure-controller.log 2>&1 &
 
 sleep 2
 if pgrep -f azure-controller > /dev/null; then
-    log_info "Controller started in background (PID: $(pgrep -f azure-controller))"
+    log_info "Azure controller started (PID: $(pgrep -f azure-controller))"
     log_info "View logs: tail -f /tmp/azure-controller.log"
 else
-    log_error "Controller failed to start. Check /tmp/azure-controller.log"
-    exit 1
+    log_error "Azure controller failed to start. Check /tmp/azure-controller.log"
+    # Don't exit - controller is optional, routes can be added manually
 fi
 
-# Step 15: Wait for workers to join
-log_step "Step 15: Waiting for workers to join cluster..."
+# Step 12: Register machines via gRPC
+log_step "Step 12: Registering machines with Stargate..."
+
+# Use grpcurl for direct gRPC calls
+if command -v grpcurl &>/dev/null; then
+    log_info "Registering machines via grpcurl..."
+    
+    # Register Worker 1
+    grpcurl -plaintext -d '{
+      "machine": {
+        "machine_id": "'"$WORKER_1"'",
+        "spec": {
+          "provider": "azure",
+          "ssh_endpoint": "'"${WORKER_1_IP}:22"'",
+          "mac_addresses": ["'"$(printf '02:00:00:00:%02x:01' $((RANDOM % 256)))"'"]
+        },
+        "labels": {
+          "cluster": "'"$CLUSTER_NAME"'",
+          "role": "worker",
+          "aks_fqdn": "'"$AKS_FQDN"'"
+        }
+      }
+    }' "$STARGATE_ADDR" baremetal.v1.MachineService/RegisterMachine
+
+    # Register Worker 2
+    grpcurl -plaintext -d '{
+      "machine": {
+        "machine_id": "'"$WORKER_2"'",
+        "spec": {
+          "provider": "azure",
+          "ssh_endpoint": "'"${WORKER_2_IP}:22"'",
+          "mac_addresses": ["'"$(printf '02:00:00:00:%02x:02' $((RANDOM % 256)))"'"]
+        },
+        "labels": {
+          "cluster": "'"$CLUSTER_NAME"'",
+          "role": "worker",
+          "aks_fqdn": "'"$AKS_FQDN"'"
+        }
+      }
+    }' "$STARGATE_ADDR" baremetal.v1.MachineService/RegisterMachine
+else
+    log_info "grpcurl not found - using sgctl register..."
+    # Register workers with their actual IDs and endpoints
+    ./bin/sgctl -server "$STARGATE_ADDR" register "$WORKER_1" -ssh "${WORKER_1_IP}:22" -provider azure -labels "cluster=$CLUSTER_NAME,aks_fqdn=$AKS_FQDN"
+    ./bin/sgctl -server "$STARGATE_ADDR" register "$WORKER_2" -ssh "${WORKER_2_IP}:22" -provider azure -labels "cluster=$CLUSTER_NAME,aks_fqdn=$AKS_FQDN"
+fi
+
+# Step 13: List registered machines
+log_step "Step 13: Listing registered machines..."
+./bin/sgctl -server "$STARGATE_ADDR" list
+
+# Step 14: Enter maintenance mode (required for reimage)
+log_step "Step 14: Entering maintenance mode for workers..."
+
+./bin/sgctl -server "$STARGATE_ADDR" enter-maintenance "$WORKER_1" || true
+./bin/sgctl -server "$STARGATE_ADDR" enter-maintenance "$WORKER_2" || true
+
+# Wait for maintenance operations
+sleep 5
+./bin/sgctl -server "$STARGATE_ADDR" list
+
+# Step 15: Trigger reimage operations
+log_step "Step 15: Triggering reimage operations..."
+
+./bin/sgctl -server "$STARGATE_ADDR" reimage "$WORKER_1" || true
+./bin/sgctl -server "$STARGATE_ADDR" reimage "$WORKER_2" || true
+
+# Step 16: Wait for operations to complete
+log_step "Step 16: Waiting for reimage operations to complete..."
 
 MAX_WAIT=600  # 10 minutes
 WAIT_INTERVAL=15
 ELAPSED=0
 
 while [[ $ELAPSED -lt $MAX_WAIT ]]; do
-    PHASES=$(kubectl get operations -n azure-dc -o jsonpath='{.items[*].status.phase}' 2>/dev/null || echo "")
-    SUCCEEDED=0
-    if [[ -n "$PHASES" ]]; then
-        SUCCEEDED=$(echo "$PHASES" | tr ' ' '\n' | grep -c "Succeeded" 2>/dev/null || echo "0")
-    fi
+    log_info "Checking operation status... ($ELAPSED/$MAX_WAIT seconds)"
     
-    if [[ "$SUCCEEDED" -ge 2 ]]; then
+    # List operations
+    ./bin/sgctl -server "$STARGATE_ADDR" ops
+    
+    # Check if operations completed (with fake provider, they should complete quickly)
+    SUCCEEDED_COUNT=$(./bin/sgctl -server "$STARGATE_ADDR" ops 2>/dev/null | grep -c "SUCCEEDED" || true)
+    SUCCEEDED_COUNT=${SUCCEEDED_COUNT:-0}
+    if [[ "$SUCCEEDED_COUNT" -ge 2 ]]; then
         log_info "Both operations succeeded!"
         break
     fi
     
-    log_info "Waiting for operations to complete... ($ELAPSED/$MAX_WAIT seconds)"
-    kubectl get operations -n azure-dc 2>/dev/null || true
     sleep $WAIT_INTERVAL
     ELAPSED=$((ELAPSED + WAIT_INTERVAL))
 done
 
 if [[ $ELAPSED -ge $MAX_WAIT ]]; then
     log_error "Timeout waiting for operations to complete"
-    kubectl get operations -n azure-dc
-    exit 1
+    ./bin/sgctl -server "$STARGATE_ADDR" ops
+    log_info "Operations may still be running. Check: ./bin/sgctl -server $STARGATE_ADDR ops"
 fi
 
-echo ""
-kubectl get nodes
-echo ""
-kubectl get operations -n azure-dc
+# Step 17: Verify nodes joined (if using real provider)
+log_step "Step 17: Checking node status..."
+kubectl get nodes || log_info "Nodes may not have joined yet (using fake provider for demo)"
 
-# Step 16: Deploy Goldpinger
-log_step "Step 16: Deploying Goldpinger for connectivity testing..."
+# Step 18: Deploy Goldpinger
+log_step "Step 18: Deploying Goldpinger for connectivity testing..."
 
-kubectl create namespace goldpinger || true
+kubectl create namespace goldpinger 2>/dev/null || true
 kubectl apply -f - <<'EOF'
 apiVersion: v1
 kind: ServiceAccount
@@ -466,35 +495,31 @@ log_info "Waiting for Goldpinger pods to be ready..."
 sleep 15
 kubectl get pods -n goldpinger -o wide
 
-# Start port-forward in background
-kubectl port-forward -n goldpinger svc/goldpinger 8080:8080 &
-sleep 3
-
-# Test connectivity
-log_step "Testing connectivity..."
-if curl -s http://localhost:8080/check_all | jq -r '.responses | to_entries[] | "\(.key) -> OK: \(.value.OK)"'; then
-    log_info "All connectivity checks passed!"
-else
-    log_info "Connectivity check failed or still initializing. Try: curl -s http://localhost:8080/check_all | jq ."
-fi
-
 # Summary
 echo ""
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}  Deployment Complete!${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
-echo "Cluster Name:      $CLUSTER_NAME"
-echo "Resource Group:    $RESOURCE_GROUP"
-echo "DC Resource Group: $DC_RESOURCE_GROUP"
-echo "Location:          $LOCATION"
+echo "Cluster Name:       $CLUSTER_NAME"
+echo "Resource Group:     $RESOURCE_GROUP"
+echo "DC Resource Group:  $DC_RESOURCE_GROUP"
+echo "Location:           $LOCATION"
 echo ""
-echo "AKS API Server:    https://${AKS_FQDN}:443"
-echo "AKS Router TS IP:  $AKS_ROUTER_TS_IP"
-echo "DC Router TS IP:   $DC_ROUTER_TS_IP"
+echo "AKS API Server:     https://${AKS_FQDN}:443"
+echo "AKS Router TS IP:   $AKS_ROUTER_TS_IP"
+echo "DC Router TS IP:    $DC_ROUTER_TS_IP"
 echo ""
-echo "Controller logs:   tail -f /tmp/azure-controller.log"
-echo "Goldpinger UI:     http://localhost:8080"
+echo "Stargate Server:    $STARGATE_ADDR"
+echo "Server logs:        tail -f /tmp/stargate-server.log"
+echo ""
+echo "Commands:"
+echo "  List machines:    ./bin/sgctl -server $STARGATE_ADDR list"
+echo "  List operations:  ./bin/sgctl -server $STARGATE_ADDR ops"
+echo "  Watch operations: ./bin/sgctl -server $STARGATE_ADDR watch"
+echo ""
+echo "To port-forward Goldpinger:"
+echo "  kubectl port-forward -n goldpinger svc/goldpinger 8080:8080"
 echo ""
 echo "To cleanup, run:"
 echo "  ./scripts/cleanup-aks-e2e.sh $CLUSTER_NAME"

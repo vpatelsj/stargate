@@ -1,0 +1,357 @@
+#cloud-config
+#
+# Cloud-init user-data for Tailscale Subnet Router VM
+#
+# This VM will:
+# - Configure VLAN subinterfaces for lab subnets
+# - Install and configure Tailscale as a subnet router
+# - Advertise routes 172.18.10.0/24 and 172.18.20.0/24
+# - Optionally advertise 172.18.99.0/24 (BMC network) if ENABLE_BMC=true
+#
+# Required: Set TAILSCALE_AUTHKEY before creating the cloud-init ISO
+# Optional: Set ENABLE_BMC=true to advertise the BMC network
+#
+
+# Basic system settings
+hostname: stargate-boulderlab-gateway
+manage_etc_hosts: true
+timezone: UTC
+
+# Disable cloud-init network configuration since we do it manually
+network:
+  config: disabled
+
+# Boot commands - run very early, before network-dependent stages
+# These run on EVERY boot, so we use conditionals
+bootcmd:
+  # Load VLAN module
+  - modprobe 8021q
+  # Only setup VLANs if not already done
+  - |
+    IFACE=$(ip -o link show | grep -v 'lo:\|tailscale' | head -1 | awk -F': ' '{print $2}')
+    if [ -n "$IFACE" ] && ! ip link show "${IFACE}.10" &>/dev/null; then
+      echo "Setting up VLAN interfaces on $IFACE..."
+      for VLAN in 10 20 99; do
+        ip link add link "$IFACE" name "${IFACE}.${VLAN}" type vlan id $VLAN 2>/dev/null || true
+        case $VLAN in
+          10) ip addr add 172.18.10.253/24 dev "${IFACE}.${VLAN}" 2>/dev/null || true ;;
+          20) ip addr add 172.18.20.253/24 dev "${IFACE}.${VLAN}" 2>/dev/null || true ;;
+          99) ip addr add 172.18.99.253/24 dev "${IFACE}.${VLAN}" 2>/dev/null || true ;;
+        esac
+        ip link set "${IFACE}.${VLAN}" up
+      done
+      ip route add default via 172.18.10.252 2>/dev/null || true
+      echo "nameserver 8.8.8.8" > /etc/resolv.conf
+      echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+      echo "VLAN setup complete"
+    fi
+
+# User configuration
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: false
+    plain_text_passwd: changeme
+
+ssh_pwauth: true
+chpasswd:
+  expire: false
+
+# Package management
+package_update: true
+package_upgrade: true
+packages:
+  - vlan
+  - iptables
+  - iptables-persistent
+  - curl
+  - jq
+  - net-tools
+  - tcpdump
+  - traceroute
+
+# Enable IP forwarding
+write_files:
+  # Sysctl settings for routing
+  - path: /etc/sysctl.d/99-ip-forward.conf
+    content: |
+      # Enable IPv4 forwarding for subnet routing
+      net.ipv4.ip_forward = 1
+      # Optional: Enable for IPv6
+      net.ipv6.conf.all.forwarding = 1
+      # Recommended for routers
+      net.ipv4.conf.all.rp_filter = 0
+      net.ipv4.conf.default.rp_filter = 0
+    permissions: '0644'
+
+  # VLAN interface configuration script (more reliable than netplan for VLANs)
+  - path: /opt/setup-vlans.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      
+      # Find the primary ethernet interface (not lo, not tailscale)
+      IFACE=$(ip -o link show | grep -v 'lo:\|tailscale' | head -1 | awk -F': ' '{print $2}')
+      echo "Primary interface: $IFACE"
+      
+      # Load VLAN module
+      modprobe 8021q
+      echo "8021q" >> /etc/modules 2>/dev/null || true
+      
+      # Create VLAN interfaces
+      for VLAN in 10 20 99; do
+        VLAN_IFACE="${IFACE}.${VLAN}"
+        if ! ip link show "$VLAN_IFACE" &>/dev/null; then
+          ip link add link "$IFACE" name "$VLAN_IFACE" type vlan id "$VLAN"
+          echo "Created $VLAN_IFACE"
+        fi
+        
+        # Assign IP
+        case $VLAN in
+          10) IP="172.18.10.253/24" ;;
+          20) IP="172.18.20.253/24" ;;
+          99) IP="172.18.99.253/24" ;;
+        esac
+        
+        ip addr add "$IP" dev "$VLAN_IFACE" 2>/dev/null || echo "$VLAN_IFACE already has IP"
+        ip link set "$VLAN_IFACE" up
+        echo "$VLAN_IFACE: $IP"
+      done
+      
+      # Set default route via VLAN 10 gateway (the host's br-trunk.10)
+      ip route add default via 172.18.10.252 2>/dev/null || echo "Default route exists"
+      
+      # Configure DNS
+      echo "nameserver 8.8.8.8" > /etc/resolv.conf
+      echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+      
+      echo "VLAN setup complete"
+      ip addr show | grep -E "inet.*${IFACE}"
+
+  # Tailscale install and setup script
+  - path: /opt/setup-tailscale.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      
+      LOG_FILE="/var/log/tailscale-setup.log"
+      exec > >(tee -a "$LOG_FILE") 2>&1
+      
+      echo "=== Tailscale Setup Script ==="
+      echo "Started at: $(date)"
+      
+      # Configuration from environment or defaults
+      TAILSCALE_AUTHKEY='tskey-auth-kgEUHEKXXS11CNTRL-ZcNnS1vSzM1MDFfLQASBN1Rnnjws11Ac'
+      ENABLE_BMC="${ENABLE_BMC:-false}"
+      TAILSCALE_TAGS="${TAILSCALE_TAGS:-tag:lab-router}"
+      
+      # Check for auth key
+      if [[ -z "$TAILSCALE_AUTHKEY" ]]; then
+          echo "ERROR: TAILSCALE_AUTHKEY is not set!"
+          echo "Please set it in /etc/default/tailscale-setup and run this script again."
+          exit 1
+      fi
+      
+      # Wait for network
+      echo "Waiting for network..."
+      for i in {1..30}; do
+        if ping -c 1 8.8.8.8 &>/dev/null; then
+          echo "Network is up"
+          break
+        fi
+        sleep 2
+      done
+      
+      # Install Tailscale if not present
+      if ! command -v tailscale &>/dev/null; then
+          echo "Installing Tailscale..."
+          curl -fsSL https://tailscale.com/install.sh | sh
+      else
+          echo "Tailscale already installed."
+      fi
+      
+      # Enable and start tailscaled
+      systemctl enable --now tailscaled
+      sleep 2
+      
+      # Build route list
+      ROUTES="172.18.10.0/24,172.18.20.0/24"
+      if [[ "$ENABLE_BMC" == "true" ]]; then
+          echo "BMC network enabled, adding 172.18.99.0/24"
+          ROUTES="$ROUTES,172.18.99.0/24"
+      else
+          echo "BMC network disabled (set ENABLE_BMC=true to enable)"
+      fi
+      
+      echo "Advertising routes: $ROUTES"
+      
+      # Join Tailscale network
+      tailscale up \
+          --authkey="$TAILSCALE_AUTHKEY" \
+          --advertise-routes="$ROUTES" \
+          --snat-subnet-routes=true \
+          --accept-routes=false \
+          --ssh \
+          --hostname="stargate-boulderlab-gateway"
+      
+      echo "Tailscale setup complete!"
+      tailscale status
+      
+      # Show advertised routes
+      echo ""
+      echo "Advertised routes (need approval in admin console):"
+      tailscale status --json | jq -r '.Self.AllowedIPs // empty | .[]' || echo "(check admin console)"
+
+  # Environment file for Tailscale setup
+  - path: /etc/default/tailscale-setup
+    permissions: '0600'
+    content: |
+      # Tailscale Subnet Router Configuration
+      # 
+      # REQUIRED: Set your Tailscale auth key here
+      # Generate at: https://login.tailscale.com/admin/settings/keys
+      # Use a reusable, pre-authorized key with appropriate tags
+      #
+      TAILSCALE_AUTHKEY='tskey-auth-kgEUHEKXXS11CNTRL-ZcNnS1vSzM1MDFfLQASBN1Rnnjws11Ac'
+      
+      # Set to "true" to advertise the BMC network (172.18.99.0/24)
+      # WARNING: BMC network contains sensitive management interfaces
+      ENABLE_BMC="false"
+      
+      # Tags for this node (comma-separated if multiple)
+      TAILSCALE_TAGS="tag:lab-router"
+
+  # Firewall rules script
+  - path: /opt/setup-firewall.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      
+      echo "=== Configuring Firewall Rules ==="
+      
+      # Find the primary ethernet interface
+      IFACE=$(ip -o link show | grep -v 'lo:\|tailscale' | head -1 | awk -F': ' '{print $2}')
+      echo "Primary interface: $IFACE"
+      
+      # Flush existing rules
+      iptables -F
+      iptables -t nat -F
+      iptables -X 2>/dev/null || true
+      
+      # Default policies
+      iptables -P INPUT DROP
+      iptables -P FORWARD DROP
+      iptables -P OUTPUT ACCEPT
+      
+      # Allow loopback
+      iptables -A INPUT -i lo -j ACCEPT
+      iptables -A OUTPUT -o lo -j ACCEPT
+      
+      # Allow established/related connections
+      iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+      iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
+      
+      # Allow ICMP (ping)
+      iptables -A INPUT -p icmp -j ACCEPT
+      
+      # Allow SSH only from Tailscale interface (not from VLANs or public)
+      iptables -A INPUT -i tailscale0 -p tcp --dport 22 -j ACCEPT
+      
+      # Allow Tailscale UDP (for direct connections)
+      iptables -A INPUT -p udp --dport 41641 -j ACCEPT
+      
+      # Allow DHCP client (for initial boot if needed)
+      iptables -A INPUT -p udp --sport 67:68 --dport 67:68 -j ACCEPT
+      
+      # === FORWARDING RULES ===
+      # Allow forwarding between Tailscale and VLAN interfaces (dynamic names)
+      for VLAN in 10 20 99; do
+        VLAN_IFACE="${IFACE}.${VLAN}"
+        if ip link show "$VLAN_IFACE" &>/dev/null; then
+          iptables -A FORWARD -i tailscale0 -o "$VLAN_IFACE" -j ACCEPT
+          iptables -A FORWARD -i "$VLAN_IFACE" -o tailscale0 -j ACCEPT
+          echo "Added forward rules for $VLAN_IFACE"
+        fi
+      done
+      
+      # Log dropped packets (for debugging)
+      iptables -A INPUT -m limit --limit 5/min -j LOG --log-prefix "iptables-INPUT-DROP: " --log-level 4
+      iptables -A FORWARD -m limit --limit 5/min -j LOG --log-prefix "iptables-FORWARD-DROP: " --log-level 4
+      
+      # Save rules
+      mkdir -p /etc/iptables
+      iptables-save > /etc/iptables/rules.v4
+      
+      echo "Firewall rules applied and saved."
+      echo ""
+      echo "Current iptables rules:"
+      iptables -L -v -n --line-numbers
+
+  # Systemd service for Tailscale setup (runs after first boot)
+  - path: /etc/systemd/system/tailscale-setup.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Tailscale Subnet Router Setup
+      After=network-online.target tailscaled.service
+      Wants=network-online.target
+      ConditionPathExists=!/var/lib/tailscale-setup-done
+      
+      [Service]
+      Type=oneshot
+      EnvironmentFile=/etc/default/tailscale-setup
+      ExecStart=/opt/setup-tailscale.sh
+      ExecStartPost=/bin/touch /var/lib/tailscale-setup-done
+      RemainAfterExit=yes
+      
+      [Install]
+      WantedBy=multi-user.target
+
+# Commands to run on first boot
+runcmd:
+  # Setup VLANs first (before anything network-related)
+  - /opt/setup-vlans.sh
+
+  # Apply sysctl settings
+  - sysctl --system
+
+  # Setup firewall
+  - /opt/setup-firewall.sh
+
+  # Enable tailscale-setup service (runs after reboot or can be triggered manually)
+  - systemctl daemon-reload
+  - systemctl enable tailscale-setup.service
+
+  # If auth key is set, run tailscale setup now
+  - |
+    if grep -q "__TAILSCALE_AUTHKEY__" /etc/default/tailscale-setup; then
+      echo "=============================================="
+      echo "TAILSCALE AUTH KEY NOT SET!"
+      echo ""
+      echo "To complete setup:"
+      echo "1. Edit /etc/default/tailscale-setup"
+      echo "2. Set TAILSCALE_AUTHKEY to your auth key"
+      echo "3. Run: sudo /opt/setup-tailscale.sh"
+      echo "=============================================="
+    else
+      echo "Auth key found, running Tailscale setup..."
+      source /etc/default/tailscale-setup
+      export TAILSCALE_AUTHKEY ENABLE_BMC TAILSCALE_TAGS
+      /opt/setup-tailscale.sh || echo "Tailscale setup failed, run manually"
+    fi
+
+  # Print final status
+  - echo "=== VM First Boot Complete ==="
+  - ip addr
+  - ip route
+
+# Power state: don't reboot after cloud-init
+power_state:
+  mode: reboot
+  message: "Rebooting to apply all configurations..."
+  timeout: 30
+  condition: false

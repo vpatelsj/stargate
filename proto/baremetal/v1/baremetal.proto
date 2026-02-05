@@ -1,0 +1,209 @@
+syntax = "proto3";
+package baremetal.v1;
+
+option go_package = "github.com/vpatelsj/stargate/gen/baremetal/v1;baremetalv1";
+
+import "google/protobuf/timestamp.proto";
+
+// ============================================================================
+// Public Services
+// ============================================================================
+
+// MachineService provides high-level operations on baremetal machines.
+// Customers use this to manage machine lifecycle: reboot, reimage, enter/exit maintenance.
+service MachineService {
+  rpc RegisterMachine(RegisterMachineRequest) returns (Machine);
+  rpc GetMachine(GetMachineRequest) returns (Machine);
+  rpc ListMachines(ListMachinesRequest) returns (ListMachinesResponse);
+  rpc UpdateMachine(UpdateMachineRequest) returns (Machine);
+
+  // Lifecycle operations - each returns an Operation for tracking
+  rpc RebootMachine(RebootMachineRequest) returns (Operation);
+  rpc ReimageMachine(ReimageMachineRequest) returns (Operation);
+  rpc EnterMaintenance(EnterMaintenanceRequest) returns (Operation);
+  rpc ExitMaintenance(ExitMaintenanceRequest) returns (Operation);
+  rpc CancelOperation(CancelOperationRequest) returns (Operation);
+}
+
+// OperationService provides read-only access to operations and streaming.
+// Customers track operation progress via Get/List/Watch/StreamLogs.
+service OperationService {
+  rpc GetOperation(GetOperationRequest) returns (Operation);
+  rpc ListOperations(ListOperationsRequest) returns (ListOperationsResponse);
+  rpc WatchOperations(WatchOperationsRequest) returns (stream OperationEvent);
+  rpc StreamOperationLogs(StreamOperationLogsRequest) returns (stream LogChunk);
+}
+
+// ============================================================================
+// Core Messages
+// ============================================================================
+
+message Machine {
+  string machine_id = 1;
+
+  MachineSpec spec = 2;
+  MachineStatus status = 3;
+
+  map<string,string> labels = 4;
+}
+
+message MachineSpec {
+  string provider = 1;                // e.g., "boulder", "nebius", "tensorwave"
+  repeated string mac_addresses = 2;
+  string serial = 3;
+
+  string ssh_endpoint = 10;           // e.g., via router/jumphost path
+  string bmc_address = 11;            // optional
+  string rack = 12;                   // optional
+
+  // Optional: where this machine should join after reimage
+  TargetClusterRef target_cluster = 20;
+}
+
+message TargetClusterRef {
+  string cluster_id = 1;
+  string kubeconfig_secret_ref = 2;   // impl-defined (could be a secret name, vault ref, etc.)
+}
+
+message MachineStatus {
+  // Phase represents the machine's current lifecycle phase (imperative/intent).
+  // This is the only field set explicitly by API calls.
+  // Allowed values: FACTORY_READY, READY, MAINTENANCE.
+  enum Phase {
+    PHASE_UNSPECIFIED = 0;
+    FACTORY_READY = 1;    // Machine received, not yet provisioned
+    READY = 2;            // Machine provisioned and healthy
+    MAINTENANCE = 3;      // Machine in maintenance mode (required for reimage)
+  }
+  Phase phase = 1;
+
+  // EffectiveState is a derived/observed state computed by the server.
+  // It combines phase, conditions, and active operation status.
+  // This is READ-ONLY from the client perspective.
+  enum EffectiveState {
+    EFFECTIVE_UNSPECIFIED = 0;
+    NEW = 1;              // phase == FACTORY_READY
+    IDLE = 2;             // phase == READY and no active operation
+    BUSY = 3;             // active operation PENDING/RUNNING
+    MAINTENANCE_IDLE = 4; // phase == MAINTENANCE and no active operation
+    ATTENTION = 5;        // NeedsIntervention condition true
+    BLOCKED = 6;          // RMA or Retired condition true
+  }
+  EffectiveState effective_state = 5;
+
+  repeated Condition conditions = 2;
+  string active_operation_id = 3;     // Currently running operation (empty if idle)
+  google.protobuf.Timestamp last_seen = 4;
+}
+
+message Condition {
+  string type = 1; // Reachable, InCustomerCluster, NeedsIntervention, Provisioned, OperationCanceled, etc.
+  bool status = 2;
+  string reason = 3;
+  string message = 4;
+  google.protobuf.Timestamp last_transition_time = 5;
+}
+
+// Operation represents an async lifecycle operation on a machine.
+// Customers track progress via phase, current_stage, and error status.
+message Operation {
+  string operation_id = 1;
+  string machine_id = 2;
+  string request_id = 3;     // Idempotency key
+
+  // Type of operation
+  enum OperationType {
+    OPERATION_TYPE_UNSPECIFIED = 0;
+    REBOOT = 1;
+    REIMAGE = 2;
+    ENTER_MAINTENANCE = 3;
+    EXIT_MAINTENANCE = 4;
+  }
+  OperationType type = 4;
+
+  enum Phase {
+    PHASE_UNSPECIFIED = 0;
+    PENDING = 1;
+    RUNNING = 2;
+    SUCCEEDED = 3;
+    FAILED = 4;
+    CANCELED = 5;
+  }
+  Phase phase = 5;
+
+  string current_stage = 6;  // Current step name for progress display
+
+  // Parameters passed to the operation (e.g., image_ref for reimage)
+  map<string, string> params = 8;
+
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp started_at = 11;
+  google.protobuf.Timestamp finished_at = 12;
+
+  ErrorStatus error = 21;
+}
+
+message ErrorStatus {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+  map<string,string> details = 4;
+}
+
+message OperationEvent {
+  google.protobuf.Timestamp ts = 1;
+  Operation snapshot = 2;
+  string message = 3;
+}
+
+message LogChunk {
+  google.protobuf.Timestamp ts = 1;
+  string operation_id = 2;
+  string stream = 3; // stdout|stderr
+  bytes data = 4;
+}
+
+// ============================================================================
+// Request/Response Messages
+// ============================================================================
+
+// Machine CRUD
+message RegisterMachineRequest { Machine machine = 1; }
+message GetMachineRequest { string machine_id = 1; }
+message ListMachinesRequest { int32 page_size = 1; string page_token = 2; string filter = 3; }
+message ListMachinesResponse { repeated Machine machines = 1; string next_page_token = 2; }
+message UpdateMachineRequest { Machine machine = 1; }
+
+// Machine lifecycle operations
+message RebootMachineRequest {
+  string machine_id = 1;
+  string request_id = 2;  // Required for idempotency
+  bool force = 3;         // Force reboot (no graceful shutdown)
+}
+
+message ReimageMachineRequest {
+  string machine_id = 1;
+  string request_id = 2;  // Required for idempotency
+  string image_ref = 3;   // Optional: image to use (e.g., "ubuntu-2204"). Server picks default if empty.
+}
+
+message EnterMaintenanceRequest {
+  string machine_id = 1;
+  string request_id = 2;  // Required for idempotency
+}
+
+message ExitMaintenanceRequest {
+  string machine_id = 1;
+  string request_id = 2;  // Required for idempotency
+}
+
+message CancelOperationRequest {
+  string operation_id = 1;
+}
+
+// Operation service requests
+message GetOperationRequest { string operation_id = 1; }
+message ListOperationsRequest { int32 page_size = 1; string page_token = 2; string filter = 3; }
+message ListOperationsResponse { repeated Operation operations = 1; string next_page_token = 2; }
+message WatchOperationsRequest { string filter = 1; }
+message StreamOperationLogsRequest { string operation_id = 1; }

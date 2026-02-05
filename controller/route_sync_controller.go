@@ -160,6 +160,16 @@ func (r *RouteSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			}
 		}
 
+		// Add kernel route on DC router for AKS pod CIDR via tailscale0
+		// This enables DC workers to reach AKS pods through the DC router -> Tailscale -> AKS router path
+		if r.DCRouterTSIP != "" && r.sshClientConfig != nil {
+			if err := r.ensureDCRouterRouteToAKS(ctx, podCIDR); err != nil {
+				logger.Error(err, "Failed to add DC router route for AKS pod CIDR")
+			} else {
+				logger.Info("DC router route added for AKS pod CIDR", "podCIDR", podCIDR)
+			}
+		}
+
 		// Update AKS router Tailscale routes to include this node's pod CIDR
 		if r.tsClient != nil && r.AKSRouterTSIP != "" {
 			if err := r.updateAKSRouterTailscaleRoutes(ctx, podCIDR); err != nil {
@@ -808,6 +818,14 @@ func (r *RouteSyncReconciler) ensureAKSRouterKernelRoute(ctx context.Context, po
 // ensureDCRouterKernelRoute adds a kernel route on the DC router for a pod CIDR to a worker IP
 func (r *RouteSyncReconciler) ensureDCRouterKernelRoute(ctx context.Context, podCIDR, workerIP string) error {
 	cmd := fmt.Sprintf("sudo ip route replace %s via %s", podCIDR, workerIP)
+	_, err := r.runSSHCommand(r.DCRouterTSIP, cmd)
+	return err
+}
+
+// ensureDCRouterRouteToAKS adds a kernel route on the DC router for an AKS pod CIDR via tailscale0
+// This enables DC workers to reach AKS pods through the DC router -> Tailscale -> AKS router path
+func (r *RouteSyncReconciler) ensureDCRouterRouteToAKS(ctx context.Context, podCIDR string) error {
+	cmd := fmt.Sprintf("sudo ip route replace %s dev tailscale0", podCIDR)
 	_, err := r.runSSHCommand(r.DCRouterTSIP, cmd)
 	return err
 }

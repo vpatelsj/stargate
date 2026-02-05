@@ -1,0 +1,30 @@
+version: 1
+config:
+  - type: physical
+    name: enp1s0
+    subnets: []
+  - type: vlan
+    name: enp1s0.10
+    vlan_link: enp1s0
+    vlan_id: 10
+    subnets:
+      - type: static
+        address: 172.18.10.253/24
+        gateway: 172.18.10.252
+        dns_nameservers:
+          - 8.8.8.8
+          - 1.1.1.1
+  - type: vlan
+    name: enp1s0.20
+    vlan_link: enp1s0
+    vlan_id: 20
+    subnets:
+      - type: static
+        address: 172.18.20.253/24
+  - type: vlan
+    name: enp1s0.99
+    vlan_link: enp1s0
+    vlan_id: 99
+    subnets:
+      - type: static
+        address: 172.18.99.253/24

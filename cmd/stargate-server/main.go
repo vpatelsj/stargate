@@ -1,0 +1,634 @@
+// Package main implements the Stargate gRPC server for baremetal machine management.
+package main
+
+import (
+	"context"
+	"encoding/base64"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
+
+	pb "github.com/vpatelsj/stargate/gen/baremetal/v1"
+	"github.com/vpatelsj/stargate/internal/stargate/executor"
+	"github.com/vpatelsj/stargate/internal/stargate/lifecycle"
+	"github.com/vpatelsj/stargate/internal/stargate/plans"
+	"github.com/vpatelsj/stargate/internal/stargate/provider"
+	azureprovider "github.com/vpatelsj/stargate/internal/stargate/provider/azure"
+	"github.com/vpatelsj/stargate/internal/stargate/provider/fake"
+	"github.com/vpatelsj/stargate/internal/stargate/store"
+)
+
+var (
+	port     = flag.Int("port", 50051, "The server port")
+	slowMode = flag.Bool("slow", false, "Use slow timing for demos (fake provider)")
+	logLevel = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
+
+	// Provider selection
+	providerType = flag.String("provider", "fake", "Provider type: fake or azure")
+
+	// Azure provider flags
+	kubeconfig          = flag.String("kubeconfig", filepath.Join(os.Getenv("HOME"), ".kube", "config"), "Path to kubeconfig")
+	aksAPIServer        = flag.String("aks-api-server", "", "AKS API server URL")
+	aksClusterName      = flag.String("aks-cluster-name", "", "AKS cluster name")
+	aksResourceGroup    = flag.String("aks-resource-group", "", "AKS resource group")
+	aksSubscriptionID   = flag.String("aks-subscription-id", "", "Azure subscription ID")
+	aksVMResourceGroup  = flag.String("aks-vm-resource-group", "", "Resource group for worker VMs")
+	aksAPIServerPrivate = flag.String("aks-api-server-private-ip", "", "Private IP of AKS API server")
+	aksClusterDNS       = flag.String("aks-cluster-dns", "10.0.0.10", "AKS cluster DNS IP")
+	sshPrivateKeyPath   = flag.String("ssh-private-key", filepath.Join(os.Getenv("HOME"), ".ssh", "id_rsa"), "SSH private key path")
+	sshPort             = flag.Int("ssh-port", 22, "SSH port")
+	sshUser             = flag.String("ssh-user", "ubuntu", "SSH user")
+	dcRouterTailscaleIP = flag.String("dc-router-tailscale-ip", "", "DC router Tailscale IP for SSH proxy")
+	dcRouterPrivateIP   = flag.String("dc-router-private-ip", "", "DC router private IP on DC network for routing")
+	aksNodeSubnet       = flag.String("aks-node-subnet", "", "AKS node subnet CIDR (e.g., 10.224.0.0/16)")
+	aksPodSubnet        = flag.String("aks-pod-subnet", "", "AKS pod subnet CIDR (e.g., 10.244.0.0/20)")
+)
+
+func main() {
+	flag.Parse()
+
+	// Setup structured logging
+	var level slog.Level
+	switch *logLevel {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+	slog.SetDefault(logger)
+
+	// Initialize components
+	s := store.New()
+	pl := plans.NewRegistry()
+
+	// Create runner first (provider needs its EmitLog method)
+	runner := executor.NewRunner(s, nil, pl)
+
+	// Create provider based on type
+	var prov provider.Provider
+	switch *providerType {
+	case "azure":
+		slog.Info("using azure provider")
+
+		// Load kubeconfig
+		config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
+		if err != nil {
+			slog.Error("failed to load kubeconfig", "error", err)
+			os.Exit(1)
+		}
+
+		// Create kubernetes clientset
+		clientset, err := kubernetes.NewForConfig(config)
+		if err != nil {
+			slog.Error("failed to create kubernetes clientset", "error", err)
+			os.Exit(1)
+		}
+
+		// Get CA cert from kubeconfig
+		var caCertBase64 string
+		if len(config.CAData) > 0 {
+			caCertBase64 = base64.StdEncoding.EncodeToString(config.CAData)
+		}
+
+		// Auto-detect API server from kubeconfig if not provided
+		apiServer := *aksAPIServer
+		if apiServer == "" {
+			apiServer = config.Host
+		}
+
+		azureCfg := azureprovider.Config{
+			SSHPrivateKeyPath:     *sshPrivateKeyPath,
+			SSHPort:               *sshPort,
+			SSHUser:               *sshUser,
+			AKSAPIServer:          apiServer,
+			AKSClusterName:        *aksClusterName,
+			AKSResourceGroup:      *aksResourceGroup,
+			AKSClusterDNS:         *aksClusterDNS,
+			AKSSubscriptionID:     *aksSubscriptionID,
+			AKSVMResourceGroup:    *aksVMResourceGroup,
+			AKSAPIServerPrivateIP: *aksAPIServerPrivate,
+			CACertBase64:          caCertBase64,
+			DCRouterTailscaleIP:   *dcRouterTailscaleIP,
+			DCRouterPrivateIP:     *dcRouterPrivateIP,
+			AKSNodeSubnet:         *aksNodeSubnet,
+			AKSPodSubnet:          *aksPodSubnet,
+			Clientset:             clientset,
+		}
+
+		azureProvider := azureprovider.New(azureCfg)
+		azureProvider.SetLogCallback(runner.EmitLog)
+		prov = azureProvider
+
+		slog.Info("azure provider configured",
+			"api-server", apiServer,
+			"cluster", *aksClusterName,
+			"dc-router", *dcRouterTailscaleIP)
+
+	default:
+		// Fake provider
+		var providerCfg *fake.Config
+		if *slowMode {
+			providerCfg = fake.SlowConfig()
+			slog.Info("using slow demo timing")
+		} else {
+			providerCfg = fake.DefaultConfig()
+		}
+		prov = fake.New(providerCfg, runner.EmitLog)
+		slog.Info("using fake provider")
+	}
+
+	// Set the provider on the runner
+	runner.SetProvider(prov)
+
+	// Create gRPC server
+	grpcServer := grpc.NewServer()
+
+	// Create a context for operation execution that's canceled on server shutdown.
+	// This is separate from RPC request contexts which are short-lived.
+	opCtx, opCancel := context.WithCancel(context.Background())
+
+	// Register services
+	machineService := &machineServer{
+		store:  s,
+		runner: runner,
+		plans:  pl,
+		logger: logger.With("service", "machine"),
+		opCtx:  opCtx,
+	}
+	operationService := &operationServer{
+		store:  s,
+		runner: runner,
+		logger: logger.With("service", "operation"),
+	}
+
+	pb.RegisterMachineServiceServer(grpcServer, machineService)
+	pb.RegisterOperationServiceServer(grpcServer, operationService)
+
+	// Enable reflection for grpcurl
+	reflection.Register(grpcServer)
+
+	// Start listener
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
+	if err != nil {
+		slog.Error("failed to listen", "error", err)
+		os.Exit(1)
+	}
+
+	// Graceful shutdown
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		<-ctx.Done()
+		slog.Info("shutting down server")
+		opCancel() // Cancel the operation execution context
+		runner.Shutdown()
+		grpcServer.GracefulStop()
+	}()
+
+	slog.Info("bmdemo-server starting", "port", *port)
+	if err := grpcServer.Serve(lis); err != nil {
+		slog.Error("failed to serve", "error", err)
+		os.Exit(1)
+	}
+}
+
+// ============================================================================
+// MachineService
+// ============================================================================
+
+type machineServer struct {
+	pb.UnimplementedMachineServiceServer
+	store  *store.Store
+	runner *executor.Runner
+	plans  *plans.Registry
+	logger *slog.Logger
+	opCtx  context.Context // Long-lived context for operation execution
+}
+
+// populateEffectiveState computes and sets the effective_state field on a machine.
+// This looks up the active operation (if any) to determine the correct state.
+func (s *machineServer) populateEffectiveState(m *pb.Machine) {
+	if m == nil || m.Status == nil {
+		return
+	}
+
+	var activeOp *pb.Operation
+	if m.Status.ActiveOperationId != "" {
+		activeOp, _ = s.store.GetOperation(m.Status.ActiveOperationId)
+	}
+
+	lifecycle.PopulateEffectiveState(m, activeOp)
+}
+
+// NOTE: sanitizeOperation is no longer needed - workflow fields (plan_id, steps)
+// have been removed from the public proto definition entirely.
+
+func (s *machineServer) RegisterMachine(ctx context.Context, req *pb.RegisterMachineRequest) (*pb.Machine, error) {
+	if req.Machine == nil {
+		return nil, status.Error(codes.InvalidArgument, "machine is required")
+	}
+
+	// Force clean status - ignore any client-supplied status
+	// Machines always start in FACTORY_READY with no conditions or active operations
+	req.Machine.Status = &pb.MachineStatus{
+		Phase:             pb.MachineStatus_FACTORY_READY,
+		EffectiveState:    pb.MachineStatus_EFFECTIVE_UNSPECIFIED,
+		ActiveOperationId: "",
+		Conditions:        nil,
+	}
+
+	m, err := s.store.UpsertMachine(req.Machine)
+	if err != nil {
+		s.logger.Error("failed to register machine", "error", err)
+		return nil, status.Errorf(codes.Internal, "failed to register: %v", err)
+	}
+
+	// Populate effective_state before returning
+	s.populateEffectiveState(m)
+
+	s.logger.Info("registered machine",
+		"machine_id", m.MachineId,
+		"endpoint", m.Spec.GetSshEndpoint())
+	return m, nil
+}
+
+func (s *machineServer) GetMachine(ctx context.Context, req *pb.GetMachineRequest) (*pb.Machine, error) {
+	m, ok := s.store.GetMachine(req.MachineId)
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "machine %q not found", req.MachineId)
+	}
+
+	// Populate effective_state before returning
+	s.populateEffectiveState(m)
+
+	return m, nil
+}
+
+func (s *machineServer) ListMachines(ctx context.Context, req *pb.ListMachinesRequest) (*pb.ListMachinesResponse, error) {
+	machines := s.store.ListMachines()
+
+	// Populate effective_state for each machine before returning
+	for _, m := range machines {
+		s.populateEffectiveState(m)
+	}
+
+	return &pb.ListMachinesResponse{Machines: machines}, nil
+}
+
+// UpdateMachine updates a machine's Spec and Labels.
+// NOTE: Status changes from clients are ignored - status is owned by the backend/executor.
+// This prevents clients from accidentally corrupting machine lifecycle state.
+// The effective_state and phase fields in status are backend-owned and will be ignored.
+func (s *machineServer) UpdateMachine(ctx context.Context, req *pb.UpdateMachineRequest) (*pb.Machine, error) {
+	if req.Machine == nil {
+		return nil, status.Error(codes.InvalidArgument, "machine is required")
+	}
+
+	// Check if machine exists first
+	if _, ok := s.store.GetMachine(req.Machine.MachineId); !ok {
+		return nil, status.Errorf(codes.NotFound, "machine %q not found", req.Machine.MachineId)
+	}
+
+	// Construct update object with only Spec and Labels.
+	// Status is explicitly nil to prevent clobbering backend-owned status
+	// (conditions, active_operation_id, effective_state, phase).
+	// The store treats nil Spec/Labels as "no change".
+	update := &pb.Machine{
+		MachineId: req.Machine.MachineId,
+		Spec:      req.Machine.Spec,
+		Labels:    req.Machine.Labels,
+		Status:    nil, // Never pass client status to store
+	}
+
+	m, err := s.store.UpdateMachine(update)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "%v", err)
+	}
+
+	// Populate effective_state before returning
+	s.populateEffectiveState(m)
+
+	s.logger.Info("updated machine", "machine_id", m.MachineId)
+	return m, nil
+}
+
+// RebootMachine starts a reboot operation on a machine.
+// Can be called on machines in READY or MAINTENANCE phase.
+func (s *machineServer) RebootMachine(ctx context.Context, req *pb.RebootMachineRequest) (*pb.Operation, error) {
+	if req.MachineId == "" {
+		return nil, status.Error(codes.InvalidArgument, "machine_id is required")
+	}
+	if req.RequestId == "" {
+		return nil, status.Error(codes.InvalidArgument, "request_id is required for idempotency")
+	}
+
+	machine, ok := s.store.GetMachine(req.MachineId)
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "machine %q not found", req.MachineId)
+	}
+
+	// Reboot allowed in READY or MAINTENANCE
+	phase := machine.Status.GetPhase()
+	if phase != pb.MachineStatus_READY && phase != pb.MachineStatus_MAINTENANCE {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"machine %q is in phase %s; reboot requires READY or MAINTENANCE", req.MachineId, phase)
+	}
+
+	return s.startOperation(req.MachineId, req.RequestId, pb.Operation_REBOOT, nil)
+}
+
+// ReimageMachine starts a reimage operation on a machine.
+// Requires the machine to be in MAINTENANCE phase (safety gate).
+func (s *machineServer) ReimageMachine(ctx context.Context, req *pb.ReimageMachineRequest) (*pb.Operation, error) {
+	if req.MachineId == "" {
+		return nil, status.Error(codes.InvalidArgument, "machine_id is required")
+	}
+	if req.RequestId == "" {
+		return nil, status.Error(codes.InvalidArgument, "request_id is required for idempotency")
+	}
+
+	machine, ok := s.store.GetMachine(req.MachineId)
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "machine %q not found", req.MachineId)
+	}
+
+	// Reimage REQUIRES MAINTENANCE phase (safety gate per design decision D)
+	if machine.Status.GetPhase() != pb.MachineStatus_MAINTENANCE {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"machine %q is in phase %s; reimage requires MAINTENANCE", req.MachineId, machine.Status.GetPhase())
+	}
+
+	// Store image_ref in operation params
+	params := make(map[string]string)
+	imageRef := req.ImageRef
+	if imageRef == "" {
+		imageRef = "ubuntu-2204-lab" // Default lab image
+	}
+	params["image_ref"] = imageRef
+
+	// Use default reimage plan (server-side plan selection per decision E)
+	return s.startOperation(req.MachineId, req.RequestId, pb.Operation_REIMAGE, params)
+}
+
+// EnterMaintenance transitions a machine to MAINTENANCE phase.
+func (s *machineServer) EnterMaintenance(ctx context.Context, req *pb.EnterMaintenanceRequest) (*pb.Operation, error) {
+	if req.MachineId == "" {
+		return nil, status.Error(codes.InvalidArgument, "machine_id is required")
+	}
+	if req.RequestId == "" {
+		return nil, status.Error(codes.InvalidArgument, "request_id is required for idempotency")
+	}
+
+	_, ok := s.store.GetMachine(req.MachineId)
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "machine %q not found", req.MachineId)
+	}
+
+	return s.startOperation(req.MachineId, req.RequestId, pb.Operation_ENTER_MAINTENANCE, nil)
+}
+
+// ExitMaintenance transitions a machine out of MAINTENANCE phase to READY.
+func (s *machineServer) ExitMaintenance(ctx context.Context, req *pb.ExitMaintenanceRequest) (*pb.Operation, error) {
+	if req.MachineId == "" {
+		return nil, status.Error(codes.InvalidArgument, "machine_id is required")
+	}
+	if req.RequestId == "" {
+		return nil, status.Error(codes.InvalidArgument, "request_id is required for idempotency")
+	}
+
+	machine, ok := s.store.GetMachine(req.MachineId)
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "machine %q not found", req.MachineId)
+	}
+
+	// ExitMaintenance only makes sense if in MAINTENANCE
+	if machine.Status.GetPhase() != pb.MachineStatus_MAINTENANCE {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"machine %q is in phase %s; exit-maintenance requires MAINTENANCE", req.MachineId, machine.Status.GetPhase())
+	}
+
+	return s.startOperation(req.MachineId, req.RequestId, pb.Operation_EXIT_MAINTENANCE, nil)
+}
+
+// CancelOperation cancels an in-progress operation.
+func (s *machineServer) CancelOperation(ctx context.Context, req *pb.CancelOperationRequest) (*pb.Operation, error) {
+	if req.OperationId == "" {
+		return nil, status.Error(codes.InvalidArgument, "operation_id is required")
+	}
+
+	if err := s.runner.CancelOperation(req.OperationId); err != nil {
+		// Map sentinel errors to gRPC codes
+		if errors.Is(err, store.ErrOperationNotFound) {
+			return nil, status.Errorf(codes.NotFound, "%v", err)
+		}
+		if errors.Is(err, store.ErrOperationAlreadyFinished) {
+			return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+		}
+		return nil, status.Errorf(codes.Internal, "%v", err)
+	}
+
+	op, ok := s.store.GetOperation(req.OperationId)
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "operation %q not found", req.OperationId)
+	}
+
+	s.logger.Info("cancelled operation", "operation_id", req.OperationId, "phase", op.Phase)
+	return op, nil
+}
+
+// startOperation is the shared helper that creates and starts an operation.
+// Enforces idempotency scoped by (machine_id, request_id) and single active operation per machine.
+func (s *machineServer) startOperation(machineID, requestID string, opType pb.Operation_OperationType, params map[string]string) (*pb.Operation, error) {
+	// Create operation (idempotent) - this handles:
+	// - Returning existing operation for same (machine_id, request_id)
+	// - Rejecting if machine has a different active operation
+	// - Creating new operation if no conflicts
+	op, created, err := s.store.CreateOperationIfNotExists(requestID, machineID, opType, params)
+	if err != nil {
+		// Map sentinel errors to gRPC codes
+		if errors.Is(err, store.ErrMachineNotFound) {
+			return nil, status.Errorf(codes.NotFound, "%v", err)
+		}
+		if errors.Is(err, store.ErrMachineHasActiveOperation) {
+			return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+		}
+		s.logger.Error("failed to create operation",
+			"machine_id", machineID,
+			"request_id", requestID,
+			"error", err)
+		return nil, status.Errorf(codes.Internal, "%v", err)
+	}
+
+	if created {
+		s.logger.Info("created operation",
+			"operation_id", op.OperationId,
+			"machine_id", machineID,
+			"type", opType,
+			"request_id", requestID)
+
+		// Start execution asynchronously using the long-lived opCtx
+		// (not the RPC request ctx which is canceled when the RPC returns)
+		if err := s.runner.StartOperation(s.opCtx, op.OperationId); err != nil {
+			s.logger.Error("failed to start operation execution",
+				"operation_id", op.OperationId,
+				"error", err)
+			// Operation is created but failed to start - it will stay PENDING
+		}
+	} else {
+		s.logger.Debug("idempotent operation request",
+			"operation_id", op.OperationId,
+			"request_id", requestID)
+
+		// If operation is still PENDING, try to start it (retry scenario)
+		if op.Phase == pb.Operation_PENDING {
+			s.logger.Info("retrying pending operation",
+				"operation_id", op.OperationId,
+				"request_id", requestID)
+			if err := s.runner.StartOperation(s.opCtx, op.OperationId); err != nil {
+				s.logger.Error("failed to retry operation execution",
+					"operation_id", op.OperationId,
+					"error", err)
+			}
+		}
+	}
+
+	return op, nil
+}
+
+// ============================================================================
+// OperationService
+// ============================================================================
+
+type operationServer struct {
+	pb.UnimplementedOperationServiceServer
+	store  *store.Store
+	runner *executor.Runner
+	logger *slog.Logger
+}
+
+func (s *operationServer) GetOperation(ctx context.Context, req *pb.GetOperationRequest) (*pb.Operation, error) {
+	op, ok := s.store.GetOperation(req.OperationId)
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "operation %q not found", req.OperationId)
+	}
+	return op, nil
+}
+
+func (s *operationServer) ListOperations(ctx context.Context, req *pb.ListOperationsRequest) (*pb.ListOperationsResponse, error) {
+	ops := s.store.ListOperations()
+
+	// Apply filter if provided (simple machine_id filter)
+	if req.Filter != "" {
+		var filtered []*pb.Operation
+		for _, op := range ops {
+			// Basic filter matching
+			if req.Filter == fmt.Sprintf("machine_id=%s", op.MachineId) {
+				filtered = append(filtered, op)
+			}
+		}
+		ops = filtered
+	}
+
+	// Return operations directly - proto no longer has internal workflow fields
+	return &pb.ListOperationsResponse{Operations: ops}, nil
+}
+
+func (s *operationServer) WatchOperations(req *pb.WatchOperationsRequest, stream pb.OperationService_WatchOperationsServer) error {
+	s.logger.Debug("watch operations started", "filter", req.Filter)
+
+	// Create event channel
+	eventCh := make(chan *pb.OperationEvent, 100)
+
+	// Subscribe to events
+	unsubscribe := s.runner.SubscribeEvents(func(event *pb.OperationEvent) {
+		// Apply filter if provided
+		if req.Filter != "" {
+			// Simple filter: "machine_id=xxx"
+			if event.Snapshot != nil {
+				expectedFilter := fmt.Sprintf("machine_id=%s", event.Snapshot.MachineId)
+				if req.Filter != expectedFilter {
+					return
+				}
+			}
+		}
+
+		// Event snapshot is already sanitized (proto has no internal fields)
+		// and cloned by executor.emitEvent
+		select {
+		case eventCh <- event:
+		default:
+			// Channel full, drop event
+			s.logger.Warn("event channel full, dropping event")
+		}
+	})
+	defer unsubscribe()
+
+	// Stream events
+	for {
+		select {
+		case event := <-eventCh:
+			if err := stream.Send(event); err != nil {
+				s.logger.Debug("watch operations stream error", "error", err)
+				return err
+			}
+		case <-stream.Context().Done():
+			s.logger.Debug("watch operations client disconnected")
+			return nil
+		}
+	}
+}
+
+func (s *operationServer) StreamOperationLogs(req *pb.StreamOperationLogsRequest, stream pb.OperationService_StreamOperationLogsServer) error {
+	s.logger.Debug("stream logs started", "operation_id", req.OperationId)
+
+	// Verify operation exists
+	if _, ok := s.store.GetOperation(req.OperationId); !ok {
+		return status.Errorf(codes.NotFound, "operation %q not found", req.OperationId)
+	}
+
+	// Create log channel
+	logCh := make(chan *pb.LogChunk, 100)
+
+	// Subscribe to logs for this operation
+	unsubscribe := s.runner.SubscribeLogs(req.OperationId, func(chunk *pb.LogChunk) {
+		select {
+		case logCh <- chunk:
+		default:
+			// Channel full, drop log
+		}
+	})
+	defer unsubscribe()
+
+	// Stream logs
+	for {
+		select {
+		case chunk := <-logCh:
+			if err := stream.Send(chunk); err != nil {
+				s.logger.Debug("log stream error", "operation_id", req.OperationId, "error", err)
+				return err
+			}
+		case <-stream.Context().Done():
+			s.logger.Debug("log stream client disconnected", "operation_id", req.OperationId)
+			return nil
+		}
+	}
+}

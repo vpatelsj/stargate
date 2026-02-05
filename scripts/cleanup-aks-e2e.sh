@@ -61,7 +61,9 @@ fi
 # Kill local processes
 log_step "Killing local processes..."
 pkill -f "kubectl port-forward" || true
+pkill -f stargate-server || true
 pkill -f azure-controller || true
+pkill -f boulder-controller || true
 log_info "Local processes stopped"
 
 # Delete Azure resources
