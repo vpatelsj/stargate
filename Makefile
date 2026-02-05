@@ -1,5 +1,6 @@
 .PHONY: all build run test clean install-crds uninstall-crds azure-controller qemu-controller simulator \
-        clean-all clean-kind clean-azure clean-tailscale clean-local prep-dc-inventory azure
+        clean-all clean-kind clean-azure clean-tailscale clean-local prep-dc-inventory azure \
+        proto bmdemo-server bmdemo-cli bmdemo boulder-controller
 
 # Go parameters
 GOCMD=go
@@ -9,19 +10,25 @@ GOMOD=$(GOCMD) mod
 
 # Binary names
 AZURE_CONTROLLER_BIN=bin/azure-controller
+BOULDER_CONTROLLER_BIN=bin/boulder-controller
 QEMU_CONTROLLER_BIN=bin/qemu-controller
 SIMULATOR_BIN=bin/simulator
 PREP_DC_INVENTORY_BIN=bin/prep-dc-inventory
 AZURE_BIN=bin/azure
+BMDEMO_SERVER_BIN=bin/bmdemo-server
+BMDEMO_CLI_BIN=bin/bmdemo-cli
 
 all: build
 
 ## Build targets
 
-build: azure-controller qemu-controller simulator prep-dc-inventory azure
+build: azure-controller boulder-controller qemu-controller simulator prep-dc-inventory azure bmdemo
 
 azure-controller:
 	$(GOBUILD) -o $(AZURE_CONTROLLER_BIN) ./cmd/azure-controller/main.go
+
+boulder-controller:
+	$(GOBUILD) -o $(BOULDER_CONTROLLER_BIN) ./cmd/boulder-controller/main.go
 
 qemu-controller:
 	$(GOBUILD) -o $(QEMU_CONTROLLER_BIN) ./cmd/qemu-controller/main.go
@@ -84,6 +91,21 @@ test:
 deps:
 	$(GOMOD) download
 	$(GOMOD) tidy
+
+## Proto generation (requires buf: https://buf.build/docs/installation)
+
+proto:
+	buf generate
+
+## Baremetal demo gRPC server/client
+
+bmdemo: bmdemo-server bmdemo-cli
+
+bmdemo-server:
+	$(GOBUILD) -o $(BMDEMO_SERVER_BIN) ./cmd/bmdemo-server/main.go
+
+bmdemo-cli:
+	$(GOBUILD) -o $(BMDEMO_CLI_BIN) ./cmd/bmdemo-cli/main.go
 
 ## Clean
 
@@ -184,6 +206,10 @@ help:
 	@echo "  delete-samples  - Delete sample resources"
 	@echo "  test            - Run tests"
 	@echo "  deps            - Download and tidy dependencies"
+	@echo "  proto           - Generate Go code from proto files (requires buf)"
+	@echo "  bmdemo          - Build bmdemo-server and bmdemo-cli"
+	@echo "  bmdemo-server   - Build the baremetal demo gRPC server"
+	@echo "  bmdemo-cli      - Build the baremetal demo CLI client"
 	@echo "  clean           - Remove built binaries"
 	@echo "  clean-all       - Full cleanup: Kind cluster, Azure RGs, Tailscale, local"
 	@echo "  clean-kind      - Delete local Kind cluster"

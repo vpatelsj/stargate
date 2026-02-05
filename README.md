@@ -283,6 +283,124 @@ Controller that watches Operation CRDs and provisions workers:
 | `-azure-vnet-name` | AKS VNet name |
 | `-dc-subnet-cidr` | DC network CIDR |
 
+### boulder-controller
+
+Controller for bootstrapping physical Boulder lab servers as AKS worker nodes. Boulder nodes connect to AKS directly via Tailscale (no Azure VNet).
+
+**Prerequisites:**
+- AKS cluster already deployed (via `deploy-aks-e2e.sh`)
+- `stargate-boulderlab-gateway` VM running and connected to Tailscale
+- Tailscale subnet routes approved for `172.18.10.0/24` and `172.18.20.0/24`
+
+**Quick Start:**
+
+```bash
+# 1. Deploy AKS cluster first
+./scripts/deploy-aks-e2e.sh stargate-aks-mx-1
+
+# 2. Deploy boulder lab (automated)
+./scripts/deploy-boulder-lab.sh stargate-aks-mx-1 --workers boulder-node-1:100.126.136.95
+
+# Or manually start the controller:
+```
+
+**Manual Controller Start:**
+
+```bash
+# Get cluster details
+AKS_FQDN=$(az aks show -g stargate-aks-mx-1 -n stargate-aks-mx-1 --query fqdn -o tsv)
+AKS_ROUTER_TS_IP=$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "stargate-aks-mx-1-router") | .TailscaleIPs[0]')
+DC_ROUTER_TS_IP=$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "stargate-aks-mx-1-dc-router") | .TailscaleIPs[0]')
+
+# Start boulder-controller
+./bin/boulder-controller \
+  -control-plane-mode aks \
+  -aks-api-server "https://${AKS_FQDN}:443" \
+  -aks-cluster-name stargate-aks-mx-1 \
+  -aks-resource-group stargate-aks-mx-1 \
+  -aks-subscription-id "$(az account show --query id -o tsv)" \
+  -boulder-gateway-ip "100.126.136.95" \
+  -aks-router-tailscale-ip "$AKS_ROUTER_TS_IP" \
+  -dc-router-tailscale-ip "$DC_ROUTER_TS_IP" \
+  -azure-route-table-name "stargate-workers-rt" \
+  -azure-route-table-rg "MC_stargate-aks-mx-1_stargate-aks-mx-1_canadacentral" \
+  -aks-router-private-ip "10.237.0.4" \
+  -namespace boulder-dc
+```
+
+**Boulder Controller Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-control-plane-mode` | `aks` (only mode for boulder) |
+| `-aks-api-server` | AKS API server FQDN (e.g., `https://xxx.hcp.canadacentral.azmk8s.io:443`) |
+| `-aks-cluster-name` | AKS cluster name |
+| `-aks-resource-group` | AKS cluster resource group |
+| `-aks-subscription-id` | Azure subscription ID |
+| `-boulder-gateway-ip` | Tailscale IP of stargate-boulderlab-gateway |
+| `-aks-router-tailscale-ip` | Tailscale IP of the AKS router |
+| `-dc-router-tailscale-ip` | Tailscale IP of the DC router |
+| `-azure-route-table-name` | Azure route table name for pod CIDR routes |
+| `-azure-route-table-rg` | Resource group containing the route table (MC_* group) |
+| `-aks-router-private-ip` | Private IP of AKS router (next hop for Azure routes) |
+| `-namespace` | Kubernetes namespace to watch for operations |
+
+**Create Boulder Server and Operation:**
+
+```bash
+# Create namespace
+kubectl create namespace boulder-dc
+
+# Create Server CR (use Tailscale IP as IPv4)
+kubectl apply -f - <<EOF
+apiVersion: stargate.io/v1alpha1
+kind: Server
+metadata:
+  name: boulder-node-1
+  namespace: boulder-dc
+spec:
+  mac: "00:00:00:00:00:00"
+  provider: boulder
+  ipv4: "100.126.136.95"  # Tailscale IP of the boulder gateway
+EOF
+
+# Create ProvisioningProfile
+kubectl apply -f - <<EOF
+apiVersion: stargate.io/v1alpha1
+kind: ProvisioningProfile
+metadata:
+  name: boulder-k8s-worker
+  namespace: boulder-dc
+spec:
+  kubernetesVersion: "1.33"
+  containerRuntime: containerd
+  sshCredentialsSecretRef: boulder-ssh-credentials
+  adminUsername: ubuntu
+EOF
+
+# Trigger repave operation
+kubectl apply -f - <<EOF
+apiVersion: stargate.io/v1alpha1
+kind: Operation
+metadata:
+  name: boulder-node-1-repave
+  namespace: boulder-dc
+spec:
+  serverRef:
+    name: boulder-node-1
+  provisioningProfileRef:
+    name: boulder-k8s-worker
+  operation: repave
+EOF
+```
+
+**Post-Bootstrap:**
+
+After the operation succeeds, approve the pod CIDR route in Tailscale admin:
+1. Go to https://login.tailscale.com/admin/machines
+2. Find `stargate-boulderlab-gateway`
+3. Approve the `10.244.x.0/24` route (where x is assigned by the controller)
+
 ## Connectivity Verification
 
 After deployment, use Goldpinger to verify pod-to-pod connectivity:

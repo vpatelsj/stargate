@@ -56,6 +56,12 @@ type OperationReconciler struct {
 	AzureVNetName        string // Azure VNet name containing the subnets
 	AzureSubnetName      string // Azure subnet name where AKS nodes reside
 
+	// Boulder-specific configuration
+	BoulderGatewayIP string // Tailscale IP of the Boulder gateway (the node itself advertises routes)
+
+	// Provider filter - which server provider to handle (e.g., "azure", "boulder", or "" for all)
+	ProviderFilter string
+
 	// Runtime fields (populated automatically)
 	Clientset    *kubernetes.Clientset // For creating SA tokens
 	CACertBase64 string                // Fetched from rest config
@@ -69,6 +75,7 @@ type bootstrapConfig struct {
 	sshPrivateKey     string // The actual key content or path
 	sshPrivateKeyPath string // Temp file path if from secret
 	sshPort           int
+	useTailscaleSSH   bool // Use tailscale ssh instead of regular ssh
 }
 
 // +kubebuilder:rbac:groups=stargate.io,resources=operations,verbs=get;list;watch;create;update;patch;delete
@@ -105,9 +112,13 @@ func (r *OperationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return r.updateOperationStatus(ctx, &operation, api.OperationPhaseFailed, fmt.Sprintf("Server not found: %v", err))
 	}
 
-	// Provider gating: only handle azure servers
-	if server.Spec.Provider != "" && server.Spec.Provider != "azure" {
-		logger.Info("Skipping server with non-azure provider", "server", server.Name, "provider", server.Spec.Provider)
+	// Provider gating: filter by configured provider
+	expectedProvider := r.ProviderFilter
+	if expectedProvider == "" {
+		expectedProvider = "azure" // Default to azure for backwards compatibility
+	}
+	if server.Spec.Provider != "" && server.Spec.Provider != expectedProvider {
+		logger.Info("Skipping server with different provider", "server", server.Name, "provider", server.Spec.Provider, "expected", expectedProvider)
 		return ctrl.Result{}, nil
 	}
 
@@ -139,7 +150,7 @@ func (r *OperationReconciler) handlePending(ctx context.Context, operation *api.
 	logger.Info("Initiating repave via SSH bootstrap", "server", server.Name, "ipv4", server.Spec.IPv4, "k8sVersion", profile.Spec.KubernetesVersion)
 
 	// Resolve bootstrap configuration from profile and secrets
-	cfg, cleanup, err := r.resolveBootstrapConfig(ctx, operation.Namespace, profile)
+	cfg, cleanup, err := r.resolveBootstrapConfig(ctx, operation.Namespace, profile, server)
 	if err != nil {
 		logger.Error(err, "Failed to resolve bootstrap config")
 		return r.updateOperationStatus(ctx, operation, api.OperationPhaseFailed, fmt.Sprintf("Failed to resolve config: %v", err))
@@ -202,12 +213,13 @@ func (r *OperationReconciler) handlePending(ctx context.Context, operation *api.
 }
 
 // resolveBootstrapConfig resolves configuration from profile and secrets
-func (r *OperationReconciler) resolveBootstrapConfig(ctx context.Context, namespace string, profile *api.ProvisioningProfile) (*bootstrapConfig, func(), error) {
+func (r *OperationReconciler) resolveBootstrapConfig(ctx context.Context, namespace string, profile *api.ProvisioningProfile, server *api.Server) (*bootstrapConfig, func(), error) {
 	cfg := &bootstrapConfig{
 		kubernetesVersion: profile.Spec.KubernetesVersion,
 		adminUsername:     r.AdminUsername,
 		sshPrivateKeyPath: r.SSHPrivateKeyPath,
 		sshPort:           r.SSHPort,
+		useTailscaleSSH:   server.Spec.Provider == "boulder", // Boulder provider uses Tailscale SSH
 	}
 
 	cleanup := func() {} // No-op by default
@@ -308,7 +320,7 @@ func (r *OperationReconciler) bootstrapServer(ctx context.Context, server *api.S
 			return fmt.Errorf("get SA token for AKS bootstrap: %w", err)
 		}
 		log.FromContext(ctx).Info("Building AKS bootstrap script", "nodeIP", target, "vmName", server.Name)
-		script = r.buildAKSBootstrapScript(cfg.kubernetesVersion, target, server.Name, saToken)
+		script = r.buildAKSBootstrapScript(cfg.kubernetesVersion, target, server.Name, saToken, server.Spec.Provider)
 		// Debug: write script to file for inspection
 		os.WriteFile("/tmp/aks-bootstrap-debug.sh", []byte(script), 0755)
 	} else {
@@ -569,7 +581,7 @@ echo "Bootstrap complete!"
 // buildAKSBootstrapScript creates a bash script for AKS node join
 // This uses a ServiceAccount token (not bootstrap tokens) because AKS doesn't support TLS bootstrapping
 // It also sets provider-id so the Azure cloud-controller-manager recognizes the node
-func (r *OperationReconciler) buildAKSBootstrapScript(kubernetesVersion, nodeIP, vmName, saToken string) string {
+func (r *OperationReconciler) buildAKSBootstrapScript(kubernetesVersion, nodeIP, vmName, saToken, provider string) string {
 	// Default values
 	clusterDNS := r.AKSClusterDNS
 	if clusterDNS == "" {
@@ -594,12 +606,14 @@ func (r *OperationReconciler) buildAKSBootstrapScript(kubernetesVersion, nodeIP,
 
 	// Use private IP for API server if configured (for Tailscale mesh connectivity)
 	// The AKS router proxies port 6443 to the AKS API server
+	// NOTE: Boulder nodes access AKS directly via Tailscale, so they use the public FQDN
 	apiServer := r.AKSAPIServer
 	// Ensure the API server URL has https:// prefix
 	if !strings.HasPrefix(apiServer, "https://") && !strings.HasPrefix(apiServer, "http://") {
 		apiServer = "https://" + apiServer
 	}
-	if r.AKSAPIServerPrivateIP != "" {
+	// Only use private IP for Azure DC workers (not boulder nodes which use Tailscale directly)
+	if r.AKSAPIServerPrivateIP != "" && provider != "boulder" {
 		apiServer = fmt.Sprintf("https://%s:6443", r.AKSAPIServerPrivateIP)
 	}
 
@@ -644,8 +658,14 @@ rm -rf /var/lib/cni/networks/* 2>/dev/null || true
 rm -rf /var/lib/cni/cache/* 2>/dev/null || true
 rm -f /etc/cni/net.d/*.conf /etc/cni/net.d/*.conflist 2>/dev/null || true
 
-# Link resolv.conf
-ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf || true
+# Ensure DNS is configured - only link to systemd-resolved if current resolv.conf is empty or missing
+if ! grep -q 'nameserver' /etc/resolv.conf 2>/dev/null; then
+    if [ -f /run/systemd/resolve/resolv.conf ]; then
+        ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf || true
+    else
+        echo 'nameserver 8.8.8.8' > /etc/resolv.conf
+    fi
+fi
 
 # Create required directories
 mkdir -p /var/lib/cni
@@ -887,8 +907,18 @@ KUBELET_SVC
 
 # Kubelet environment with provider-id and node labels
 # NOTE: kubernetes.azure.com/ebpf-dataplane=cilium is required for Cilium DaemonSet to schedule on this node
+BASE_LABELS="kubernetes.azure.com/cluster=MC_${RESOURCE_GROUP}_${CLUSTER_NAME},kubernetes.azure.com/agentpool=stargate,kubernetes.azure.com/mode=user,kubernetes.azure.com/role=agent,kubernetes.azure.com/managed=false,kubernetes.azure.com/stargate=true,kubernetes.azure.com/ebpf-dataplane=cilium"
+`+fmt.Sprintf(`
+# Add provider-specific labels
+PROVIDER="%s"
+if [ "$PROVIDER" = "boulder" ]; then
+  NODE_LABELS="${BASE_LABELS},stargate.io/provider=boulder,node.kubernetes.io/datacenter=boulder-lab"
+else
+  NODE_LABELS="${BASE_LABELS}"
+fi
+`, provider)+`
 cat > /etc/default/kubelet <<KUBELET_ENV
-KUBELET_EXTRA_ARGS=--provider-id=${PROVIDER_ID} --node-ip=${NODE_IP} --node-labels=kubernetes.azure.com/cluster=MC_${RESOURCE_GROUP}_${CLUSTER_NAME},kubernetes.azure.com/agentpool=stargate,kubernetes.azure.com/mode=user,kubernetes.azure.com/role=agent,kubernetes.azure.com/managed=false,kubernetes.azure.com/stargate=true,kubernetes.azure.com/ebpf-dataplane=cilium
+KUBELET_EXTRA_ARGS=--provider-id=${PROVIDER_ID} --node-ip=${NODE_IP} --node-labels=${NODE_LABELS}
 KUBELET_ENV
 
 # Verify kubelet.service was written correctly
@@ -1035,27 +1065,44 @@ echo "kubelet is installed and running successfully"
 
 // runRemoteBootstrap executes the bootstrap script on the remote server via SSH
 func (r *OperationReconciler) runRemoteBootstrap(ctx context.Context, host, routerIP, script string, cfg *bootstrapConfig) error {
-	sshArgs := []string{
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=/dev/null",
-		"-o", "ConnectTimeout=30",
-		"-i", cfg.sshPrivateKeyPath,
+	logger := log.FromContext(ctx)
+	var cmd *exec.Cmd
+
+	logger.Info("Running remote bootstrap", "host", host, "routerIP", routerIP, "useTailscaleSSH", cfg.useTailscaleSSH)
+
+	if cfg.useTailscaleSSH {
+		// Use tailscale ssh for providers that require it (like boulder)
+		// tailscale ssh uses the Tailscale mesh for authentication
+		logger.Info("Using Tailscale SSH for bootstrap")
+		cmd = exec.CommandContext(ctx, "tailscale", "ssh",
+			fmt.Sprintf("root@%s", host),
+			"bash", "-s",
+		)
+	} else {
+		// Standard SSH with key authentication
+		sshArgs := []string{
+			"-o", "StrictHostKeyChecking=no",
+			"-o", "UserKnownHostsFile=/dev/null",
+			"-o", "ConnectTimeout=30",
+			"-i", cfg.sshPrivateKeyPath,
+		}
+
+		// If we have a router IP, SSH via the router as a proxy
+		if routerIP != "" {
+			proxyCmd := fmt.Sprintf("ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i %s -p %d -W %%h:%%p %s@%s",
+				cfg.sshPrivateKeyPath, cfg.sshPort, cfg.adminUsername, routerIP)
+			sshArgs = append(sshArgs, "-o", fmt.Sprintf("ProxyCommand=%s", proxyCmd))
+		}
+
+		sshArgs = append(sshArgs,
+			"-p", strconv.Itoa(cfg.sshPort),
+			fmt.Sprintf("%s@%s", cfg.adminUsername, host),
+			"sudo", "bash", "-s",
+		)
+
+		cmd = exec.CommandContext(ctx, "ssh", sshArgs...)
 	}
 
-	// If we have a router IP, SSH via the router as a proxy
-	if routerIP != "" {
-		proxyCmd := fmt.Sprintf("ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i %s -p %d -W %%h:%%p %s@%s",
-			cfg.sshPrivateKeyPath, cfg.sshPort, cfg.adminUsername, routerIP)
-		sshArgs = append(sshArgs, "-o", fmt.Sprintf("ProxyCommand=%s", proxyCmd))
-	}
-
-	sshArgs = append(sshArgs,
-		"-p", strconv.Itoa(cfg.sshPort),
-		fmt.Sprintf("%s@%s", cfg.adminUsername, host),
-		"sudo", "bash", "-s",
-	)
-
-	cmd := exec.CommandContext(ctx, "ssh", sshArgs...)
 	cmd.Stdin = strings.NewReader(script)
 
 	var buf bytes.Buffer
@@ -1182,38 +1229,224 @@ func (r *OperationReconciler) InitializeAKSCredentials(cfg interface{}) error {
 // This configures:
 // 1. DC router: adds route for node's pod CIDR via the node IP
 // 2. Azure route table: adds route for pod CIDR via AKS router
+// 3. For Boulder nodes: configures Tailscale routes and AKS/DC router routes
 func (r *OperationReconciler) configureNodeRouting(ctx context.Context, server *api.Server, cfg *bootstrapConfig) error {
 	logger := log.FromContext(ctx)
 
-	// Calculate the pod CIDR for this node (same logic as in bootstrap script)
 	nodeIP := server.Spec.IPv4
-	parts := strings.Split(nodeIP, ".")
-	if len(parts) != 4 {
-		return fmt.Errorf("invalid node IP format: %s", nodeIP)
+	var podCIDR string
+	var actualNodeName string
+
+	// For Boulder nodes, get the pod CIDR from Kubernetes (assigned by controller-manager)
+	if server.Spec.Provider == "boulder" {
+		// Boulder nodes register with their actual hostname, not the Server CR name
+		// Query the hostname from the machine via Tailscale SSH
+		hostnameCmd := exec.CommandContext(ctx, "tailscale", "ssh", fmt.Sprintf("ubuntu@%s", nodeIP), "hostname")
+		hostnameOut, err := hostnameCmd.Output()
+		if err != nil {
+			logger.Error(err, "Failed to get hostname from Boulder node, falling back to Server name")
+			actualNodeName = server.Name
+		} else {
+			actualNodeName = strings.TrimSpace(string(hostnameOut))
+			logger.Info("Got actual hostname from Boulder node", "hostname", actualNodeName)
+		}
+
+		podCIDR, err = r.waitForNodePodCIDR(ctx, actualNodeName)
+		if err != nil {
+			return fmt.Errorf("failed to get pod CIDR for Boulder node: %w", err)
+		}
+	} else {
+		actualNodeName = server.Name
+		// For Azure DC workers, calculate the pod CIDR from IP (same logic as in bootstrap script)
+		parts := strings.Split(nodeIP, ".")
+		if len(parts) != 4 {
+			return fmt.Errorf("invalid node IP format: %s", nodeIP)
+		}
+		thirdOctet, _ := strconv.Atoi(parts[2])
+		fourthOctet, _ := strconv.Atoi(parts[3])
+		uniqueOctet := (thirdOctet*10+fourthOctet)%200 + 50
+		podCIDR = fmt.Sprintf("10.244.%d.0/24", uniqueOctet)
 	}
-	thirdOctet, _ := strconv.Atoi(parts[2])
-	fourthOctet, _ := strconv.Atoi(parts[3])
-	uniqueOctet := (thirdOctet*10+fourthOctet)%200 + 50
-	podCIDR := fmt.Sprintf("10.244.%d.0/24", uniqueOctet)
 
 	logger.Info("Configuring routing for node", "server", server.Name, "nodeIP", nodeIP, "podCIDR", podCIDR)
 
-	// Configure DC router route
-	if r.DCRouterTailscaleIP != "" {
-		if err := r.configureDCRouterRoute(ctx, nodeIP, podCIDR, cfg); err != nil {
-			logger.Error(err, "Failed to configure DC router route")
+	// For Boulder nodes: configure Tailscale routes on the gateway
+	if server.Spec.Provider == "boulder" && cfg.useTailscaleSSH {
+		if err := r.configureBoulderTailscaleRoutes(ctx, nodeIP, podCIDR); err != nil {
+			logger.Error(err, "Failed to configure Tailscale routes on Boulder gateway")
 			// Continue with other configurations
+		}
+
+		// Configure Azure route for Boulder node's Tailscale IP (needed for kubectl logs/exec)
+		if r.AzureRouteTableName != "" && r.AKSVMResourceGroup != "" {
+			if err := r.configureAzureTailscaleIPRoute(ctx, actualNodeName, nodeIP); err != nil {
+				logger.Error(err, "Failed to configure Azure route for Tailscale IP")
+			}
+		}
+
+		// Configure AKS router route via az vm run-command
+		if r.AKSVMResourceGroup != "" {
+			if err := r.configureAKSRouterRoute(ctx, podCIDR, nodeIP); err != nil {
+				logger.Error(err, "Failed to configure AKS router route")
+			}
+		}
+
+		// Configure DC router route via az vm run-command
+		if r.DCRouterTailscaleIP != "" {
+			if err := r.configureDCRouterRouteViaTailscale(ctx, podCIDR); err != nil {
+				logger.Error(err, "Failed to configure DC router route")
+			}
+		}
+	} else {
+		// For Azure DC workers: configure DC router route via SSH
+		if r.DCRouterTailscaleIP != "" {
+			if err := r.configureDCRouterRoute(ctx, nodeIP, podCIDR, cfg); err != nil {
+				logger.Error(err, "Failed to configure DC router route")
+				// Continue with other configurations
+			}
 		}
 	}
 
-	// Configure Azure route table
+	// Configure Azure route table (same for both Boulder and Azure DC workers)
 	if r.AzureRouteTableName != "" && r.AKSVMResourceGroup != "" {
-		if err := r.configureAzureRouteTable(ctx, server.Name, podCIDR); err != nil {
+		if err := r.configureAzureRouteTable(ctx, actualNodeName, podCIDR); err != nil {
 			logger.Error(err, "Failed to configure Azure route table")
 			// Continue - routing can be fixed manually
 		}
 	}
 
+	return nil
+}
+
+// waitForNodePodCIDR waits for Kubernetes to assign a pod CIDR to the node
+func (r *OperationReconciler) waitForNodePodCIDR(ctx context.Context, nodeName string) (string, error) {
+	logger := log.FromContext(ctx)
+
+	// Wait up to 60 seconds for the node to get a pod CIDR
+	for i := 0; i < 12; i++ {
+		var node corev1.Node
+		if err := r.Get(ctx, client.ObjectKey{Name: nodeName}, &node); err != nil {
+			logger.Info("Waiting for node to be registered", "node", nodeName, "attempt", i+1)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		if node.Spec.PodCIDR != "" {
+			logger.Info("Node pod CIDR assigned", "node", nodeName, "podCIDR", node.Spec.PodCIDR)
+			return node.Spec.PodCIDR, nil
+		}
+
+		logger.Info("Waiting for pod CIDR assignment", "node", nodeName, "attempt", i+1)
+		time.Sleep(5 * time.Second)
+	}
+
+	return "", fmt.Errorf("timeout waiting for pod CIDR assignment for node %s", nodeName)
+}
+
+// configureBoulderTailscaleRoutes adds the pod CIDR to Tailscale advertised routes on the Boulder gateway
+func (r *OperationReconciler) configureBoulderTailscaleRoutes(ctx context.Context, nodeIP, podCIDR string) error {
+	logger := log.FromContext(ctx)
+
+	// The Boulder gateway needs to advertise the pod CIDR
+	// Use tailscale ssh to configure routes on the gateway
+	cmd := exec.CommandContext(ctx, "tailscale", "ssh",
+		fmt.Sprintf("root@%s", nodeIP),
+		"bash", "-c",
+		fmt.Sprintf(`
+			# Get current advertised routes
+			CURRENT_ROUTES=$(tailscale status --json 2>/dev/null | jq -r '.Self.CapMap["https://tailscale.com/cap/subnet-router"]?.Routes // empty | join(",")')
+			
+			# Check if route already exists
+			if echo "$CURRENT_ROUTES" | grep -q "%s"; then
+				echo "Route %s already advertised"
+				exit 0
+			fi
+			
+			# Add new route to existing routes
+			if [ -n "$CURRENT_ROUTES" ]; then
+				NEW_ROUTES="$CURRENT_ROUTES,%s"
+			else
+				NEW_ROUTES="%s"
+			fi
+			
+			# Set the new routes
+			tailscale set --advertise-routes="$NEW_ROUTES"
+			echo "Added route %s to Tailscale advertised routes"
+		`, podCIDR, podCIDR, podCIDR, podCIDR, podCIDR),
+	)
+
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to configure Tailscale routes: %w (output: %s)", err, buf.String())
+	}
+
+	logger.Info("Configured Tailscale routes on Boulder gateway", "nodeIP", nodeIP, "podCIDR", podCIDR, "output", buf.String())
+	return nil
+}
+
+// configureAKSRouterRoute adds a route on the AKS router for the pod CIDR via Tailscale
+func (r *OperationReconciler) configureAKSRouterRoute(ctx context.Context, podCIDR, nodeIP string) error {
+	logger := log.FromContext(ctx)
+
+	// Find the AKS router VM name
+	// Convention: <cluster-name>-router in the MC_* resource group
+	routerVMName := fmt.Sprintf("%s-router", r.AKSClusterName)
+
+	// Use az vm run-command to add route on AKS router
+	cmd := exec.CommandContext(ctx, "az", "vm", "run-command", "invoke",
+		"-g", r.AKSVMResourceGroup,
+		"-n", routerVMName,
+		"--command-id", "RunShellScript",
+		"--scripts", fmt.Sprintf("ip route add %s dev tailscale0 2>/dev/null || ip route replace %s dev tailscale0; ip route | grep %s",
+			podCIDR, podCIDR, strings.Split(podCIDR, "/")[0]),
+		"--query", "value[0].message",
+		"-o", "tsv",
+	)
+
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to configure AKS router route: %w (output: %s)", err, buf.String())
+	}
+
+	logger.Info("Configured AKS router route", "podCIDR", podCIDR, "output", buf.String())
+	return nil
+}
+
+// configureDCRouterRouteViaTailscale adds a route on the DC router via az vm run-command
+func (r *OperationReconciler) configureDCRouterRouteViaTailscale(ctx context.Context, podCIDR string) error {
+	logger := log.FromContext(ctx)
+
+	// Find the DC router VM name
+	// Convention: <cluster-name>-dc-router in the <cluster-name>-dc resource group
+	dcResourceGroup := fmt.Sprintf("%s-dc", r.AKSClusterName)
+	routerVMName := fmt.Sprintf("%s-dc-router", r.AKSClusterName)
+
+	// Use az vm run-command to add route on DC router
+	cmd := exec.CommandContext(ctx, "az", "vm", "run-command", "invoke",
+		"-g", dcResourceGroup,
+		"-n", routerVMName,
+		"--command-id", "RunShellScript",
+		"--scripts", fmt.Sprintf("tailscale set --accept-routes=true; ip route add %s dev tailscale0 2>/dev/null || ip route replace %s dev tailscale0; ip route | grep %s",
+			podCIDR, podCIDR, strings.Split(podCIDR, "/")[0]),
+		"--query", "value[0].message",
+		"-o", "tsv",
+	)
+
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to configure DC router route: %w (output: %s)", err, buf.String())
+	}
+
+	logger.Info("Configured DC router route", "podCIDR", podCIDR, "output", buf.String())
 	return nil
 }
 
@@ -1302,5 +1535,58 @@ func (r *OperationReconciler) configureAzureRouteTable(ctx context.Context, node
 	}
 
 	logger.Info("Created Azure route", "routeName", routeName, "podCIDR", podCIDR, "nextHop", aksRouterIP)
+	return nil
+}
+
+// configureAzureTailscaleIPRoute adds a route in the Azure route table for the Boulder node's Tailscale IP
+// This is needed so that AKS nodes (and Konnectivity agents) can reach the kubelet on the Boulder node
+// enabling kubectl logs, kubectl exec, and other kubelet API operations
+func (r *OperationReconciler) configureAzureTailscaleIPRoute(ctx context.Context, nodeName, tailscaleIP string) error {
+	logger := log.FromContext(ctx)
+
+	// Route name for the Tailscale IP
+	routeName := fmt.Sprintf("%s-tailscale", strings.ReplaceAll(nodeName, "-", ""))
+
+	// Check if route already exists
+	checkCmd := exec.CommandContext(ctx, "az", "network", "route-table", "route", "show",
+		"--resource-group", r.AKSVMResourceGroup,
+		"--route-table-name", r.AzureRouteTableName,
+		"--name", routeName,
+		"--output", "json",
+	)
+	if err := checkCmd.Run(); err == nil {
+		logger.Info("Azure Tailscale IP route already exists", "routeName", routeName)
+		return nil
+	}
+
+	// Add the route - next hop is the AKS router private IP
+	aksRouterIP := r.AKSAPIServerPrivateIP
+	if aksRouterIP == "" {
+		logger.Info("Skipping Azure Tailscale IP route - AKS router IP not configured")
+		return nil
+	}
+
+	// Create a /32 route for the specific Tailscale IP
+	addressPrefix := fmt.Sprintf("%s/32", tailscaleIP)
+
+	addCmd := exec.CommandContext(ctx, "az", "network", "route-table", "route", "create",
+		"--resource-group", r.AKSVMResourceGroup,
+		"--route-table-name", r.AzureRouteTableName,
+		"--name", routeName,
+		"--address-prefix", addressPrefix,
+		"--next-hop-type", "VirtualAppliance",
+		"--next-hop-ip-address", aksRouterIP,
+		"--output", "json",
+	)
+
+	var buf bytes.Buffer
+	addCmd.Stdout = &buf
+	addCmd.Stderr = &buf
+
+	if err := addCmd.Run(); err != nil {
+		return fmt.Errorf("failed to create Azure Tailscale IP route: %w (output: %s)", err, buf.String())
+	}
+
+	logger.Info("Created Azure route for Tailscale IP", "routeName", routeName, "tailscaleIP", tailscaleIP, "nextHop", aksRouterIP)
 	return nil
 }
